@@ -56,6 +56,7 @@ namespace XivMediaPlayer {
 
     // yt-dlp settings
     public int PreferredQuality { get; set; } = 720;
+    public bool EnableSabrProxy { get; set; } = false;
 
     // World screen compositing settings (legacy single placement)
     public MediaPlayerCore.Compositing.WorldScreenTransform WorldScreen { get; set; } = new MediaPlayerCore.Compositing.WorldScreenTransform();

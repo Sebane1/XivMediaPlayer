@@ -230,7 +230,7 @@ namespace XivMediaPlayer
             _config.Initialize(_pluginInterface);
 
             // Initialize yt-dlp manager
-            _ytDlpManager = new YtDlpManager(pluginDir, _config.PreferredQuality);
+            _ytDlpManager = new YtDlpManager(pluginDir, _config.PreferredQuality) { EnableSabrProxy = _config.EnableSabrProxy };
             _ytDlpManager.OnStatusUpdate += (s, msg) => _pluginLog.Info("[yt-dlp] " + msg);
             _ytDlpManager.OnError += (s, ex) => _pluginLog.Warning(ex, "[yt-dlp] " + ex.Message);
 

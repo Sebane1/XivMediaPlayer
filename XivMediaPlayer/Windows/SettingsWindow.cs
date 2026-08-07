@@ -86,7 +86,7 @@ namespace XivMediaPlayer.Windows {
         _plugin.Config.Save();
       }
       if (ImGui.IsItemHovered()) {
-        ImGui.SetTooltip("When enabled, the TV will render undearneath the games user interface. Disable as a last resort to Reshade ruining the UI buffer.");
+        ImGui.SetTooltip("When enabled, the TV will render underneath the games user interface. Disable as a last resort to Reshade ruining the UI buffer.");
       }
 
 
@@ -279,6 +279,17 @@ namespace XivMediaPlayer.Windows {
         _plugin.Config.PreferredQuality = qualityValues[currentQualityIdx];
         _plugin.Config.Save();
       }
+
+      bool sabrProxy = _plugin.Config.EnableSabrProxy;
+      if (ImGui.Checkbox("Enable SABR Proxy (Fixes YouTube playback errors)", ref sabrProxy)) {
+        _plugin.Config.EnableSabrProxy = sabrProxy;
+        if (_plugin.YtDlpManager != null) _plugin.YtDlpManager.EnableSabrProxy = sabrProxy;
+        _plugin.Config.Save();
+      }
+      ImGui.TextColored(new Vector4(0.5f, 0.5f, 0.5f, 1f),
+        "Pipes the stream through a local server to bypass YouTube's new protocol. Note: Seeking/Scrubbing is currently unsupported in this mode.");
+
+      ImGui.Spacing();
 
       ImGui.TextColored(new Vector4(0.5f, 0.5f, 0.5f, 1f),
         "yt-dlp is automatically downloaded and updated.");

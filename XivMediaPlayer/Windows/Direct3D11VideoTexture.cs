@@ -17,7 +17,6 @@ namespace XivMediaPlayer.Windows {
         public int TrueWidth { get; set; }
         public int TrueHeight { get; set; }
         
-        // This is exactly what ImGui.Image and WorldVideoRenderer expect
         public IntPtr ImGuiHandle => _srv != null ? _srv.NativePointer : IntPtr.Zero;
 
         public Direct3D11VideoTexture(int width, int height) {

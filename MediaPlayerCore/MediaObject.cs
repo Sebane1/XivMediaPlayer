@@ -601,7 +601,7 @@ namespace MediaPlayerCore {
                 while (!_trueDimensionsExtracted && _vlcPlayer != null && !_disposed) {
                     uint px = 0, py = 0;
                     if (_vlcPlayer.Size(0, ref px, ref py)) {
-                        if (px > 0 && py > 0) {
+                        if (px > 0 && py > 0 && Math.Abs((long)px - _width) <= 64 && Math.Abs((long)py - _height) <= 64) {
                             _parent.LastFrameTrueWidth = (int)px;
                             _parent.LastFrameTrueHeight = (int)py;
                             _trueDimensionsExtracted = true;
@@ -615,7 +615,7 @@ namespace MediaPlayerCore {
                                 if (track.TrackType == LibVLCSharp.Shared.TrackType.Video) {
                                     int trueWidth = (int)track.Data.Video.Width;
                                     int trueHeight = (int)track.Data.Video.Height;
-                                    if (trueWidth > 0 && trueHeight > 0) {
+                                    if (trueWidth > 0 && trueHeight > 0 && Math.Abs((long)trueWidth - _width) <= 64 && Math.Abs((long)trueHeight - _height) <= 64) {
                                         _parent.LastFrameTrueWidth = trueWidth;
                                         _parent.LastFrameTrueHeight = trueHeight;
                                         _trueDimensionsExtracted = true;

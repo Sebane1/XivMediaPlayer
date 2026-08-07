@@ -54,6 +54,13 @@ namespace MediaPlayerCore.YtDlp
         private TcpListener? _cookieListener;
         private Thread? _cookieListenerThread;
         private bool _isListeningForCookies;
+
+        public bool EnableSabrProxy { get; set; } = false;
+        private HttpListener? _sabrProxyListener;
+        private Thread? _sabrProxyThread;
+        private bool _isProxyListening;
+        private int _proxyPort = 0;
+
         private readonly List<Process> _runningProcesses = new();
 
         public event EventHandler<string>? OnStatusUpdate;
@@ -172,9 +179,11 @@ namespace MediaPlayerCore.YtDlp
         public void Dispose()
         {
             _isListeningForCookies = false;
+            _isProxyListening = false;
             try
             {
                 _cookieListener?.Stop();
+                _sabrProxyListener?.Stop();
             }
             catch { }
 
@@ -222,6 +231,17 @@ namespace MediaPlayerCore.YtDlp
 
             try
             {
+                if (EnableSabrProxy && (url.Contains("youtube.com") || url.Contains("youtu.be")))
+                {
+                    if (_proxyPort == 0) StartProxyListener();
+                    if (_proxyPort != 0)
+                    {
+                        string proxyUrl = $"http://127.0.0.1:{_proxyPort}/play?url={Uri.EscapeDataString(url)}";
+                        OnStatusUpdate?.Invoke(this, "SABR Proxy active. Returning localhost proxy stream URL.");
+                        return new string[] { proxyUrl };
+                    }
+                }
+
                 OnStatusUpdate?.Invoke(this, "Resolving stream URL...");
 
                 string formatArg = _preferredMaxHeight > 0
@@ -409,6 +429,8 @@ namespace MediaPlayerCore.YtDlp
             // Download companion tools if missing
             await EnsureChromeCookieUnlock();
             await EnsureDeno();
+            await EnsureFfmpeg();
+            await EnsureYtsePlugin();
 
             if (IsAvailable())
             {
@@ -676,6 +698,190 @@ namespace MediaPlayerCore.YtDlp
         }
 
 
+
+        private void StartProxyListener()
+        {
+            try
+            {
+                var l = new TcpListener(IPAddress.Loopback, 0);
+                l.Start();
+                _proxyPort = ((IPEndPoint)l.LocalEndpoint).Port;
+                l.Stop();
+
+                _sabrProxyListener = new HttpListener();
+                _sabrProxyListener.Prefixes.Add($"http://127.0.0.1:{_proxyPort}/");
+                _sabrProxyListener.Start();
+                _isProxyListening = true;
+
+                _sabrProxyThread = new Thread(ProxyListenerLoop)
+                {
+                    IsBackground = true,
+                    Name = "VRCVideoCacherSABRProxy"
+                };
+                _sabrProxyThread.Start();
+            }
+            catch (Exception ex)
+            {
+                OnError?.Invoke(this, new Exception("Failed to start SABR proxy listener.", ex));
+            }
+        }
+
+        private void ProxyListenerLoop()
+        {
+            while (_isProxyListening && _sabrProxyListener != null)
+            {
+                try
+                {
+                    var context = _sabrProxyListener.GetContext();
+                    Task.Run(() => HandleProxyRequest(context));
+                }
+                catch (HttpListenerException) { break; }
+                catch (Exception e) { OnError?.Invoke(this, new Exception("SABR proxy error.", e)); }
+            }
+        }
+
+        private void HandleProxyRequest(HttpListenerContext context)
+        {
+            try
+            {
+                string url = context.Request.QueryString["url"] ?? "";
+                if (string.IsNullOrEmpty(url))
+                {
+                    context.Response.StatusCode = 400;
+                    context.Response.Close();
+                    return;
+                }
+
+                context.Response.ContentType = "video/mp4";
+                context.Response.SendChunked = true;
+
+                string formatArg = _preferredMaxHeight > 0
+                  ? $"bv[height<={_preferredMaxHeight}]+ba/b"
+                  : "bv+ba/b";
+
+                // For the SABR proxy, we must supply --ffmpeg-location so yt-dlp uses our downloaded ffmpeg to mux stdout.
+                string ffmpegPath = Path.Combine(PluginDir, "ffmpeg.exe");
+                string ffmpegArg = File.Exists(ffmpegPath) ? $"--ffmpeg-location \"{ffmpegPath}\" " : "";
+
+                string fullArgs = $"{BuildCommonArgs()} {ffmpegArg}-o - -f \"{formatArg}\" --extractor-args \"youtube:formats=sabr\" \"{url}\"";
+
+                var psi = new ProcessStartInfo
+                {
+                    FileName = _ytDlpPath,
+                    Arguments = fullArgs,
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    CreateNoWindow = true
+                };
+
+                using var process = Process.Start(psi);
+                if (process == null) throw new Exception("Failed to start yt-dlp for proxy.");
+
+                lock (_runningProcesses)
+                {
+                    _runningProcesses.Add(process);
+                }
+
+                try
+                {
+                    process.StandardOutput.BaseStream.CopyTo(context.Response.OutputStream);
+                }
+                catch (Exception)
+                {
+                    // Expected when player disconnects
+                }
+
+                try { if (!process.HasExited) process.Kill(true); } catch { }
+
+                lock (_runningProcesses)
+                {
+                    _runningProcesses.Remove(process);
+                }
+            }
+            catch (Exception ex)
+            {
+                OnError?.Invoke(this, new Exception("SABR proxy request failed.", ex));
+            }
+            finally
+            {
+                try { context.Response.Close(); } catch { }
+            }
+        }
+
+        private const string FfmpegZipUrl = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip";
+        private const string YtseZipUrl = "https://github.com/coletdjnz/yt-dlp-ytse/archive/refs/heads/master.zip";
+
+        private async Task EnsureFfmpeg()
+        {
+            string ffmpegPath = Path.Combine(PluginDir, "ffmpeg.exe");
+            if (File.Exists(ffmpegPath)) return;
+
+            string zipPath = Path.Combine(PluginDir, "ffmpeg.zip");
+            await DownloadFile(FfmpegZipUrl, zipPath, "FFmpeg");
+
+            try
+            {
+                using var archive = ZipFile.OpenRead(zipPath);
+                var entry = archive.Entries.FirstOrDefault(e => e.FullName.EndsWith("bin/ffmpeg.exe", StringComparison.OrdinalIgnoreCase));
+                if (entry != null)
+                {
+                    entry.ExtractToFile(ffmpegPath, true);
+                    OnStatusUpdate?.Invoke(this, "FFmpeg extracted successfully.");
+                }
+            }
+            catch (Exception ex)
+            {
+                OnError?.Invoke(this, new Exception("Failed to extract FFmpeg", ex));
+            }
+            finally
+            {
+                if (File.Exists(zipPath)) File.Delete(zipPath);
+            }
+        }
+
+        private async Task EnsureYtsePlugin()
+        {
+            string ytseZipPath = Path.Combine(PluginsDir, "yt-dlp-ytse.zip");
+            if (File.Exists(ytseZipPath)) return;
+
+            Directory.CreateDirectory(PluginsDir);
+            string tempZip = Path.Combine(PluginDir, "ytse-temp.zip");
+            await DownloadFile(YtseZipUrl, tempZip, "yt-dlp-ytse plugin");
+
+            try
+            {
+                if (File.Exists(ytseZipPath)) File.Delete(ytseZipPath);
+                
+                using (var archive = ZipFile.OpenRead(tempZip))
+                using (var newArchive = ZipFile.Open(ytseZipPath, ZipArchiveMode.Create))
+                {
+                    foreach (var entry in archive.Entries)
+                    {
+                        int idx = entry.FullName.IndexOf("yt_dlp_plugins/");
+                        if (idx >= 0)
+                        {
+                            string newName = entry.FullName.Substring(idx);
+                            if (newName.EndsWith("/")) continue; // Skip directories
+                            
+                            var newEntry = newArchive.CreateEntry(newName);
+                            using var a = entry.Open();
+                            using var b = newEntry.Open();
+                            a.CopyTo(b);
+                        }
+                    }
+                }
+                OnStatusUpdate?.Invoke(this, "yt-dlp-ytse plugin installed successfully.");
+            }
+            catch (Exception ex)
+            {
+                OnError?.Invoke(this, new Exception("Failed to extract yt-dlp-ytse plugin", ex));
+            }
+            finally
+            {
+                if (File.Exists(tempZip)) File.Delete(tempZip);
+            }
+        }
 
         #endregion
     }

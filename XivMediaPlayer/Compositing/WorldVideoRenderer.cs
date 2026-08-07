@@ -521,11 +521,11 @@ namespace XivMediaPlayer.Compositing {
         var uvBL = new Vector2(0, uvBottom);
 
       if (videoAspect > 0) {
-        float quadW = Vector2.Distance(sTL, sTR);
-        float quadH = Vector2.Distance(sTL, sBL);
+        float quadW = Vector3.Distance(tl, tr);
+        float quadH = Vector3.Distance(tl, bl);
         float quadAspect = quadH > 0 ? quadW / quadH : 1.0f;
         
-        if (videoAspect > quadAspect) {
+          if (videoAspect > quadAspect) {
               float scale = quadAspect / videoAspect;
               float offset = (1.0f - scale) * 0.5f;
               uvTL.X = offset;
