@@ -1,3 +1,4 @@
+using MediaPlayerCore.YtDlp;
 using NAudio.Wave;
 using System.Collections.Concurrent;
 using System.Diagnostics;
@@ -173,22 +174,38 @@ namespace MediaPlayerCore {
       if (playerObject != null) {
           MediaObject stream = null;
           bool isNew = false;
+          var streamsToDispose = new List<MediaObject>();
           
           lock (_playbackStreams) {
               // Ensure we only ever have ONE active video stream decoding to the LastFrame buffer.
               foreach (var kvp in _playbackStreams.ToList()) {
                   if (kvp.Key != playerObject.Name) {
-                      var oldStream = kvp.Value;
-                      _playbackStreams.TryRemove(kvp.Key, out _);
-                      try { oldStream.Dispose(); } catch { }
+                      if (_playbackStreams.TryRemove(kvp.Key, out var oldStream) && oldStream != null) {
+                          streamsToDispose.Add(oldStream);
+                      }
                   }
               }
 
-              if (!_playbackStreams.TryGetValue(playerObject.Name, out stream)) {
+              if (_playbackStreams.TryGetValue(playerObject.Name, out stream)
+                  && ShouldRecreateStream(stream, audioPath)) {
+                  _playbackStreams.TryRemove(playerObject.Name, out _);
+                  streamsToDispose.Add(stream);
+                  stream = null;
+              }
+
+              if (stream == null) {
                   stream = new MediaObject(this, playerObject, _camera, SoundType.Livestream, audioPath, _libVLCPath, spatialAllowed, audioOnly);
                   _playbackStreams[playerObject.Name] = stream;
                   isNew = true;
               }
+          }
+
+          if (streamsToDispose.Count > 0) {
+              Task.Run(() => {
+                  foreach (var oldStream in streamsToDispose) {
+                      try { oldStream.Dispose(); } catch { }
+                  }
+              });
           }
 
           if (isNew) {
@@ -203,6 +220,24 @@ namespace MediaPlayerCore {
              stream.ChangeVideoStream(audioPath, LastFrameWidth, startTimeMs, httpHeaders, slaveAudioPath);
           }
       }
+    }
+
+    private static bool ShouldRecreateStream(MediaObject stream, string newAudioPath) {
+      if (stream == null || string.IsNullOrEmpty(newAudioPath)) {
+        return false;
+      }
+
+      string currentPath = stream.SoundPath ?? "";
+      if (string.Equals(currentPath, newAudioPath, StringComparison.OrdinalIgnoreCase)) {
+        return false;
+      }
+
+      // Never reuse VLC across SABR local files or when leaving them — ChangeVideoStream deadlocks.
+      if (YtDlpManager.IsSabrLocalFile(currentPath) || YtDlpManager.IsSabrLocalFile(newAudioPath)) {
+        return true;
+      }
+
+      return false;
     }
 
     private void Update() {
@@ -299,18 +334,25 @@ namespace MediaPlayerCore {
 
     public void CleanSounds() {
       try {
+        MediaObject[] allStreamsToDispose;
         lock (_playbackStreams) {
-            var allStreamsToDispose = _playbackStreams.Values.Concat(_deadStreams).ToArray();
-            foreach (var sound in allStreamsToDispose) {
-              if (sound != null) {
-                sound.Invalidated = true;
-                sound.Dispose();
-                sound.OnErrorReceived -= MediaManager_OnErrorReceived;
-              }
-            }
+            allStreamsToDispose = _playbackStreams.Values.Concat(_deadStreams).ToArray();
             _playbackStreams?.Clear();
             _deadStreams.Clear();
         }
+
+        Task.Run(() => {
+            foreach (var sound in allStreamsToDispose) {
+              if (sound != null) {
+                try {
+                  sound.Invalidated = true;
+                  sound.OnErrorReceived -= MediaManager_OnErrorReceived;
+                  sound.Dispose();
+                } catch { }
+              }
+            }
+        });
+
         lock (FrameLock) {
           _lastFrame = Array.Empty<byte>();
           LastFrameWidth = 0;

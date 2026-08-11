@@ -1151,6 +1151,18 @@ namespace XivMediaPlayer
         }
 
         /// <summary>
+        /// Stops VLC/SABR/proxy state before loading a different URL. Must run off the game thread.
+        /// </summary>
+        private async Task TeardownPlaybackForMediaSwitchAsync()
+        {
+            _mediaManager?.StopStream();
+            await Task.Delay(350).ConfigureAwait(false);
+            _ytDlpManager?.ReleaseSabrSessions();
+            MediaPlayerCore.StreamProxy.Instance.ClearSessions();
+            await Task.Delay(100).ConfigureAwait(false);
+        }
+
+        /// <summary>
         /// Retries playback when media loaded but VLC did not start playing automatically.
         /// </summary>
         private void TryEnsurePlaybackStarted(bool force = false)
@@ -1308,37 +1320,52 @@ namespace XivMediaPlayer
             if (urlWithoutQuery.EndsWith(".m3u8", StringComparison.OrdinalIgnoreCase) ||
                 urlWithoutQuery.EndsWith(".mp4", StringComparison.OrdinalIgnoreCase))
             {
-                _lastStreamURL = url;
-                _lastStreamIsLive = urlWithoutQuery.EndsWith(".m3u8", StringComparison.OrdinalIgnoreCase);
-                _lastStreamObject = audioGameObject;
-                _streamURLs = new string[] { url };
-                _videoWindow.IsOpen = _config.DefaultVideoOpen == 0;
-
-                string playUrl = url;
-                if (playUrl.StartsWith("http", StringComparison.OrdinalIgnoreCase))
+                Task.Run(async () =>
                 {
-                    if (urlWithoutQuery.EndsWith(".m3u8", StringComparison.OrdinalIgnoreCase))
+                    await TeardownPlaybackForMediaSwitchAsync().ConfigureAwait(false);
+                    if (resolutionId != _currentResolutionId) return;
+
+                    EnqueueFrameworkAction(() =>
                     {
-                        playUrl = MediaPlayerCore.StreamProxy.Instance.RegisterStream(url, null);
-                    }
-                    else
-                    {
-                        playUrl = MediaPlayerCore.StreamProxy.Instance.RegisterDirectMediaSession(url, null);
-                    }
-                }
+                        if (_disposed || resolutionId != _currentResolutionId) return;
 
-                _mediaManager.PlayStream(audioGameObject, playUrl, _config.SpatialAudioEnabled, startTimeMs, null);
+                        _lastStreamURL = url;
+                        _lastStreamIsLive = urlWithoutQuery.EndsWith(".m3u8", StringComparison.OrdinalIgnoreCase);
+                        _lastStreamObject = audioGameObject;
+                        _streamURLs = new string[] { url };
+                        _videoWindow.IsOpen = _config.DefaultVideoOpen == 0;
 
-                _currentMediaDurationMs = null;
-                _currentStreamer = "Direct Stream";
-                _currentMediaTitle = "Direct Stream";
+                        string playUrl = url;
+                        if (playUrl.StartsWith("http", StringComparison.OrdinalIgnoreCase))
+                        {
+                            if (urlWithoutQuery.EndsWith(".m3u8", StringComparison.OrdinalIgnoreCase))
+                            {
+                                playUrl = MediaPlayerCore.StreamProxy.Instance.RegisterStream(url, null);
+                            }
+                            else
+                            {
+                                playUrl = MediaPlayerCore.StreamProxy.Instance.RegisterDirectMediaSession(url, null);
+                            }
+                        }
 
-                _chat.Print($"[Media Player] Playing direct stream!\r\nUse \"/media video\" to toggle the video feed.\r\nUse \"/media stop\" to stop.");
+                        _mediaManager.PlayStream(audioGameObject, playUrl, _config.SpatialAudioEnabled, startTimeMs, null);
 
-                if (!isAutoSync) _ = PushMediaToServerAsync(isBackgroundSync: false);
-                _streamWasPlaying = true;
-                try { MuteBgm(); } catch (Exception e) { _pluginLog.Warning(e, e.Message); }
-                _isResolvingMedia = false;
+                        _currentMediaDurationMs = null;
+                        _currentStreamer = "Direct Stream";
+                        _currentMediaTitle = "Direct Stream";
+
+                        _chat.Print($"[Media Player] Playing direct stream!\r\nUse \"/media video\" to toggle the video feed.\r\nUse \"/media stop\" to stop.");
+
+                        if (!isAutoSync)
+                        {
+                            _ = PushMediaToServerAsync(isBackgroundSync: false);
+                        }
+
+                        _streamWasPlaying = true;
+                        try { MuteBgm(); } catch (Exception e) { _pluginLog.Warning(e, e.Message); }
+                        _isResolvingMedia = false;
+                    });
+                });
                 return;
             }
 
@@ -1355,6 +1382,9 @@ namespace XivMediaPlayer
                     EnqueueFrameworkAction(() => _chat.Print("[Media Player] Waiting for yt-dlp download/update to finish..."));
                     await _ytDlpInitTask;
                 }
+                if (resolutionId != _currentResolutionId) return;
+
+                await TeardownPlaybackForMediaSwitchAsync().ConfigureAwait(false);
                 if (resolutionId != _currentResolutionId) return;
 
                 try
