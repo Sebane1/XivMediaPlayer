@@ -15,6 +15,8 @@ namespace XivMediaPlayer.Compositing
         private IDalamudTextureWrap _textureWrap;
         private string _lastTitle = "";
         private string _lastStreamer = "";
+        private string _lastLoadingMessage = "";
+        private int _lastLoadingPulseStep = -1;
         private bool _disposed = false;
 
         public unsafe IntPtr TextureHandle
@@ -35,6 +37,8 @@ namespace XivMediaPlayer.Compositing
         public void UpdateText(string title, string streamer)
         {
             if (_disposed) return;
+            _lastLoadingMessage = "";
+            _lastLoadingPulseStep = -1;
             if (title == _lastTitle && streamer == _lastStreamer) return;
 
             _lastTitle = title ?? "";
@@ -101,6 +105,104 @@ namespace XivMediaPlayer.Compositing
                 Marshal.Copy(bmpData.Scan0, rawData, 0, bytes);
 
                 // We can just use the BGRA byte array directly!
+                _textureWrap = _textureProvider.CreateFromRaw(
+                    Dalamud.Interface.Textures.RawImageSpecification.Bgra32(width, height),
+                    rawData);
+            }
+            finally
+            {
+                bmp.UnlockBits(bmpData);
+            }
+        }
+
+        /// <summary>
+        /// Renders a centered loading overlay for the world-space TV.
+        /// </summary>
+        public void UpdateLoadingOverlay(string message, float pulse)
+        {
+            if (_disposed) return;
+
+            message = string.IsNullOrWhiteSpace(message) ? "Loading video..." : message;
+            int pulseStep = (int)(pulse * 24);
+            if (message == _lastLoadingMessage && pulseStep == _lastLoadingPulseStep)
+            {
+                return;
+            }
+
+            _lastLoadingMessage = message;
+            _lastLoadingPulseStep = pulseStep;
+            _lastTitle = "";
+            _lastStreamer = "";
+
+            _textureWrap?.Dispose();
+            _textureWrap = null;
+
+            const int width = 1920;
+            const int height = 1080;
+
+            using var bmp = new Bitmap(width, height, PixelFormat.Format32bppArgb);
+            using var gfx = Graphics.FromImage(bmp);
+
+            gfx.SmoothingMode = SmoothingMode.HighQuality;
+            gfx.PixelOffsetMode = PixelOffsetMode.HighQuality;
+            gfx.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
+            gfx.Clear(Color.Transparent);
+
+            // Dim the full frame so it is obvious the TV is busy.
+            using (var dimBrush = new SolidBrush(Color.FromArgb(170, 0, 0, 0)))
+            {
+                gfx.FillRectangle(dimBrush, 0, 0, width, height);
+            }
+
+            float panelWidth = 920;
+            float panelHeight = 220;
+            float panelX = (width - panelWidth) * 0.5f;
+            float panelY = (height - panelHeight) * 0.5f - 20;
+            using (var panelBrush = new SolidBrush(Color.FromArgb(210, 24, 24, 28)))
+            using (var panelPen = new Pen(Color.FromArgb(180, 255, 255, 255), 2))
+            {
+                gfx.FillRectangle(panelBrush, panelX, panelY, panelWidth, panelHeight);
+                gfx.DrawRectangle(panelPen, panelX, panelY, panelWidth, panelHeight);
+            }
+
+            using var titleFont = new Font("Arial", 54, FontStyle.Bold, GraphicsUnit.Pixel);
+            using var subFont = new Font("Arial", 28, FontStyle.Regular, GraphicsUnit.Pixel);
+            using var textBrush = new SolidBrush(Color.White);
+            using var subBrush = new SolidBrush(Color.FromArgb(220, 210, 210, 210));
+            var centerFormat = new StringFormat
+            {
+                Alignment = StringAlignment.Center,
+                LineAlignment = StringAlignment.Center,
+            };
+
+            var titleRect = new RectangleF(panelX + 24, panelY + 28, panelWidth - 48, 72);
+            var subRect = new RectangleF(panelX + 24, panelY + 96, panelWidth - 48, 40);
+            gfx.DrawString("Loading", titleFont, textBrush, titleRect, centerFormat);
+            gfx.DrawString(message, subFont, subBrush, subRect, centerFormat);
+
+            float barX = panelX + 80;
+            float barY = panelY + panelHeight - 52;
+            float barW = panelWidth - 160;
+            float barH = 12;
+            using (var trackBrush = new SolidBrush(Color.FromArgb(120, 255, 255, 255)))
+            {
+                gfx.FillRectangle(trackBrush, barX, barY, barW, barH);
+            }
+
+            float segmentW = barW * 0.34f;
+            float travel = barW - segmentW;
+            float segX = barX + travel * pulse;
+            using (var fillBrush = new SolidBrush(Color.FromArgb(255, 79, 195, 247)))
+            {
+                gfx.FillRectangle(fillBrush, segX, barY, segmentW, barH);
+            }
+
+            var bmpData = bmp.LockBits(new Rectangle(0, 0, width, height), ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+            try
+            {
+                int bytes = Math.Abs(bmpData.Stride) * bmp.Height;
+                byte[] rawData = new byte[bytes];
+                Marshal.Copy(bmpData.Scan0, rawData, 0, bytes);
                 _textureWrap = _textureProvider.CreateFromRaw(
                     Dalamud.Interface.Textures.RawImageSpecification.Bgra32(width, height),
                     rawData);

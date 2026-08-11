@@ -102,6 +102,38 @@ namespace MediaPlayerCore.YtDlp
         public static bool IsSabrMediaPath(string? path)
             => IsSabrProxyUrl(path) || IsSabrLocalFile(path);
 
+        public readonly struct SabrBufferStatus
+        {
+            public long BufferedBytes { get; init; }
+            public bool IsDownloading { get; init; }
+        }
+
+        public bool TryGetSabrBufferStatus(string? mediaPath, out SabrBufferStatus status)
+        {
+            status = default;
+            if (string.IsNullOrEmpty(mediaPath) || !IsSabrLocalFile(mediaPath))
+            {
+                return false;
+            }
+
+            foreach (SabrSession session in _sabrSessions.Values)
+            {
+                string? output = FindSabrOutputFile(session);
+                if (output != null
+                    && string.Equals(output, mediaPath, StringComparison.OrdinalIgnoreCase))
+                {
+                    status = new SabrBufferStatus
+                    {
+                        BufferedBytes = GetSabrOutputLength(session),
+                        IsDownloading = IsDownloadStillRunning(session),
+                    };
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
         public bool IsSabrDownloadActiveForPath(string? mediaPath)
         {
             if (string.IsNullOrEmpty(mediaPath) || !IsSabrLocalFile(mediaPath))

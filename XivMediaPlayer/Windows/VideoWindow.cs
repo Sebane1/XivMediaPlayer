@@ -165,8 +165,6 @@ namespace XivMediaPlayer.Windows {
         }
         
         if (currentSrv != IntPtr.Zero) {
-          Vector2 p0 = ImGui.GetCursorScreenPos();
-          
           float maxVidWidth = avail.X;
           float maxVidHeight = Math.Max(10f, avail.Y - uiHeight);
 
@@ -190,8 +188,13 @@ namespace XivMediaPlayer.Windows {
               ImGui.SetCursorPosX(ImGui.GetCursorPosX() + offsetX);
           }
 
+          Vector2 p0 = ImGui.GetCursorScreenPos();
           Vector2 imageSize = new Vector2(targetWidth, targetHeight);
             ImGui.Image(currentId, imageSize, new Vector2(0, 0), new Vector2(uvRight, uvBottom));
+
+          if (_plugin.IsMediaLoading) {
+            DrawLoadingOverlay(p0, imageSize);
+          }
 
           if (ImGui.IsItemHovered()) {
               Vector2 mouse = ImGui.GetMousePos();
@@ -204,6 +207,13 @@ namespace XivMediaPlayer.Windows {
               
               _plugin.SendEmulationMouseState(normX, normY, scroll, lmb, rmb);
           }
+        } else if (_plugin?.IsMediaLoading == true) {
+          float maxVidWidth = avail.X;
+          float maxVidHeight = Math.Max(10f, avail.Y - uiHeight);
+          Vector2 p0 = ImGui.GetCursorScreenPos();
+          Vector2 imageSize = new Vector2(maxVidWidth, maxVidHeight);
+          DrawLoadingOverlay(p0, imageSize);
+          ImGui.Dummy(imageSize);
         }
 
         //  Seek Slider (VODs only) 
@@ -491,6 +501,53 @@ namespace XivMediaPlayer.Windows {
         return new Vector2(_videoTexture.Width, _videoTexture.Height);
       }
       return Vector2.Zero;
+    }
+
+    private void DrawLoadingOverlay(Vector2 topLeft, Vector2 size) {
+      if (_plugin == null || size.X <= 0 || size.Y <= 0) return;
+
+      var drawList = ImGui.GetWindowDrawList();
+      var bottomRight = topLeft + size;
+
+      drawList.AddRectFilled(topLeft, bottomRight, 0xD0000000);
+
+      string message = _plugin.MediaLoadingMessage;
+      if (string.IsNullOrWhiteSpace(message)) {
+        message = "Loading video...";
+      }
+
+      var titleSize = ImGui.CalcTextSize("Loading video...");
+      float barWidth = Math.Min(size.X * 0.65f, 320f);
+      float barHeight = 6f;
+      float blockHeight = titleSize.Y + 16f + barHeight;
+      float startY = topLeft.Y + (size.Y - blockHeight) * 0.5f;
+      float centerX = topLeft.X + size.X * 0.5f;
+
+      var msgSize = ImGui.CalcTextSize(message);
+      if (msgSize.X > size.X - 24f) {
+        message = "Buffering video...";
+        msgSize = ImGui.CalcTextSize(message);
+      }
+
+      drawList.AddText(
+        new Vector2(centerX - msgSize.X * 0.5f, startY),
+        0xFFFFFFFF,
+        message);
+
+      float pulse = _plugin.MediaLoadingPulse;
+      float barLeft = centerX - barWidth * 0.5f;
+      float barTop = startY + titleSize.Y + 16f;
+      var barMin = new Vector2(barLeft, barTop);
+      var barMax = new Vector2(barLeft + barWidth, barTop + barHeight);
+      drawList.AddRectFilled(barMin, barMax, 0x55FFFFFF);
+
+      float segmentWidth = barWidth * 0.35f;
+      float travel = barWidth - segmentWidth;
+      float segLeft = barLeft + travel * pulse;
+      drawList.AddRectFilled(
+        new Vector2(segLeft, barTop),
+        new Vector2(segLeft + segmentWidth, barTop + barHeight),
+        0xFF4FC3F7);
     }
   }
 }

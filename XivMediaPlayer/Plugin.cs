@@ -231,7 +231,14 @@ namespace XivMediaPlayer
 
             // Initialize yt-dlp manager
             _ytDlpManager = new YtDlpManager(pluginDir, _config.PreferredQuality) { EnableSabrProxy = _config.EnableSabrProxy };
-            _ytDlpManager.OnStatusUpdate += (s, msg) => _pluginLog.Info("[yt-dlp] " + msg);
+            _ytDlpManager.OnStatusUpdate += (s, msg) =>
+            {
+                _pluginLog.Info("[yt-dlp] " + msg);
+                if (IsYtDlpLoadingMessage(msg))
+                {
+                    _mediaLoadingMessage = msg;
+                }
+            };
             _ytDlpManager.OnError += (s, ex) =>
             {
                 _pluginLog.Warning(ex, "[yt-dlp] " + ex.Message);
@@ -1015,10 +1022,102 @@ namespace XivMediaPlayer
         }
 
         private bool _isResolvingMedia = false;
+        private string _mediaLoadingMessage = "";
         private Guid _currentResolutionId = Guid.Empty;
         private bool _lastStreamIsLive = false;
         private bool _isIntentionallyPaused = false;
         private DateTime _lastUrlLoadTime = DateTime.MinValue;
+
+        /// <summary>
+        /// True while yt-dlp is resolving or VLC has not produced the first video frame yet.
+        /// </summary>
+        public bool IsMediaLoading => ComputeIsMediaLoading();
+
+        /// <summary>
+        /// Human-readable buffering status for the loading overlay.
+        /// </summary>
+        public string MediaLoadingMessage => GetMediaLoadingMessage();
+
+        /// <summary>
+        /// Animated 0–1 value for an indeterminate loading bar.
+        /// </summary>
+        public float MediaLoadingPulse
+            => (float)((Environment.TickCount64 % 2000) / 2000.0);
+
+        private static bool IsYtDlpLoadingMessage(string msg)
+        {
+            return msg.Contains("buffer", StringComparison.OrdinalIgnoreCase)
+                || msg.Contains("SABR", StringComparison.OrdinalIgnoreCase)
+                || msg.Contains("Resolving", StringComparison.OrdinalIgnoreCase)
+                || msg.Contains("Preparing", StringComparison.OrdinalIgnoreCase)
+                || msg.Contains("Downloading", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private bool ComputeIsMediaLoading()
+        {
+            if (_isResolvingMedia)
+            {
+                return true;
+            }
+
+            if (_mediaManager == null)
+            {
+                return false;
+            }
+
+            bool hasFrames;
+            lock (_mediaManager.FrameLock)
+            {
+                hasFrames = _mediaManager.LastFrameWidth > 0
+                    && _mediaManager.LastFrame != null
+                    && _mediaManager.LastFrame.Length > 0;
+            }
+
+            if (hasFrames)
+            {
+                return false;
+            }
+
+            var activeStream = _mediaManager.ActiveStream;
+            if (activeStream == null)
+            {
+                return false;
+            }
+
+            if (activeStream.PlaybackState == NAudio.Wave.PlaybackState.Stopped && !_streamWasPlaying)
+            {
+                return false;
+            }
+
+            return true;
+        }
+
+        private string GetMediaLoadingMessage()
+        {
+            if (!string.IsNullOrWhiteSpace(_mediaLoadingMessage))
+            {
+                return _mediaLoadingMessage;
+            }
+
+            var path = _mediaManager?.ActiveStream?.SoundPath;
+            if (_ytDlpManager?.TryGetSabrBufferStatus(path, out var sabrStatus) == true)
+            {
+                double mb = sabrStatus.BufferedBytes / (1024.0 * 1024.0);
+                if (sabrStatus.IsDownloading)
+                {
+                    return mb > 0.01
+                        ? $"Buffering video... {mb:0.#} MB downloaded"
+                        : "Buffering video... starting download";
+                }
+            }
+
+            if (_isResolvingMedia)
+            {
+                return "Preparing video...";
+            }
+
+            return "Loading video...";
+        }
 
         private bool IsUrlSafeForPublic(string url)
         {
@@ -1155,6 +1254,10 @@ namespace XivMediaPlayer
             }
 
             _isResolvingMedia = true;
+            _mediaLoadingMessage = (_config.EnableSabrProxy
+                && (url.Contains("youtube.com") || url.Contains("youtu.be")))
+                ? "Buffering video..."
+                : "Preparing video...";
 
             Task.Run(async () =>
             {
@@ -1495,6 +1598,7 @@ namespace XivMediaPlayer
             _currentMediaDurationMs = null;
             _currentStreamer = "";
             _currentMediaTitle = "";
+            _mediaLoadingMessage = "";
             _videoWindow.IsOpen = false;
             _emulationClient?.Dispose();
             _emulationClient = null;
@@ -2487,7 +2591,9 @@ namespace XivMediaPlayer
                         if (!_screensaverTimer.IsRunning) _screensaverTimer.Start();
                     }
                     
-                    float showScreensaver = (_screensaverTimer.ElapsedMilliseconds > 5000 || (_isResolvingMedia && !isPlaying)) ? 1.0f : 0.0f;
+                    float showScreensaver = (_screensaverTimer.ElapsedMilliseconds > 5000
+                        || (_isResolvingMedia && !isPlaying)
+                        || IsMediaLoading) ? 1.0f : 0.0f;
                     float timeSeconds = (float)(((DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + _serverTimeOffsetMs) / 1000.0) % 864000.0);
 
                     var mousePos = ImGui.GetIO().MousePos;
@@ -2865,7 +2971,14 @@ namespace XivMediaPlayer
                     // Update dynamic 3D text texture
                     if (_titleTextureManager != null)
                     {
-                        _titleTextureManager.UpdateText(_currentMediaTitle, _currentStreamer);
+                        if (IsMediaLoading)
+                        {
+                            _titleTextureManager.UpdateLoadingOverlay(MediaLoadingMessage, MediaLoadingPulse);
+                        }
+                        else
+                        {
+                            _titleTextureManager.UpdateText(_currentMediaTitle, _currentStreamer);
+                        }
                     }
 
                     bool isLocked = CurrentTvPlacement?.IsLocked ?? true;
@@ -2893,6 +3006,11 @@ namespace XivMediaPlayer
                     // (Actually we calculated it at the top of OnDraw, so we don't need to do it again here.)
                     
                     var mainViewport = ImGui.GetMainViewport();
+
+                    if (IsMediaLoading)
+                    {
+                        hoverUV = new System.Numerics.Vector2(0.5f, 0.5f);
+                    }
                     
                     _worldRenderer.Render(videoSrv, videoWidth, videoHeight, videoTrueWidth, videoTrueHeight, _depthCapture, 
                         _prevCameraPos ?? cameraPos, _prevCameraForward ?? cameraForward, _prevCameraRight ?? cameraRight, _prevCameraUp ?? cameraUp, 
