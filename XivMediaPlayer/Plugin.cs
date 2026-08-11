@@ -234,7 +234,7 @@ namespace XivMediaPlayer
             _ytDlpManager.OnStatusUpdate += (s, msg) =>
             {
                 _pluginLog.Info("[yt-dlp] " + msg);
-                if (IsYtDlpLoadingMessage(msg))
+                if (IsYtDlpLoadingMessage(msg) && !_playbackHasRenderedFrames)
                 {
                     _mediaLoadingMessage = msg;
                 }
@@ -480,6 +480,11 @@ namespace XivMediaPlayer
                 {
                     _pluginLog.Error(e, "Failed to initialize media manager");
                 }
+            }
+
+            if (_hasBeenInitialized)
+            {
+                TryEnsurePlaybackStarted();
             }
 
             // Auto-open/close screen placement menu based on Housing Menu state
@@ -990,6 +995,8 @@ namespace XivMediaPlayer
             _videoWindow.IsOpen = _config.DefaultVideoOpen == 0;
             if (_streamURLs.Length > 0)
             {
+                _playbackHasRenderedFrames = false;
+                ResetPlaybackEnsureState();
                 string playUrl = ((int)_videoWindow.FeedType < _streamURLs.Length) ? _streamURLs[(int)_videoWindow.FeedType] : _streamURLs[0];
                 if (playUrl.StartsWith("http", StringComparison.OrdinalIgnoreCase) && !playUrl.Contains("127.0.0.1"))
                 {
@@ -1023,6 +1030,10 @@ namespace XivMediaPlayer
 
         private bool _isResolvingMedia = false;
         private string _mediaLoadingMessage = "";
+        private bool _playbackHasRenderedFrames = false;
+        private int _playbackEnsureAttempts = 0;
+        private DateTime _lastPlaybackEnsureUtc = DateTime.MinValue;
+        private string _playbackEnsureUrl = "";
         private Guid _currentResolutionId = Guid.Empty;
         private bool _lastStreamIsLive = false;
         private bool _isIntentionallyPaused = false;
@@ -1075,6 +1086,19 @@ namespace XivMediaPlayer
 
             if (hasFrames)
             {
+                bool firstFrameThisSession = !_playbackHasRenderedFrames;
+                _playbackHasRenderedFrames = true;
+                _mediaLoadingMessage = "";
+                if (firstFrameThisSession)
+                {
+                    TryEnsurePlaybackStarted(force: true);
+                }
+                return false;
+            }
+
+            // Seek / stream restart can briefly drop frames — don't treat that as initial load.
+            if (_playbackHasRenderedFrames)
+            {
                 return false;
             }
 
@@ -1117,6 +1141,69 @@ namespace XivMediaPlayer
             }
 
             return "Loading video...";
+        }
+
+        private void ResetPlaybackEnsureState()
+        {
+            _playbackEnsureAttempts = 0;
+            _lastPlaybackEnsureUtc = DateTime.MinValue;
+            _playbackEnsureUrl = _lastStreamURL ?? "";
+        }
+
+        /// <summary>
+        /// Retries playback when media loaded but VLC did not start playing automatically.
+        /// </summary>
+        private void TryEnsurePlaybackStarted(bool force = false)
+        {
+            if (_disposed || _isIntentionallyPaused || _isResolvingMedia || !_streamWasPlaying)
+            {
+                return;
+            }
+
+            var activeStream = _mediaManager?.ActiveStream;
+            if (activeStream == null || string.IsNullOrEmpty(_lastStreamURL))
+            {
+                return;
+            }
+
+            if (activeStream.PlaybackState == NAudio.Wave.PlaybackState.Playing)
+            {
+                ResetPlaybackEnsureState();
+                return;
+            }
+
+            var vlcState = activeStream.VlcState;
+            if (!force && (vlcState == LibVLCSharp.Shared.VLCState.Opening || vlcState == LibVLCSharp.Shared.VLCState.Buffering))
+            {
+                return;
+            }
+
+            if (_playbackEnsureUrl != _lastStreamURL)
+            {
+                ResetPlaybackEnsureState();
+            }
+
+            if (!force && (DateTime.UtcNow - _lastPlaybackEnsureUtc).TotalMilliseconds < 1000)
+            {
+                return;
+            }
+
+            if (_playbackEnsureAttempts >= 8)
+            {
+                return;
+            }
+
+            _lastPlaybackEnsureUtc = DateTime.UtcNow;
+            _playbackEnsureAttempts++;
+
+            if (activeStream.EnsurePlaying())
+            {
+                _pluginLog.Information($"[Media Player] Auto-started playback (attempt {_playbackEnsureAttempts}).");
+                if (activeStream.PlaybackState == NAudio.Wave.PlaybackState.Playing)
+                {
+                    ResetPlaybackEnsureState();
+                }
+            }
         }
 
         private bool IsUrlSafeForPublic(string url)
@@ -1213,6 +1300,8 @@ namespace XivMediaPlayer
 
             Guid resolutionId = Guid.NewGuid();
             _currentResolutionId = resolutionId;
+            _playbackHasRenderedFrames = false;
+            ResetPlaybackEnsureState();
 
             // Direct playback for raw feeds (ignore query strings)
             string urlWithoutQuery = url.Split('?')[0];
@@ -1599,6 +1688,8 @@ namespace XivMediaPlayer
             _currentStreamer = "";
             _currentMediaTitle = "";
             _mediaLoadingMessage = "";
+            _playbackHasRenderedFrames = false;
+            ResetPlaybackEnsureState();
             _videoWindow.IsOpen = false;
             _emulationClient?.Dispose();
             _emulationClient = null;

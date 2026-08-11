@@ -17,7 +17,14 @@ namespace XivMediaPlayer.Compositing
         private string _lastStreamer = "";
         private string _lastLoadingMessage = "";
         private int _lastLoadingPulseStep = -1;
+        private DateTime _lastLoadingOverlayRebuildUtc = DateTime.MinValue;
+        private byte[] _loadingRawBuffer = Array.Empty<byte>();
         private bool _disposed = false;
+
+        private const int LoadingOverlayWidth = 960;
+        private const int LoadingOverlayHeight = 540;
+        private const int LoadingPulseSteps = 8;
+        private const double MinLoadingOverlayRebuildMs = 250;
 
         public unsafe IntPtr TextureHandle
         {
@@ -123,22 +130,28 @@ namespace XivMediaPlayer.Compositing
             if (_disposed) return;
 
             message = string.IsNullOrWhiteSpace(message) ? "Loading video..." : message;
-            int pulseStep = (int)(pulse * 24);
-            if (message == _lastLoadingMessage && pulseStep == _lastLoadingPulseStep)
+            int pulseStep = (int)(pulse * LoadingPulseSteps);
+            bool messageChanged = message != _lastLoadingMessage;
+            if (!messageChanged && pulseStep == _lastLoadingPulseStep)
+            {
+                return;
+            }
+
+            // Pulse animates every frame throttle GPU texture rebuilds to avoid OOM.
+            if (!messageChanged
+                && (DateTime.UtcNow - _lastLoadingOverlayRebuildUtc).TotalMilliseconds < MinLoadingOverlayRebuildMs)
             {
                 return;
             }
 
             _lastLoadingMessage = message;
             _lastLoadingPulseStep = pulseStep;
+            _lastLoadingOverlayRebuildUtc = DateTime.UtcNow;
             _lastTitle = "";
             _lastStreamer = "";
 
-            _textureWrap?.Dispose();
-            _textureWrap = null;
-
-            const int width = 1920;
-            const int height = 1080;
+            const int width = LoadingOverlayWidth;
+            const int height = LoadingOverlayHeight;
 
             using var bmp = new Bitmap(width, height, PixelFormat.Format32bppArgb);
             using var gfx = Graphics.FromImage(bmp);
@@ -154,19 +167,19 @@ namespace XivMediaPlayer.Compositing
                 gfx.FillRectangle(dimBrush, 0, 0, width, height);
             }
 
-            float panelWidth = 920;
-            float panelHeight = 220;
+            float panelWidth = 460;
+            float panelHeight = 110;
             float panelX = (width - panelWidth) * 0.5f;
-            float panelY = (height - panelHeight) * 0.5f - 20;
+            float panelY = (height - panelHeight) * 0.5f - 10;
             using (var panelBrush = new SolidBrush(Color.FromArgb(210, 24, 24, 28)))
-            using (var panelPen = new Pen(Color.FromArgb(180, 255, 255, 255), 2))
+            using (var panelPen = new Pen(Color.FromArgb(180, 255, 255, 255), 1))
             {
                 gfx.FillRectangle(panelBrush, panelX, panelY, panelWidth, panelHeight);
                 gfx.DrawRectangle(panelPen, panelX, panelY, panelWidth, panelHeight);
             }
 
-            using var titleFont = new Font("Arial", 54, FontStyle.Bold, GraphicsUnit.Pixel);
-            using var subFont = new Font("Arial", 28, FontStyle.Regular, GraphicsUnit.Pixel);
+            using var titleFont = new Font("Arial", 27, FontStyle.Bold, GraphicsUnit.Pixel);
+            using var subFont = new Font("Arial", 14, FontStyle.Regular, GraphicsUnit.Pixel);
             using var textBrush = new SolidBrush(Color.White);
             using var subBrush = new SolidBrush(Color.FromArgb(220, 210, 210, 210));
             var centerFormat = new StringFormat
@@ -175,15 +188,15 @@ namespace XivMediaPlayer.Compositing
                 LineAlignment = StringAlignment.Center,
             };
 
-            var titleRect = new RectangleF(panelX + 24, panelY + 28, panelWidth - 48, 72);
-            var subRect = new RectangleF(panelX + 24, panelY + 96, panelWidth - 48, 40);
+            var titleRect = new RectangleF(panelX + 12, panelY + 14, panelWidth - 24, 36);
+            var subRect = new RectangleF(panelX + 12, panelY + 48, panelWidth - 24, 20);
             gfx.DrawString("Loading", titleFont, textBrush, titleRect, centerFormat);
             gfx.DrawString(message, subFont, subBrush, subRect, centerFormat);
 
-            float barX = panelX + 80;
-            float barY = panelY + panelHeight - 52;
-            float barW = panelWidth - 160;
-            float barH = 12;
+            float barX = panelX + 40;
+            float barY = panelY + panelHeight - 26;
+            float barW = panelWidth - 80;
+            float barH = 6;
             using (var trackBrush = new SolidBrush(Color.FromArgb(120, 255, 255, 255)))
             {
                 gfx.FillRectangle(trackBrush, barX, barY, barW, barH);
@@ -201,11 +214,26 @@ namespace XivMediaPlayer.Compositing
             try
             {
                 int bytes = Math.Abs(bmpData.Stride) * bmp.Height;
-                byte[] rawData = new byte[bytes];
-                Marshal.Copy(bmpData.Scan0, rawData, 0, bytes);
-                _textureWrap = _textureProvider.CreateFromRaw(
-                    Dalamud.Interface.Textures.RawImageSpecification.Bgra32(width, height),
-                    rawData);
+                if (_loadingRawBuffer.Length != bytes)
+                {
+                    _loadingRawBuffer = new byte[bytes];
+                }
+                Marshal.Copy(bmpData.Scan0, _loadingRawBuffer, 0, bytes);
+
+                IDalamudTextureWrap? newWrap;
+                try
+                {
+                    newWrap = _textureProvider.CreateFromRaw(
+                        Dalamud.Interface.Textures.RawImageSpecification.Bgra32(width, height),
+                        _loadingRawBuffer);
+                }
+                catch (OutOfMemoryException)
+                {
+                    return;
+                }
+
+                _textureWrap?.Dispose();
+                _textureWrap = newWrap;
             }
             finally
             {
@@ -218,6 +246,7 @@ namespace XivMediaPlayer.Compositing
             _disposed = true;
             _textureWrap?.Dispose();
             _textureWrap = null;
+            _loadingRawBuffer = Array.Empty<byte>();
         }
     }
 }

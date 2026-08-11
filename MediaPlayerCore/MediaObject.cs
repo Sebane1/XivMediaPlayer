@@ -193,6 +193,46 @@ namespace MediaPlayerCore {
     public void Resume() {
       _vlcPlayer?.SetPause(false);
     }
+
+    /// <summary>
+    /// Ensures VLC is playing when media is loaded. Safe to call repeatedly.
+    /// </summary>
+    public bool EnsurePlaying() {
+      if (_disposed || _vlcPlayer == null) {
+        return false;
+      }
+
+      try {
+        var state = _vlcPlayer.State;
+        if (state == LibVLCSharp.Shared.VLCState.Playing) {
+          return true;
+        }
+
+        if (state == LibVLCSharp.Shared.VLCState.Paused) {
+          _vlcPlayer.SetPause(false);
+          state = _vlcPlayer.State;
+          return state == LibVLCSharp.Shared.VLCState.Playing
+            || state == LibVLCSharp.Shared.VLCState.Buffering
+            || state == LibVLCSharp.Shared.VLCState.Opening;
+        }
+
+        if (state == LibVLCSharp.Shared.VLCState.Stopped
+            || state == LibVLCSharp.Shared.VLCState.Ended
+            || state == LibVLCSharp.Shared.VLCState.Error) {
+          bool playResult = _vlcPlayer.Play();
+          state = _vlcPlayer.State;
+          return playResult && (state == LibVLCSharp.Shared.VLCState.Playing
+            || state == LibVLCSharp.Shared.VLCState.Buffering
+            || state == LibVLCSharp.Shared.VLCState.Opening);
+        }
+
+        return state == LibVLCSharp.Shared.VLCState.Opening
+          || state == LibVLCSharp.Shared.VLCState.Buffering;
+      } catch {
+        return false;
+      }
+    }
+
     public SoundType SoundType { get => _soundType; set => _soundType = value; }
     public string SoundPath { get => _soundPath; set => _soundPath = value; }
     public IMediaGameObject Camera { get => _camera; set => _camera = value; }
@@ -379,6 +419,12 @@ namespace MediaPlayerCore {
               };
 
               bool playResult = _vlcPlayer.Play();
+              if (!playResult) {
+                await Task.Delay(750);
+                if (_vlcPlayer != null && !_disposed) {
+                  playResult = _vlcPlayer.Play();
+                }
+              }
               Debug.WriteLine($"[MediaObject] VLC Play() returned: {playResult}");
               _vlcWasAbleToStart = playResult;
 
@@ -497,7 +543,16 @@ namespace MediaPlayerCore {
             };
             _vlcPlayer.Playing += playingHandler;
 
-            _vlcPlayer.Play();
+            bool playResult = _vlcPlayer.Play();
+            if (!playResult) {
+              await Task.Delay(750);
+              if (!_disposed && _vlcPlayer != null) {
+                playResult = _vlcPlayer.Play();
+              }
+            }
+            if (!playResult) {
+              OnErrorReceived?.Invoke(this, new MediaError() { Exception = new Exception("VLC Play() returned false after stream change.") });
+            }
           }
         } catch (Exception e) { OnErrorReceived?.Invoke(this, new MediaError() { Exception = e }); }
       });
