@@ -856,7 +856,7 @@ namespace MediaPlayerCore.YtDlp
                 args += $"--js-runtimes deno:{QuotedYtDlpPath(DenoExecutablePath)} ";
             }
 
-            args += "--remote-components ejs:github --socket-timeout 30 --no-part --merge-output-format mkv ";
+            args += "--remote-components ejs:github --socket-timeout 30 --no-part --merge-output-format mkv --embed-metadata ";
 
             if (!string.IsNullOrEmpty(CookieBrowser))
             {
@@ -882,36 +882,27 @@ namespace MediaPlayerCore.YtDlp
             return args;
         }
 
+        private static string GetSabrMergedOutputPath(SabrSession session)
+            => Path.Combine(session.TempDir, "stream.mkv");
+
         private static string? FindSabrOutputFile(SabrSession session)
         {
-            if (!string.IsNullOrEmpty(session.TempPath) && File.Exists(session.TempPath))
+            // Only serve the ffmpeg-merged output — not separate stream.f###.mkv video fragments.
+            string merged = GetSabrMergedOutputPath(session);
+            if (File.Exists(merged) && new FileInfo(merged).Length > 0)
             {
-                return session.TempPath;
+                return merged;
             }
 
-            if (!Directory.Exists(session.TempDir)) return null;
-
-            string expectedMerged = Path.Combine(session.TempDir, "stream.mkv");
-            if (File.Exists(expectedMerged)) return expectedMerged;
-
-            string? mkv = Directory.GetFiles(session.TempDir, "*.mkv")
-                .OrderByDescending(f => new FileInfo(f).Length)
-                .FirstOrDefault();
-            if (mkv != null) return mkv;
-
-            return Directory.GetFiles(session.TempDir)
-                .Where(f => !f.EndsWith(".part", StringComparison.OrdinalIgnoreCase)
-                    && !f.EndsWith(".ytdl", StringComparison.OrdinalIgnoreCase))
-                .OrderByDescending(f => new FileInfo(f).Length)
-                .FirstOrDefault();
+            return null;
         }
 
         private static long GetSabrOutputLength(SabrSession session)
         {
-            string? path = FindSabrOutputFile(session);
-            if (path == null) return 0;
-            session.TempPath = path;
-            try { return new FileInfo(path).Length; }
+            string merged = GetSabrMergedOutputPath(session);
+            if (!File.Exists(merged)) return 0;
+            session.TempPath = merged;
+            try { return new FileInfo(merged).Length; }
             catch { return 0; }
         }
 
@@ -1056,12 +1047,13 @@ namespace MediaPlayerCore.YtDlp
 
         private bool WaitForSabrData(SabrSession session, int timeoutMs = 90000)
         {
+            const long minMergedBytes = 262144; // wait for muxed mkv, not a video-only fragment
             var deadline = Environment.TickCount64 + timeoutMs;
             while (Environment.TickCount64 < deadline)
             {
                 if (session.Failed) return false;
 
-                if (GetSabrOutputLength(session) >= 65536) return true;
+                if (GetSabrOutputLength(session) >= minMergedBytes) return true;
 
                 if (session.Process?.HasExited == true)
                 {
