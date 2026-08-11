@@ -164,12 +164,15 @@ namespace MediaPlayerCore {
       set {
         if (_vlcPlayer != null) {
           try {
-            bool isSabrProxy = YtDlpManager.IsSabrProxyUrl(_soundPath);
-            if (!isSabrProxy
-                && !_vlcPlayer.IsSeekable
-                && _vlcPlayer.State == LibVLCSharp.Shared.VLCState.Playing)
+            if (!_vlcPlayer.IsSeekable && _vlcPlayer.State == LibVLCSharp.Shared.VLCState.Playing)
             {
-                return; // Cannot seek, ignore request to prevent stream crash
+              if (YtDlpManager.IsSabrLocalFile(_soundPath))
+              {
+                ChangeVideoStream(_soundPath, _width, (int)value);
+                return;
+              }
+
+              return; // Cannot seek, ignore request to prevent stream crash
             }
           } catch {}
 
@@ -208,11 +211,28 @@ namespace MediaPlayerCore {
       Invalidated = true;
     }
 
+    private static bool NeedsVideoCallbacks(string mediaPath, bool audioOnly)
+    {
+      if (audioOnly) return false;
+      return mediaPath.StartsWith("http", StringComparison.OrdinalIgnoreCase)
+        || mediaPath.StartsWith("rtmp", StringComparison.OrdinalIgnoreCase)
+        || mediaPath.StartsWith("rtsp", StringComparison.OrdinalIgnoreCase)
+        || mediaPath.EndsWith(".mp4", StringComparison.OrdinalIgnoreCase)
+        || mediaPath.EndsWith(".avi", StringComparison.OrdinalIgnoreCase)
+        || mediaPath.EndsWith(".mkv", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsNetworkMediaPath(string mediaPath)
+      => mediaPath.StartsWith("http", StringComparison.OrdinalIgnoreCase)
+        || mediaPath.StartsWith("rtmp", StringComparison.OrdinalIgnoreCase)
+        || mediaPath.StartsWith("rtsp", StringComparison.OrdinalIgnoreCase);
+
     public void Play(string mediaPath, float volume, int startTimeMs, Dictionary<string, string>? httpHeaders, string? slaveAudioPath = null) {
       Task.Run(async delegate {
         try {
           if (!string.IsNullOrEmpty(mediaPath) && PlaybackState == PlaybackState.Stopped) {
             try {
+              _soundPath = mediaPath;
               lock (_parent.FrameLock) {
                 _parent.LastFrame = Array.Empty<byte>();
                 _parent.LastFrameWidth = 0;
@@ -245,7 +265,7 @@ namespace MediaPlayerCore {
                 }
               };
 
-              var media = new Media(libVLC, mediaPath, mediaPath.StartsWith("http") || mediaPath.StartsWith("rtmp") || mediaPath.StartsWith("rtsp")
+              var media = new Media(libVLC, mediaPath, IsNetworkMediaPath(mediaPath)
                 ? FromType.FromLocation : FromType.FromPath);
               
               if (_audioOnly) {
@@ -264,6 +284,8 @@ namespace MediaPlayerCore {
                       media.AddOption(":drop-late-frames");
                       media.AddOption(":skip-frames");
                   }
+              } else if (YtDlpManager.IsSabrLocalFile(mediaPath)) {
+                  media.AddOption(":file-caching=3000");
               } else if (YtDlpManager.IsSabrProxyUrl(mediaPath)) {
                   media.AddOption(":network-caching=5000");
               } else {
@@ -285,7 +307,7 @@ namespace MediaPlayerCore {
               }
 
               Debug.WriteLine("[MediaObject] Parsing media...");
-              await media.Parse(mediaPath.StartsWith("http") || mediaPath.StartsWith("rtmp") || mediaPath.StartsWith("rtsp")
+              await media.Parse(IsNetworkMediaPath(mediaPath)
                 ? MediaParseOptions.ParseNetwork : MediaParseOptions.ParseLocal);
               Debug.WriteLine($"[MediaObject] Media parsed. Duration: {media.Duration}ms");
               
@@ -348,7 +370,7 @@ namespace MediaPlayerCore {
                   Debug.WriteLine("[MediaObject] VLC EncounteredError event fired!");
                   OnErrorReceived?.Invoke(this, new MediaError() { Exception = new Exception("VLC player encountered an error during playback.") });
                 };
-                if (!_audioOnly && (mediaPath.StartsWith("http") || mediaPath.StartsWith("rtmp") || mediaPath.StartsWith("rtsp") || mediaPath.EndsWith(".mp4") || mediaPath.EndsWith(".avi"))) {
+                if (NeedsVideoCallbacks(mediaPath, _audioOnly)) {
                     _vlcPlayer.SetVideoFormatCallbacks(VideoFormatSetup, null);
                     _vlcPlayer.SetVideoCallbacks(Lock, null, Display);
                 }
@@ -399,7 +421,8 @@ namespace MediaPlayerCore {
       Task.Run(async delegate {
         try {
           if (_vlcPlayer != null) {
-            var media = new Media(libVLC, soundPath, soundPath.StartsWith("http") || soundPath.StartsWith("rtmp") || soundPath.StartsWith("rtsp")
+            _soundPath = soundPath;
+            var media = new Media(libVLC, soundPath, IsNetworkMediaPath(soundPath)
                      ? FromType.FromLocation : FromType.FromPath);
             
             if (_audioOnly) {
@@ -414,6 +437,8 @@ namespace MediaPlayerCore {
                 media.AddOption(":clock-jitter=0");
                 media.AddOption(":drop-late-frames");
                 media.AddOption(":skip-frames");
+            } else if (YtDlpManager.IsSabrLocalFile(soundPath)) {
+                media.AddOption(":file-caching=3000");
             } else if (YtDlpManager.IsSabrProxyUrl(soundPath)) {
                 media.AddOption(":network-caching=5000");
             } else {
@@ -427,7 +452,7 @@ namespace MediaPlayerCore {
             string userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
             if (httpHeaders != null && httpHeaders.TryGetValue("User-Agent", out string mediaUserAgent)) {
                 media.AddOption($":http-user-agent={mediaUserAgent}");
-            } else {
+            } else if (IsNetworkMediaPath(soundPath)) {
                 media.AddOption($":http-user-agent={userAgent}");
             }
 
@@ -435,7 +460,7 @@ namespace MediaPlayerCore {
                 media.AddOption($":http-referrer={mediaReferer}");
             }
 
-            await media.Parse(soundPath.StartsWith("http") || soundPath.StartsWith("rtmp") || soundPath.StartsWith("rtsp")
+            await media.Parse(IsNetworkMediaPath(soundPath)
               ? MediaParseOptions.ParseNetwork : MediaParseOptions.ParseLocal);
             
             MediaPlayer playerToStop = null;
@@ -463,6 +488,10 @@ namespace MediaPlayerCore {
                 if (_vlcPlayer != null) {
                     _trueDimensionsExtracted = false;
                     _vlcPlayer.Media = media;
+                    if (NeedsVideoCallbacks(soundPath, _audioOnly)) {
+                        _vlcPlayer.SetVideoFormatCallbacks(VideoFormatSetup, null);
+                        _vlcPlayer.SetVideoCallbacks(Lock, null, Display);
+                    }
                 }
             }
 

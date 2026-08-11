@@ -293,7 +293,7 @@ namespace XivMediaPlayer.Windows {
         _plugin.Config.Save();
       }
       ImGui.TextColored(new Vector4(0.5f, 0.5f, 0.5f, 1f),
-        "Pipes YouTube through a local yt-dlp SABR proxy. Requires cookies for most videos. Seeking may wait until that part of the video has downloaded.");
+        "Pipes YouTube through a local yt-dlp SABR download. Requires cookies for most videos. Playback uses a buffered local file for reliable video and seeking.");
 
       ImGui.Spacing();
 

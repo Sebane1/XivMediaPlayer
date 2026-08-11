@@ -119,13 +119,13 @@ namespace MediaPlayerCore {
         }
     }
 
-    public void ChangeStream(IMediaGameObject playerObject, string audioPath, float width, string? slaveAudioPath = null) {
+    public void ChangeStream(IMediaGameObject playerObject, string audioPath, float width, int startTimeMs = 0, string? slaveAudioPath = null) {
       Task.Run(() => {
         try {
           OnNewMediaTriggered?.Invoke(this, EventArgs.Empty);
           if (!string.IsNullOrEmpty(audioPath)) {
             if (_playbackStreams.ContainsKey(playerObject.Name)) {
-              _playbackStreams[playerObject.Name].ChangeVideoStream(audioPath, width);
+              _playbackStreams[playerObject.Name].ChangeVideoStream(audioPath, width, startTimeMs, null, slaveAudioPath);
             }
           }
         } catch (Exception e) {

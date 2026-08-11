@@ -1170,83 +1170,108 @@ namespace XivMediaPlayer
                     _lastStreamURL = url; // Save the original requested URL so PushMediaToServerAsync pushes it instead of the raw .m3u8
 
                     // Metadata fetch runs a second yt-dlp process and can trigger bot checks alongside SABR.
-                    // Use lightweight metadata for SABR so duration/title are available for seeking UI.
+                    // For SABR, fetch metadata first then start download — concurrent yt-dlp processes
+                    // fight over browser cookies and can kill long downloads.
                     bool isYouTubeSabr = _config.EnableSabrProxy
                         && (url.Contains("youtube.com") || url.Contains("youtu.be"));
-                    Task<YtDlpMetadata?> metadataTask = isYouTubeSabr
-                        ? _ytDlpManager.GetLightMetadata(url)
-                        : _ytDlpManager.GetMetadata(url);
-                    var resolveTask = _ytDlpManager.ResolveStreamUrl(url);
+
+                    MediaPlayerCore.YtDlp.YtDlpMetadata? metadata = null;
+                    string[]? streamUrls = null;
+
+                    if (isYouTubeSabr)
+                    {
+                        // Start SABR download immediately — do not run a second yt-dlp for metadata
+                        // in parallel; duration is read from VLC once the stream is parsed.
+                        try
+                        {
+                            streamUrls = await _ytDlpManager.ResolveStreamUrl(url);
+                            if (resolutionId != _currentResolutionId) return;
+                        }
+                        catch (Exception resolveEx)
+                        {
+                            _pluginLog.Warning(resolveEx, "[yt-dlp] Failed to resolve stream URL.");
+                            string errorStr = resolveEx.ToString();
+
+                            if (errorStr.Contains("Sign in to confirm", StringComparison.OrdinalIgnoreCase))
+                            {
+                                EnqueueFrameworkAction(() => _chat.PrintError("[Media Player] YouTube blocked the request (bot check). Please configure cookies via VRCVideoCacher or cookies.txt to play YouTube videos!"));
+                                return;
+                            }
+                        }
+                    }
+                    else
+                    {
+                        Task<YtDlpMetadata?> metadataTask = _ytDlpManager.GetMetadata(url);
+                        var resolveTask = _ytDlpManager.ResolveStreamUrl(url);
+
+                        try
+                        {
+                            streamUrls = await resolveTask;
+                            if (resolutionId != _currentResolutionId) return;
+                        }
+                        catch (Exception resolveEx)
+                        {
+                            _pluginLog.Warning(resolveEx, "[yt-dlp] Failed to resolve stream URL.");
+                            string errorStr = resolveEx.ToString();
+                        
+                            if (errorStr.Contains("Sign in to confirm", StringComparison.OrdinalIgnoreCase))
+                            {
+                                EnqueueFrameworkAction(() => _chat.PrintError("[Media Player] YouTube blocked the request (bot check). Please configure cookies via VRCVideoCacher or cookies.txt to play YouTube videos!"));
+                                return;
+                            }
+
+                            if ((url.Contains("youtube.com") || url.Contains("youtu.be"))
+                                && !_config.EnableSabrProxy
+                                && (errorStr.Contains("Requested format is not available", StringComparison.OrdinalIgnoreCase)
+                                    || errorStr.Contains("Only images are available", StringComparison.OrdinalIgnoreCase)
+                                    || errorStr.Contains("SABR", StringComparison.OrdinalIgnoreCase)))
+                            {
+                                EnqueueFrameworkAction(() => _chat.PrintError("[Media Player] YouTube may require SABR mode. Enable \"SABR Proxy\" in Media Player settings and try again."));
+                                return;
+                            }
+                        
+                            if (errorStr.Contains("Unsupported URL", StringComparison.OrdinalIgnoreCase) || errorStr.Contains("HTTP Error 403", StringComparison.OrdinalIgnoreCase))
+                            {
+                                MediaPlayerCore.YtDlp.YtDlpManager.MarkUrlAsFailed(url);
+                            }
+                        }
+
+                        try
+                        {
+                            metadata = await metadataTask;
+                        }
+                        catch (Exception metadataEx)
+                        {
+                            _pluginLog.Warning(metadataEx, "[yt-dlp] Failed to get metadata.");
+                            string errorStr = metadataEx.ToString();
+                        
+                            if (errorStr.Contains("Sign in to confirm", StringComparison.OrdinalIgnoreCase))
+                            {
+                                EnqueueFrameworkAction(() => _chat.PrintError("[Media Player] YouTube blocked the request (bot check). Please configure cookies via VRCVideoCacher or cookies.txt to play YouTube videos!"));
+                                return;
+                            }
+
+                            if ((url.Contains("youtube.com") || url.Contains("youtu.be"))
+                                && !_config.EnableSabrProxy
+                                && (errorStr.Contains("Requested format is not available", StringComparison.OrdinalIgnoreCase)
+                                    || errorStr.Contains("Only images are available", StringComparison.OrdinalIgnoreCase)
+                                    || errorStr.Contains("SABR", StringComparison.OrdinalIgnoreCase)))
+                            {
+                                EnqueueFrameworkAction(() => _chat.PrintError("[Media Player] YouTube may require SABR mode. Enable \"SABR Proxy\" in Media Player settings and try again."));
+                                return;
+                            }
+                        
+                            if (errorStr.Contains("Unsupported URL", StringComparison.OrdinalIgnoreCase) || errorStr.Contains("HTTP Error 403", StringComparison.OrdinalIgnoreCase))
+                            {
+                                MediaPlayerCore.YtDlp.YtDlpManager.MarkUrlAsFailed(url);
+                            }
+                        }
+                    }
 
                     if (!Uri.TryCreate(url, UriKind.Absolute, out _))
                     {
                         _pluginLog.Warning($"[Media Player] Invalid stream URL rejected: {url}");
                         return;
-                    }
-
-                    string[]? streamUrls = null;
-                    try
-                    {
-                        streamUrls = await resolveTask;
-                        if (resolutionId != _currentResolutionId) return;
-                    }
-                    catch (Exception resolveEx)
-                    {
-                        _pluginLog.Warning(resolveEx, "[yt-dlp] Failed to resolve stream URL.");
-                        string errorStr = resolveEx.ToString();
-                        
-                        if (errorStr.Contains("Sign in to confirm", StringComparison.OrdinalIgnoreCase))
-                        {
-                            EnqueueFrameworkAction(() => _chat.PrintError("[Media Player] YouTube blocked the request (bot check). Please configure cookies via VRCVideoCacher or cookies.txt to play YouTube videos!"));
-                            return;
-                        }
-
-                        if ((url.Contains("youtube.com") || url.Contains("youtu.be"))
-                            && !_config.EnableSabrProxy
-                            && (errorStr.Contains("Requested format is not available", StringComparison.OrdinalIgnoreCase)
-                                || errorStr.Contains("Only images are available", StringComparison.OrdinalIgnoreCase)
-                                || errorStr.Contains("SABR", StringComparison.OrdinalIgnoreCase)))
-                        {
-                            EnqueueFrameworkAction(() => _chat.PrintError("[Media Player] YouTube may require SABR mode. Enable \"SABR Proxy\" in Media Player settings and try again."));
-                            return;
-                        }
-                        
-                        if (errorStr.Contains("Unsupported URL", StringComparison.OrdinalIgnoreCase) || errorStr.Contains("HTTP Error 403", StringComparison.OrdinalIgnoreCase))
-                        {
-                            MediaPlayerCore.YtDlp.YtDlpManager.MarkUrlAsFailed(url);
-                        }
-                    }
-
-                    MediaPlayerCore.YtDlp.YtDlpMetadata? metadata = null;
-                    try
-                    {
-                        metadata = await metadataTask;
-                    }
-                    catch (Exception metadataEx)
-                    {
-                        _pluginLog.Warning(metadataEx, "[yt-dlp] Failed to get metadata.");
-                        string errorStr = metadataEx.ToString();
-                        
-                        if (errorStr.Contains("Sign in to confirm", StringComparison.OrdinalIgnoreCase))
-                        {
-                            EnqueueFrameworkAction(() => _chat.PrintError("[Media Player] YouTube blocked the request (bot check). Please configure cookies via VRCVideoCacher or cookies.txt to play YouTube videos!"));
-                            return;
-                        }
-
-                        if ((url.Contains("youtube.com") || url.Contains("youtu.be"))
-                            && !_config.EnableSabrProxy
-                            && (errorStr.Contains("Requested format is not available", StringComparison.OrdinalIgnoreCase)
-                                || errorStr.Contains("Only images are available", StringComparison.OrdinalIgnoreCase)
-                                || errorStr.Contains("SABR", StringComparison.OrdinalIgnoreCase)))
-                        {
-                            EnqueueFrameworkAction(() => _chat.PrintError("[Media Player] YouTube may require SABR mode. Enable \"SABR Proxy\" in Media Player settings and try again."));
-                            return;
-                        }
-                        
-                        if (errorStr.Contains("Unsupported URL", StringComparison.OrdinalIgnoreCase) || errorStr.Contains("HTTP Error 403", StringComparison.OrdinalIgnoreCase))
-                        {
-                            MediaPlayerCore.YtDlp.YtDlpManager.MarkUrlAsFailed(url);
-                        }
                     }
 
                     if (streamUrls == null || streamUrls.Length == 0 || string.IsNullOrEmpty(streamUrls[0]))
@@ -1432,6 +1457,18 @@ namespace XivMediaPlayer
         private void _mediaManager_OnPlaybackFinished(object? sender, string e)
         {
             PrintVerbose("[Media Player] Playback finished.");
+
+            var activeStream = _mediaManager?.ActiveStream;
+            string? sabrPath = activeStream?.SoundPath;
+            if (_ytDlpManager?.IsSabrDownloadActiveForPath(sabrPath) == true
+                && _lastStreamObject != null
+                && activeStream != null)
+            {
+                _pluginLog.Information("[SABR] Buffer end reached while still downloading; resuming playback.");
+                long resumeMs = activeStream.Time;
+                _mediaManager.ChangeStream(_lastStreamObject, sabrPath!, _videoWindow.Size.Value.X, (int)resumeMs);
+                return;
+            }
 
             if (!string.IsNullOrEmpty(_lastStreamURL))
             {

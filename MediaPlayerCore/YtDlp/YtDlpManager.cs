@@ -92,6 +92,36 @@ namespace MediaPlayerCore.YtDlp
                 && url.Contains("/stream/", StringComparison.OrdinalIgnoreCase);
         }
 
+        public static bool IsSabrLocalFile(string? path)
+        {
+            return !string.IsNullOrEmpty(path)
+                && path.Contains("xivmp-sabr-", StringComparison.OrdinalIgnoreCase)
+                && path.EndsWith(".mkv", StringComparison.OrdinalIgnoreCase);
+        }
+
+        public static bool IsSabrMediaPath(string? path)
+            => IsSabrProxyUrl(path) || IsSabrLocalFile(path);
+
+        public bool IsSabrDownloadActiveForPath(string? mediaPath)
+        {
+            if (string.IsNullOrEmpty(mediaPath) || !IsSabrLocalFile(mediaPath))
+            {
+                return false;
+            }
+
+            foreach (SabrSession session in _sabrSessions.Values)
+            {
+                string? output = FindSabrOutputFile(session);
+                if (output != null
+                    && string.Equals(output, mediaPath, StringComparison.OrdinalIgnoreCase))
+                {
+                    return IsDownloadStillRunning(session);
+                }
+            }
+
+            return false;
+        }
+
         /// <summary>
         /// Stops and removes all active SABR download sessions.
         /// </summary>
@@ -285,6 +315,24 @@ namespace MediaPlayerCore.YtDlp
                 || errorText.Contains("Sign in to confirm", StringComparison.OrdinalIgnoreCase);
         }
 
+        private async Task<string[]?> TryResolveSabrLocalPlayUrl(SabrSession session)
+        {
+            if (session.Failed && GetSabrOutputLength(session) == 0)
+            {
+                return null;
+            }
+
+            bool ready = await Task.Run(() => WaitForSabrData(session));
+            string? localPath = FindSabrOutputFile(session);
+            if (localPath == null || !ready)
+            {
+                return null;
+            }
+
+            OnStatusUpdate?.Invoke(this, "SABR buffer ready. Playing from local file.");
+            return new string[] { localPath };
+        }
+
         /// <summary>
         /// Resolves a URL to a direct stream URL suitable for VLC playback.
         /// Returns null if resolution fails.
@@ -312,9 +360,12 @@ namespace MediaPlayerCore.YtDlp
                         if (existing != null)
                         {
                             existing.LastAccessUtc = DateTime.UtcNow;
-                            string reuseUrl = $"http://127.0.0.1:{_proxyPort}/stream/{existing.Id}";
-                            OnStatusUpdate?.Invoke(this, "SABR Proxy reusing active download.");
-                            return new string[] { reuseUrl };
+                            string[]? localPaths = await TryResolveSabrLocalPlayUrl(existing);
+                            if (localPaths != null)
+                            {
+                                OnStatusUpdate?.Invoke(this, "SABR reusing active download.");
+                                return localPaths;
+                            }
                         }
 
                         ReleaseSabrSessions();
@@ -325,9 +376,13 @@ namespace MediaPlayerCore.YtDlp
                         }
                         else
                         {
-                            string proxyUrl = $"http://127.0.0.1:{_proxyPort}/stream/{session.Id}";
-                            OnStatusUpdate?.Invoke(this, "SABR Proxy active. Preparing stream via local proxy.");
-                            return new string[] { proxyUrl };
+                            string[]? localPaths = await TryResolveSabrLocalPlayUrl(session);
+                            if (localPaths != null)
+                            {
+                                return localPaths;
+                            }
+
+                            OnStatusUpdate?.Invoke(this, "SABR Proxy failed to buffer. Falling back to direct yt-dlp resolution.");
                         }
                     }
                 }
@@ -930,6 +985,7 @@ namespace MediaPlayerCore.YtDlp
             }
 
             args += "--remote-components ejs:github --socket-timeout 30 --no-part --merge-output-format mkv --embed-metadata ";
+            args += "--retries 10 --fragment-retries 20 --skip-unavailable-fragments ";
 
             if (!string.IsNullOrEmpty(CookieBrowser))
             {
@@ -1044,11 +1100,6 @@ namespace MediaPlayerCore.YtDlp
             session.Process = process;
             _sabrSessions[session.Id] = session;
 
-            lock (_runningProcesses)
-            {
-                _runningProcesses.Add(process);
-            }
-
             var stderr = new StringBuilder();
             process.ErrorDataReceived += (_, e) =>
             {
@@ -1075,8 +1126,11 @@ namespace MediaPlayerCore.YtDlp
                     if (process.HasExited && process.ExitCode != 0)
                     {
                         string err = stderr.ToString();
-                        if (IsBenignSabrFinalizeError(err) && GetSabrOutputLength(session) > 0)
+                        long outputLen = GetSabrOutputLength(session);
+                        if ((IsBenignSabrFinalizeError(err) || outputLen >= 262144) && outputLen > 0)
                         {
+                            OnStatusUpdate?.Invoke(this,
+                                $"SABR download ended (exit {process.ExitCode}); continuing with {outputLen / (1024 * 1024.0):0.#}MB buffered.");
                             return;
                         }
 
@@ -1087,11 +1141,6 @@ namespace MediaPlayerCore.YtDlp
                 }
                 finally
                 {
-                    lock (_runningProcesses)
-                    {
-                        _runningProcesses.Remove(process);
-                    }
-
                     try { process.Dispose(); } catch { }
                     session.Process = null;
                 }
@@ -1141,32 +1190,41 @@ namespace MediaPlayerCore.YtDlp
             }
         }
 
-        private bool WaitForSabrData(SabrSession session, int timeoutMs = 90000)
+        private bool WaitForSabrData(SabrSession session, long requiredOffset = 0, int timeoutMs = 300000)
         {
             const long minMergedBytes = 262144; // wait for muxed mkv, not a video-only fragment
+            long needBytes = requiredOffset > 0 ? requiredOffset + 1 : minMergedBytes;
             var deadline = Environment.TickCount64 + timeoutMs;
+            long lastStatusTick = 0;
+
             while (Environment.TickCount64 < deadline)
             {
-                if (session.Failed) return false;
+                long len = GetSabrOutputLength(session);
 
-                if (GetSabrOutputLength(session) >= minMergedBytes) return true;
-
-                if (session.Process?.HasExited == true)
+                if (session.Failed)
                 {
-                    if (session.Failed) return false;
-                    return GetSabrOutputLength(session) > 0;
+                    return len >= needBytes || (requiredOffset == 0 && len > 0);
                 }
 
-                if (session.DownloadFinished)
+                if (len >= needBytes) return true;
+
+                if (session.Process?.HasExited == true || session.DownloadFinished)
                 {
-                    if (session.Failed) return false;
-                    return GetSabrOutputLength(session) > 0;
+                    return requiredOffset > 0 ? len > requiredOffset : len > 0;
+                }
+
+                if (Environment.TickCount64 - lastStatusTick > 15000)
+                {
+                    lastStatusTick = Environment.TickCount64;
+                    string mb = (len / (1024.0 * 1024.0)).ToString("0.##");
+                    OnStatusUpdate?.Invoke(this, $"SABR buffering... ({mb} MB ready)");
                 }
 
                 Thread.Sleep(100);
             }
 
-            return GetSabrOutputLength(session) > 0;
+            long finalLen = GetSabrOutputLength(session);
+            return requiredOffset > 0 ? finalLen > requiredOffset : finalLen >= minMergedBytes || finalLen > 0;
         }
 
         private static bool TryParseRangeHeader(string? rangeHeader, out long start, out long? end)
@@ -1204,32 +1262,46 @@ namespace MediaPlayerCore.YtDlp
             return true;
         }
 
-        private bool WaitForSabrBytes(SabrSession session, long requiredOffset, int timeoutMs = 120000)
+        private bool WaitForSabrBytes(SabrSession session, long requiredOffset, int timeoutMs = 300000)
         {
-            var deadline = Environment.TickCount64 + timeoutMs;
+            return WaitForSabrData(session, requiredOffset, timeoutMs);
+        }
+
+        /// <summary>
+        /// For HTTP/1.0 clients, batch more data per connection before responding so VLC
+        /// has enough to play between reconnects.
+        /// </summary>
+        private static void WaitForSabrGrowthBatch(SabrSession session, long offset)
+        {
+            const long minBatchBytes = 4 * 1024 * 1024;
+            const int maxWaitMs = 4000;
+            const int stallMs = 400;
+
+            long batchTarget = offset + minBatchBytes;
+            var deadline = Environment.TickCount64 + maxWaitMs;
+            long lastLen = GetSabrOutputLength(session);
+            long lastGrowthTick = Environment.TickCount64;
+
             while (Environment.TickCount64 < deadline)
             {
-                if (session.Failed) return false;
+                if (session.Failed) return;
 
-                long length = GetSabrOutputLength(session);
-                if (length > requiredOffset) return true;
+                long len = GetSabrOutputLength(session);
+                if (len >= batchTarget) return;
+                if (session.DownloadFinished && !IsDownloadStillRunning(session)) return;
 
-                if (session.DownloadFinished)
+                if (len > lastLen)
                 {
-                    if (session.Failed) return false;
-                    return length > requiredOffset;
+                    lastLen = len;
+                    lastGrowthTick = Environment.TickCount64;
                 }
-
-                if (session.Process?.HasExited == true)
+                else if (len > offset && Environment.TickCount64 - lastGrowthTick >= stallMs)
                 {
-                    if (session.Failed) return false;
-                    return length > requiredOffset;
+                    return;
                 }
 
                 Thread.Sleep(50);
             }
-
-            return GetSabrOutputLength(session) > requiredOffset;
         }
 
         private void StreamSabrFileToResponse(SabrSession session, HttpListenerContext context)
@@ -1240,6 +1312,9 @@ namespace MediaPlayerCore.YtDlp
             response.AddHeader("Accept-Ranges", "bytes");
             response.ContentType = "video/x-matroska";
             response.AddHeader("Cache-Control", "no-cache");
+
+            // VLC and many media players use HTTP/1.0, which cannot use chunked transfer encoding.
+            bool supportsChunked = request.ProtocolVersion >= HttpVersion.Version11;
 
             bool hasRange = TryParseRangeHeader(request.Headers["Range"], out long rangeStart, out long? rangeEnd);
             long offset = hasRange ? rangeStart : 0;
@@ -1257,52 +1332,84 @@ namespace MediaPlayerCore.YtDlp
                 return;
             }
 
-            if (hasRange && !WaitForSabrBytes(session, offset))
+            if (hasRange && !WaitForSabrBytes(session, offset, timeoutMs: 60000))
             {
                 response.StatusCode = 416;
                 response.StatusDescription = "Range Not Satisfiable";
                 return;
             }
 
+            if (!supportsChunked && !hasRange)
+            {
+                WaitForSabrGrowthBatch(session, offset);
+            }
+
             bool downloadComplete = session.DownloadFinished && !IsDownloadStillRunning(session);
             long fileLength = GetSabrOutputLength(session);
+
+            // For HTTP/1.0 or when total size is known, use Content-Length instead of chunked encoding.
+            // Clients reconnect with Range to fetch newly downloaded bytes.
+            long? sendLimit = null;
 
             if (hasRange)
             {
                 response.StatusCode = 206;
+                long endPos = rangeEnd.HasValue
+                    ? Math.Min(rangeEnd.Value, Math.Max(offset, fileLength - 1))
+                    : Math.Max(offset, fileLength - 1);
+
                 if (downloadComplete && fileLength > 0)
                 {
+                    endPos = rangeEnd.HasValue ? Math.Min(rangeEnd.Value, fileLength - 1) : fileLength - 1;
                     response.Headers["Content-Range"] = $"bytes {offset}-{fileLength - 1}/{fileLength}";
-                    response.ContentLength64 = Math.Max(0, fileLength - offset);
-                    response.SendChunked = false;
+                    sendLimit = endPos - offset + 1;
                 }
-                else
+                else if (supportsChunked && !rangeEnd.HasValue)
                 {
                     response.Headers["Content-Range"] = $"bytes {offset}-/*";
                     response.SendChunked = true;
                 }
+                else
+                {
+                    response.Headers["Content-Range"] = $"bytes {offset}-{endPos}/*";
+                    sendLimit = Math.Max(0, endPos - offset + 1);
+                }
             }
             else if (downloadComplete && fileLength > 0)
             {
-                response.ContentLength64 = fileLength;
-                response.SendChunked = false;
+                sendLimit = fileLength - offset;
+            }
+            else if (supportsChunked)
+            {
+                response.SendChunked = true;
             }
             else
             {
-                response.SendChunked = true;
+                sendLimit = Math.Max(0, fileLength - offset);
+            }
+
+            if (sendLimit.HasValue)
+            {
+                response.ContentLength64 = sendLimit.Value;
+                response.SendChunked = false;
             }
 
             var buffer = new byte[128 * 1024];
             string? openPath = null;
-            long endByte = rangeEnd ?? long.MaxValue;
+            long bytesSent = 0;
 
             while (true)
             {
+                if (sendLimit.HasValue && bytesSent >= sendLimit.Value)
+                {
+                    break;
+                }
+
                 string? outputPath = FindSabrOutputFile(session);
                 if (outputPath == null)
                 {
+                    if (session.Failed && GetSabrOutputLength(session) == 0) break;
                     if (!IsDownloadStillRunning(session)) break;
-                    if (session.Failed) break;
                     Thread.Sleep(50);
                     continue;
                 }
@@ -1322,13 +1429,12 @@ namespace MediaPlayerCore.YtDlp
 
                 if (offset >= fileLength)
                 {
+                    if (sendLimit.HasValue) break;
                     if (!IsDownloadStillRunning(session)) break;
                     if (session.Failed) break;
                     Thread.Sleep(50);
                     continue;
                 }
-
-                if (rangeEnd.HasValue && offset > endByte) break;
 
                 try
                 {
@@ -1340,6 +1446,7 @@ namespace MediaPlayerCore.YtDlp
 
                     if (offset > fs.Length)
                     {
+                        if (sendLimit.HasValue) break;
                         if (!IsDownloadStillRunning(session)) break;
                         Thread.Sleep(50);
                         continue;
@@ -1347,14 +1454,17 @@ namespace MediaPlayerCore.YtDlp
 
                     fs.Seek(offset, SeekOrigin.Begin);
 
-                    long bytesRemaining = long.MaxValue;
-                    if (rangeEnd.HasValue)
+                    long bytesRemaining = sendLimit.HasValue
+                        ? sendLimit.Value - bytesSent
+                        : long.MaxValue;
+
+                    if (rangeEnd.HasValue && sendLimit.HasValue)
                     {
-                        bytesRemaining = endByte - offset + 1;
+                        bytesRemaining = Math.Min(bytesRemaining, rangeEnd.Value - offset + 1 - bytesSent);
                     }
-                    else if (downloadComplete && fileLength > 0)
+                    else if (downloadComplete && fileLength > 0 && sendLimit.HasValue)
                     {
-                        bytesRemaining = fileLength - offset;
+                        bytesRemaining = Math.Min(bytesRemaining, fileLength - offset - bytesSent);
                     }
 
                     int toRead = (int)Math.Min(buffer.Length, bytesRemaining);
@@ -1374,28 +1484,26 @@ namespace MediaPlayerCore.YtDlp
                         }
 
                         offset += read;
-                        if (bytesRemaining != long.MaxValue)
-                        {
-                            bytesRemaining -= read;
-                            if (bytesRemaining <= 0) break;
-                        }
-
+                        bytesSent += read;
                         continue;
                     }
                 }
                 catch (IOException)
                 {
+                    if (sendLimit.HasValue) break;
                     if (!IsDownloadStillRunning(session)) break;
                     Thread.Sleep(50);
                     continue;
                 }
+
+                if (sendLimit.HasValue) break;
 
                 if (!IsDownloadStillRunning(session))
                 {
                     break;
                 }
 
-                if (session.Failed) break;
+                if (session.Failed && GetSabrOutputLength(session) == 0) break;
                 Thread.Sleep(50);
             }
         }
@@ -1479,7 +1587,7 @@ namespace MediaPlayerCore.YtDlp
                     return;
                 }
 
-                if (session.Failed)
+                if (session.Failed && GetSabrOutputLength(session) == 0)
                 {
                     context.Response.StatusCode = 503;
                     context.Response.StatusDescription = "SABR download failed";
@@ -1494,13 +1602,23 @@ namespace MediaPlayerCore.YtDlp
                 OnStatusUpdate?.Invoke(this, "SABR Proxy streaming to player...");
                 session.LastAccessUtc = DateTime.UtcNow;
                 Interlocked.Increment(ref session.StreamConsumers);
-                if (!WaitForSabrData(session))
+
+                bool hasRange = TryParseRangeHeader(context.Request.Headers["Range"], out long rangeStart, out _);
+                long waitOffset = hasRange ? rangeStart : 0;
+                if (!WaitForSabrData(session, waitOffset))
                 {
                     context.Response.StatusCode = 502;
                     context.Response.StatusDescription = "SABR stream unavailable";
                     context.Response.Close();
-                    string detail = session.Error ?? "Timed out waiting for SABR stream data.";
-                    OnError?.Invoke(this, new Exception($"SABR proxy stream unavailable: {detail}"));
+                    long buffered = GetSabrOutputLength(session);
+                    string detail = session.Error
+                        ?? (IsDownloadStillRunning(session)
+                            ? $"Still buffering (offset {waitOffset}, {buffered / (1024 * 1024.0):0.#}MB ready)."
+                            : "Timed out waiting for SABR stream data.");
+                    if (buffered == 0 || !IsDownloadStillRunning(session))
+                    {
+                        OnError?.Invoke(this, new Exception($"SABR proxy stream unavailable: {detail}"));
+                    }
                     Interlocked.Decrement(ref session.StreamConsumers);
                     return;
                 }
