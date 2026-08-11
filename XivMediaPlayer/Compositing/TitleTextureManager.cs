@@ -12,22 +12,37 @@ namespace XivMediaPlayer.Compositing
     internal class TitleTextureManager : IDisposable
     {
         private readonly ITextureProvider _textureProvider;
-        private IDalamudTextureWrap _textureWrap;
+        private IDalamudTextureWrap _titleTextureWrap;
+        private IDalamudTextureWrap[] _loadingFrameCache;
         private string _lastTitle = "";
         private string _lastStreamer = "";
-        private string _lastLoadingMessage = "";
-        private byte[] _loadingRawBuffer = Array.Empty<byte>();
+        private string _cachedLoadingMessage = "";
+        private int _loadingFrameIndex;
+        private bool _showingLoadingOverlay;
         private bool _disposed = false;
 
         private const int LoadingOverlayWidth = 960;
         private const int LoadingOverlayHeight = 540;
+        /// <summary>Matches <c>(int)(pulse * 20)</c> steps from 0 through 20.</summary>
+        private const int LoadingFrameCount = 21;
 
         public unsafe IntPtr TextureHandle
         {
             get
             {
-                if (_textureWrap == null) return IntPtr.Zero;
-                var handle = _textureWrap.Handle;
+                IDalamudTextureWrap wrap;
+                if (_showingLoadingOverlay && _loadingFrameCache != null)
+                {
+                    int idx = Math.Clamp(_loadingFrameIndex, 0, _loadingFrameCache.Length - 1);
+                    wrap = _loadingFrameCache[idx];
+                }
+                else
+                {
+                    wrap = _titleTextureWrap;
+                }
+
+                if (wrap == null) return IntPtr.Zero;
+                var handle = wrap.Handle;
                 return *(IntPtr*)&handle;
             }
         }
@@ -40,15 +55,15 @@ namespace XivMediaPlayer.Compositing
         public void UpdateText(string title, string streamer)
         {
             if (_disposed) return;
-            _lastLoadingMessage = "";
+
+            ClearLoadingOverlay();
             if (title == _lastTitle && streamer == _lastStreamer) return;
 
             _lastTitle = title ?? "";
             _lastStreamer = streamer ?? "";
 
-            // Free the old texture if it exists
-            _textureWrap?.Dispose();
-            _textureWrap = null;
+            _titleTextureWrap?.Dispose();
+            _titleTextureWrap = null;
 
             if (string.IsNullOrEmpty(_lastTitle)) return;
 
@@ -106,8 +121,7 @@ namespace XivMediaPlayer.Compositing
                 byte[] rawData = new byte[bytes];
                 Marshal.Copy(bmpData.Scan0, rawData, 0, bytes);
 
-                // We can just use the BGRA byte array directly!
-                _textureWrap = _textureProvider.CreateFromRaw(
+                _titleTextureWrap = _textureProvider.CreateFromRaw(
                     Dalamud.Interface.Textures.RawImageSpecification.Bgra32(width, height),
                     rawData);
             }
@@ -118,23 +132,65 @@ namespace XivMediaPlayer.Compositing
         }
 
         /// <summary>
-        /// Renders a centered loading overlay for the world-space TV.
-        /// Rebuilds only when the status message changes — no per-frame GPU textures.
+        /// Selects a pre-baked loading overlay frame. The animation cycle is cached once per message.
         /// </summary>
         public void UpdateLoadingOverlay(string message, float pulse)
         {
             if (_disposed) return;
 
             message = string.IsNullOrWhiteSpace(message) ? "Loading video..." : message;
-            if (message == _lastLoadingMessage && _textureWrap != null)
+            int pulseStep = Math.Clamp((int)(pulse * 20), 0, LoadingFrameCount - 1);
+
+            if (message != _cachedLoadingMessage || _loadingFrameCache == null)
+            {
+                RebuildLoadingFrameCache(message);
+            }
+
+            if (_loadingFrameCache == null)
             {
                 return;
             }
 
-            _lastLoadingMessage = message;
+            _showingLoadingOverlay = true;
+            _loadingFrameIndex = pulseStep;
             _lastTitle = "";
             _lastStreamer = "";
 
+            _titleTextureWrap?.Dispose();
+            _titleTextureWrap = null;
+        }
+
+        private void RebuildLoadingFrameCache(string message)
+        {
+            DisposeLoadingFrameCache();
+            _cachedLoadingMessage = message;
+
+            var frames = new IDalamudTextureWrap[LoadingFrameCount];
+            try
+            {
+                for (int i = 0; i < LoadingFrameCount; i++)
+                {
+                    float framePulse = i / (float)(LoadingFrameCount - 1);
+                    frames[i] = CreateLoadingFrameTexture(message, framePulse);
+                    if (frames[i] == null)
+                    {
+                        DisposeLoadingFrames(frames, i);
+                        _cachedLoadingMessage = "";
+                        return;
+                    }
+                }
+
+                _loadingFrameCache = frames;
+            }
+            catch (OutOfMemoryException)
+            {
+                DisposeLoadingFrames(frames, frames.Length);
+                _cachedLoadingMessage = "";
+            }
+        }
+
+        private IDalamudTextureWrap CreateLoadingFrameTexture(string message, float pulse)
+        {
             const int width = LoadingOverlayWidth;
             const int height = LoadingOverlayHeight;
 
@@ -146,7 +202,6 @@ namespace XivMediaPlayer.Compositing
             gfx.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
             gfx.Clear(Color.Transparent);
 
-            // Dim the full frame so it is obvious the TV is busy.
             using (var dimBrush = new SolidBrush(Color.FromArgb(170, 0, 0, 0)))
             {
                 gfx.FillRectangle(dimBrush, 0, 0, width, height);
@@ -187,9 +242,9 @@ namespace XivMediaPlayer.Compositing
                 gfx.FillRectangle(trackBrush, barX, barY, barW, barH);
             }
 
-            float segmentW = barW * 0.34f;
+            float segmentW = barW * 0.35f;
             float travel = barW - segmentW;
-            float segX = barX + travel * 0.5f;
+            float segX = barX + travel * pulse;
             using (var fillBrush = new SolidBrush(Color.FromArgb(255, 79, 195, 247)))
             {
                 gfx.FillRectangle(fillBrush, segX, barY, segmentW, barH);
@@ -199,26 +254,12 @@ namespace XivMediaPlayer.Compositing
             try
             {
                 int bytes = Math.Abs(bmpData.Stride) * bmp.Height;
-                if (_loadingRawBuffer.Length != bytes)
-                {
-                    _loadingRawBuffer = new byte[bytes];
-                }
-                Marshal.Copy(bmpData.Scan0, _loadingRawBuffer, 0, bytes);
+                var rawData = new byte[bytes];
+                Marshal.Copy(bmpData.Scan0, rawData, 0, bytes);
 
-                IDalamudTextureWrap? newWrap;
-                try
-                {
-                    newWrap = _textureProvider.CreateFromRaw(
-                        Dalamud.Interface.Textures.RawImageSpecification.Bgra32(width, height),
-                        _loadingRawBuffer);
-                }
-                catch (OutOfMemoryException)
-                {
-                    return;
-                }
-
-                _textureWrap?.Dispose();
-                _textureWrap = newWrap;
+                return _textureProvider.CreateFromRaw(
+                    Dalamud.Interface.Textures.RawImageSpecification.Bgra32(width, height),
+                    rawData);
             }
             finally
             {
@@ -226,12 +267,35 @@ namespace XivMediaPlayer.Compositing
             }
         }
 
+        private void ClearLoadingOverlay()
+        {
+            _showingLoadingOverlay = false;
+            _loadingFrameIndex = 0;
+            _cachedLoadingMessage = "";
+            DisposeLoadingFrameCache();
+        }
+
+        private void DisposeLoadingFrameCache()
+        {
+            if (_loadingFrameCache == null) return;
+            DisposeLoadingFrames(_loadingFrameCache, _loadingFrameCache.Length);
+            _loadingFrameCache = null;
+        }
+
+        private static void DisposeLoadingFrames(IDalamudTextureWrap[] frames, int count)
+        {
+            for (int i = 0; i < count; i++)
+            {
+                frames[i]?.Dispose();
+            }
+        }
+
         public void Dispose()
         {
             _disposed = true;
-            _textureWrap?.Dispose();
-            _textureWrap = null;
-            _loadingRawBuffer = Array.Empty<byte>();
+            ClearLoadingOverlay();
+            _titleTextureWrap?.Dispose();
+            _titleTextureWrap = null;
         }
     }
 }

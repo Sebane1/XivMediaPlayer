@@ -725,7 +725,7 @@ namespace MediaPlayerCore {
                 
                 _parent.LastFrameWidth = (int)(_pitch / _bytePerPixel);
                 _parent.LastFrameHeight = (int)_lines;
-                // Use VLC's decoded frame size, not track metadata — metadata can be
+                // Use VLC's decoded frame size, not track metadata. Metadata can be
                 // slightly smaller and incorrectly crop the bottom via UV scaling.
                 _parent.LastFrameTrueWidth = (int)_width;
                 _parent.LastFrameTrueHeight = (int)_height;

@@ -1,4 +1,4 @@
-// Safe probe — only accesses documented FFXIVClientStructs fields
+// Safe probe. Only accesses documented FFXIVClientStructs fields.
 using System;
 using FFXIVClientStructs.FFXIV.Client.Graphics.Kernel;
 using FFXIVClientStructs.FFXIV.Client.Graphics.Render;

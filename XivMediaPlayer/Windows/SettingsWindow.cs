@@ -282,7 +282,7 @@ namespace XivMediaPlayer.Windows {
       }
 
       bool sabrProxy = _plugin.Config.EnableSabrProxy;
-      if (ImGui.Checkbox("Enable SABR Proxy (Fixes YouTube playback errors)", ref sabrProxy)) {
+      if (ImGui.Checkbox("YouTube SABR mode (recommended for videos)", ref sabrProxy)) {
         _plugin.Config.EnableSabrProxy = sabrProxy;
         if (_plugin.YtDlpManager != null) {
           _plugin.YtDlpManager.EnableSabrProxy = sabrProxy;
@@ -293,7 +293,7 @@ namespace XivMediaPlayer.Windows {
         _plugin.Config.Save();
       }
       ImGui.TextColored(new Vector4(0.5f, 0.5f, 0.5f, 1f),
-        "Pipes YouTube through a local yt-dlp SABR download. Requires cookies for most videos. Playback uses a buffered local file for reliable video and seeking.");
+        "Videos: buffered local download for reliable playback and seeking. Live streams are detected automatically and play via HLS instead. Requires cookies for most YouTube content.");
 
       ImGui.Spacing();
 

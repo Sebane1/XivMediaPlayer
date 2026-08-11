@@ -228,6 +228,7 @@ namespace XivMediaPlayer
             _config = (Configuration)_pluginInterface.GetPluginConfig()
                  ?? new Configuration();
             _config.Initialize(_pluginInterface);
+            _config.Migrate();
 
             // Initialize yt-dlp manager
             _ytDlpManager = new YtDlpManager(pluginDir, _config.PreferredQuality) { EnableSabrProxy = _config.EnableSabrProxy };
@@ -608,7 +609,7 @@ namespace XivMediaPlayer
                 }
             }
 
-            // Clipboard cookie watcher — check every 5 seconds
+            // Clipboard cookie watcher. Check every 5 seconds.
             CheckClipboardForCookies();
         }
 
@@ -636,7 +637,7 @@ namespace XivMediaPlayer
             }
             catch
             {
-                // Clipboard access can throw — silently ignore
+                // Clipboard access can throw. Silently ignore.
             }
         }
 
@@ -796,7 +797,7 @@ namespace XivMediaPlayer
                         }
                         else
                         {
-                            // Fallback — direct URL to VLC
+                            // Fallback: direct URL to VLC
                             TuneIntoStream(url, CurrentAudioSource, 0);
                         }
                     }
@@ -1094,10 +1095,16 @@ namespace XivMediaPlayer
         public string MediaLoadingMessage => GetMediaLoadingMessage();
 
         /// <summary>
-        /// Animated 0–1 value for an indeterminate loading bar.
+        /// Animated 0–1 value for an indeterminate loading bar (ping-pong).
         /// </summary>
         public float MediaLoadingPulse
-            => (float)((Environment.TickCount64 % 2000) / 2000.0);
+        {
+            get
+            {
+                double t = (Environment.TickCount64 % 2000) / 2000.0;
+                return (float)(t < 0.5 ? t * 2.0 : 2.0 - t * 2.0);
+            }
+        }
 
         private static bool IsYtDlpLoadingMessage(string msg)
         {
@@ -1140,7 +1147,7 @@ namespace XivMediaPlayer
                 return false;
             }
 
-            // Seek / stream restart can briefly drop frames — don't treat that as initial load.
+            // Seek / stream restart can briefly drop frames. Don't treat that as initial load.
             if (_playbackHasRenderedFrames)
             {
                 return false;
@@ -1434,7 +1441,7 @@ namespace XivMediaPlayer
 
                     bool isYouTube = url.Contains("youtube.com") || url.Contains("youtu.be");
                     bool? youTubeLiveProbe = null;
-                    if (isYouTube && _config.EnableSabrProxy)
+                    if (isYouTube)
                     {
                         youTubeLiveProbe = await _ytDlpManager.ProbeYouTubeLiveBroadcastAsync(url).ConfigureAwait(false);
                         if (resolutionId != _currentResolutionId) return;
@@ -1443,14 +1450,14 @@ namespace XivMediaPlayer
                         {
                             EnqueueFrameworkAction(() => _mediaLoadingMessage = "Connecting to live stream...");
                         }
-                        else if (youTubeLiveProbe == false)
+                        else if (youTubeLiveProbe == false && _config.EnableSabrProxy)
                         {
                             EnqueueFrameworkAction(() => _mediaLoadingMessage = "Buffering video...");
                         }
                     }
 
                     // Metadata fetch runs a second yt-dlp process and can trigger bot checks alongside SABR.
-                    // For SABR VOD, fetch metadata after download starts — concurrent yt-dlp processes
+                    // For SABR VOD, fetch metadata after download starts. Concurrent yt-dlp processes
                     // fight over browser cookies and can kill long downloads.
                     bool isYouTubeSabr = _config.EnableSabrProxy && isYouTube && youTubeLiveProbe == false;
 
@@ -1459,8 +1466,19 @@ namespace XivMediaPlayer
 
                     if (isYouTubeSabr)
                     {
-                        // Start SABR download immediately — do not run a second yt-dlp for metadata
-                        // in parallel; duration is read from VLC once the stream is parsed.
+                        // Lightweight title/uploader fetch. Run before SABR download starts so we
+                        // don't run two yt-dlp processes concurrently (cookie/browser contention).
+                        try
+                        {
+                            metadata = await _ytDlpManager.GetLightMetadata(url);
+                            if (resolutionId != _currentResolutionId) return;
+                        }
+                        catch (Exception metadataEx)
+                        {
+                            _pluginLog.Warning(metadataEx, "[yt-dlp] Failed to get light metadata for SABR.");
+                        }
+
+                        // Start SABR download. Duration can still be refined from VLC once parsed.
                         try
                         {
                             streamUrls = await _ytDlpManager.ResolveStreamUrl(url);
@@ -1505,7 +1523,7 @@ namespace XivMediaPlayer
                                     || errorStr.Contains("Only images are available", StringComparison.OrdinalIgnoreCase)
                                     || errorStr.Contains("SABR", StringComparison.OrdinalIgnoreCase)))
                             {
-                                EnqueueFrameworkAction(() => _chat.PrintError("[Media Player] YouTube may require SABR mode. Enable \"SABR Proxy\" in Media Player settings and try again."));
+                                EnqueueFrameworkAction(() => _chat.PrintError("[Media Player] YouTube playback failed. Check cookies in settings (VRCVideoCacher), or re-enable \"YouTube SABR mode\" if you turned it off."));
                                 return;
                             }
                         
@@ -1536,7 +1554,7 @@ namespace XivMediaPlayer
                                     || errorStr.Contains("Only images are available", StringComparison.OrdinalIgnoreCase)
                                     || errorStr.Contains("SABR", StringComparison.OrdinalIgnoreCase)))
                             {
-                                EnqueueFrameworkAction(() => _chat.PrintError("[Media Player] YouTube may require SABR mode. Enable \"SABR Proxy\" in Media Player settings and try again."));
+                                EnqueueFrameworkAction(() => _chat.PrintError("[Media Player] YouTube playback failed. Check cookies in settings (VRCVideoCacher), or re-enable \"YouTube SABR mode\" if you turned it off."));
                                 return;
                             }
                         
@@ -2550,7 +2568,7 @@ namespace XivMediaPlayer
         {
             string errorMsg = e.Exception?.Message ?? string.Empty;
 
-            // Harmless on live/HLS demuxers — querying playback time is unsupported.
+            // Harmless on live/HLS demuxers. Querying playback time is unsupported.
             if (errorMsg.Contains("DEMUX_GET_TIME", StringComparison.OrdinalIgnoreCase)
                 || errorMsg.Contains("DEMUX_GET_LENGTH", StringComparison.OrdinalIgnoreCase)
                 || errorMsg.Contains("Failed to create demuxer", StringComparison.OrdinalIgnoreCase))

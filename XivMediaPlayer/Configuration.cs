@@ -56,7 +56,9 @@ namespace XivMediaPlayer {
 
     // yt-dlp settings
     public int PreferredQuality { get; set; } = 720;
-    public bool EnableSabrProxy { get; set; } = false;
+    public bool EnableSabrProxy { get; set; } = true;
+
+    public const int CurrentConfigVersion = 2;
 
     // World screen compositing settings (legacy single placement)
     public MediaPlayerCore.Compositing.WorldScreenTransform WorldScreen { get; set; } = new MediaPlayerCore.Compositing.WorldScreenTransform();
@@ -93,6 +95,24 @@ namespace XivMediaPlayer {
     /// </summary>
     public void Initialize(IDalamudPluginInterface pi) {
       this.pluginInterface = pi;
+    }
+
+    /// <summary>
+    /// Applies one-time config upgrades for existing installs.
+    /// </summary>
+    public void Migrate() {
+      var versioned = (IPluginConfiguration)this;
+      if (versioned.Version >= CurrentConfigVersion) {
+        return;
+      }
+
+      // v2: SABR for YouTube VOD + automatic live detection became the default path.
+      if (versioned.Version < 2) {
+        EnableSabrProxy = true;
+      }
+
+      versioned.Version = CurrentConfigVersion;
+      Save();
     }
 
     public void Save() {

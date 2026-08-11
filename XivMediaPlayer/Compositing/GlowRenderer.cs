@@ -9,7 +9,7 @@ namespace XivMediaPlayer.Compositing {
   /// <summary>
   /// Creates a small, vignette-faded copy of the video texture on the GPU.
   /// The shader downsamples and applies a smooth rectangular falloff so
-  /// edges fade to transparent — no hard edges when drawn as a glow quad.
+  /// edges fade to transparent. No hard edges when drawn as a glow quad.
   /// </summary>
   internal unsafe class GlowRenderer : IDisposable {
     private ID3D11Device _device;
@@ -39,7 +39,7 @@ struct VS_OUT {
   float2 uv : TEXCOORD;
 };
 
-// Fullscreen triangle trick — no vertex buffer needed
+// Fullscreen triangle trick. No vertex buffer needed.
 VS_OUT VS(uint id : SV_VertexID) {
   VS_OUT o;
   o.uv = float2((id << 1) & 2, id & 2);

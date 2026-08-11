@@ -93,7 +93,7 @@ namespace XivMediaPlayer.Compositing {
 
       float trueVidHeight = textureTrueHeight > 0 ? textureTrueHeight : 0;
       float trueVidWidth = textureTrueWidth > 0 ? textureTrueWidth : 0;
-      // Never derive aspect from padded texture dimensions — VLC aligns height to 32px
+      // Never derive aspect from padded texture dimensions. VLC aligns height to 32px
       // (e.g. 1080p in a 1088-tall buffer), which falsely triggers letterboxing.
       float videoAspect = (trueVidWidth > 0 && trueVidHeight > 0) ? trueVidWidth / trueVidHeight : 0f;
       float uvBottom = (textureTrueHeight > 0 && textureHeight > 0) ? ((float)textureTrueHeight / textureHeight) : 1.0f;
@@ -566,7 +566,7 @@ namespace XivMediaPlayer.Compositing {
     /// </summary>
     private void RenderGlow(ImDrawListPtr drawList, IntPtr textureSrv,
       Vector2 sTL, Vector2 sTR, Vector2 sBR, Vector2 sBL, float visibility) {
-      if (visibility <= 0.01f) return; // fully occluded — no glow
+      if (visibility <= 0.01f) return; // fully occluded, no glow
 
       // Lazy-init the GPU glow renderer
       if (_glowRenderer == null) {
@@ -581,7 +581,7 @@ namespace XivMediaPlayer.Compositing {
       if (glowPtr == IntPtr.Zero) return;
       var glowId = Unsafe.As<IntPtr, ImTextureID>(ref glowPtr);
 
-      // Single draw call — vignette is baked into the texture so edges fade naturally
+      // Single draw call. Vignette is baked into the texture so edges fade naturally.
       var center = (sTL + sTR + sBR + sBL) * 0.25f;
       float scale = 1.45f;
       var gTL = center + (sTL - center) * scale;
@@ -589,7 +589,7 @@ namespace XivMediaPlayer.Compositing {
       var gBR = center + (sBR - center) * scale;
       var gBL = center + (sBL - center) * scale;
 
-      // Flat 90% occlusion on glow layer — always renders at 10% strength
+      // Flat 90% occlusion on glow layer. Always renders at 10% strength.
       byte alpha = (byte)(144 * 0.10f);
       uint color = (uint)(alpha << 24) | 0x00FFFFFF;
 

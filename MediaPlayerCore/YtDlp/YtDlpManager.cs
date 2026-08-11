@@ -72,7 +72,7 @@ namespace MediaPlayerCore.YtDlp
         private Thread? _cookieListenerThread;
         private bool _isListeningForCookies;
 
-        public bool EnableSabrProxy { get; set; } = false;
+        public bool EnableSabrProxy { get; set; } = true;
         private HttpListener? _sabrProxyListener;
         private Thread? _sabrProxyThread;
         private bool _isProxyListening;
@@ -1147,7 +1147,7 @@ namespace MediaPlayerCore.YtDlp
 
         /// <summary>
         /// Looks for a cookies file in order of priority:
-        /// 1. Plugin directory (cookies.txt — user-provided or auto-saved from clipboard)
+        /// 1. Plugin directory (cookies.txt, user-provided or auto-saved from clipboard)
         /// 2. VRCVideoCacher's youtube_cookies.txt (from browser extension)
         /// </summary>
         private string? FindCookiesFile()

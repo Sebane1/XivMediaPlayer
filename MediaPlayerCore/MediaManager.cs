@@ -143,7 +143,7 @@ namespace MediaPlayerCore {
           _playbackStreams.Clear();
           streams = streams.Concat(_deadStreams).ToArray();
       }
-      // VLC's Stop() is synchronous and blocks — run on background thread
+      // VLC's Stop() is synchronous and blocks. Run on background thread.
       Task.Run(() => {
         StopFFmpegStream();
         foreach (var stream in streams) {
@@ -232,7 +232,7 @@ namespace MediaPlayerCore {
         return false;
       }
 
-      // Never reuse VLC across SABR local files or when leaving them — ChangeVideoStream deadlocks.
+      // Never reuse VLC across SABR local files or when leaving them. ChangeVideoStream deadlocks.
       if (YtDlpManager.IsSabrLocalFile(currentPath) || YtDlpManager.IsSabrLocalFile(newAudioPath)) {
         return true;
       }

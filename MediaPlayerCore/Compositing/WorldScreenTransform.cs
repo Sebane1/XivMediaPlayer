@@ -5,7 +5,7 @@ using System.Numerics;
 namespace MediaPlayerCore.Compositing {
   /// <summary>
   /// Describes the placement of a video screen in 3D world space.
-  /// Pure math — no game engine dependencies.
+  /// Pure math. No game engine dependencies.
   /// </summary>
   [Serializable]
   public class WorldScreenTransform {
