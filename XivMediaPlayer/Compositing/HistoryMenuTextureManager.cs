@@ -8,6 +8,7 @@ using System.Drawing.Imaging;
 using System.Drawing.Text;
 using System.Linq;
 using System.Runtime.InteropServices;
+using XivMediaPlayer.Localization;
 
 namespace XivMediaPlayer.Compositing
 {
@@ -84,7 +85,7 @@ namespace XivMediaPlayer.Compositing
             using var progressBrush = new SolidBrush(Color.FromArgb(200, 200, 200));
 
             // Draw Header
-            gfx.DrawString("Pick Up Where You Left Off", titleFont, textBrush, new PointF(panelX + 40, panelY + 40));
+            gfx.DrawString(Translation.Get("Pick Up Where You Left Off"), titleFont, textBrush, new PointF(panelX + 40, panelY + 40));
 
             // Draw Line
             gfx.DrawLine(borderPen, panelX + 40, panelY + 110, panelX + panelWidth - 40, panelY + 110);
@@ -115,7 +116,7 @@ namespace XivMediaPlayer.Compositing
                 string progress = ts.TotalHours >= 1 ? ts.ToString(@"h\:mm\:ss") : ts.ToString(@"mm\:ss");
                 
                 var format = new StringFormat { Alignment = StringAlignment.Far };
-                gfx.DrawString($"Left off at {progress}", progressFont, progressBrush, new RectangleF(panelX, currentY + 24, panelWidth - 60, itemHeight), format);
+                gfx.DrawString(string.Format(Translation.Get("Left off at {0}"), progress), progressFont, progressBrush, new RectangleF(panelX, currentY + 24, panelWidth - 60, itemHeight), format);
 
                 // Store Hit Zone (translate to 0.0 - 1.0 UV coords)
                 _hitZones.Add(new HistoryHitZone
@@ -130,7 +131,7 @@ namespace XivMediaPlayer.Compositing
 
             if (sortedHistory.Count == 0)
             {
-                gfx.DrawString("Your watch history is empty.", itemFont, progressBrush, new PointF(panelX + 60, currentY + 20));
+                gfx.DrawString(Translation.Get("Your watch history is empty."), itemFont, progressBrush, new PointF(panelX + 60, currentY + 20));
             }
 
             // Extract the BGRA bytes

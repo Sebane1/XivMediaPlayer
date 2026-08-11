@@ -6,6 +6,7 @@ using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.Drawing.Text;
 using System.Runtime.InteropServices;
+using XivMediaPlayer.Localization;
 
 namespace XivMediaPlayer.Compositing
 {
@@ -17,6 +18,7 @@ namespace XivMediaPlayer.Compositing
         private string _lastTitle = "";
         private string _lastStreamer = "";
         private string _cachedLoadingMessage = "";
+        private int _cachedTranslationRevision = -1;
         private int _loadingFrameIndex;
         private bool _showingLoadingOverlay;
         private bool _disposed = false;
@@ -131,14 +133,26 @@ namespace XivMediaPlayer.Compositing
             }
         }
 
+        public void InvalidateLoadingCache()
+        {
+            _cachedLoadingMessage = "";
+            _cachedTranslationRevision = -1;
+        }
+
         /// <summary>
         /// Selects a pre-baked loading overlay frame. The animation cycle is cached once per message.
         /// </summary>
-        public void UpdateLoadingOverlay(string message, float pulse)
+        public void UpdateLoadingOverlay(string message, float pulse, int translationRevision = 0)
         {
             if (_disposed) return;
 
-            message = string.IsNullOrWhiteSpace(message) ? "Loading video..." : message;
+            if (translationRevision != _cachedTranslationRevision)
+            {
+                _cachedTranslationRevision = translationRevision;
+                _cachedLoadingMessage = "";
+            }
+
+            message = string.IsNullOrWhiteSpace(message) ? Translation.Get("Loading video...") : message;
             int pulseStep = Math.Clamp((int)(pulse * 20), 0, LoadingFrameCount - 1);
 
             if (message != _cachedLoadingMessage || _loadingFrameCache == null)
@@ -230,7 +244,7 @@ namespace XivMediaPlayer.Compositing
 
             var titleRect = new RectangleF(panelX + 12, panelY + 14, panelWidth - 24, 36);
             var subRect = new RectangleF(panelX + 12, panelY + 48, panelWidth - 24, 20);
-            gfx.DrawString("Loading", titleFont, textBrush, titleRect, centerFormat);
+            gfx.DrawString(Translation.Get("Loading"), titleFont, textBrush, titleRect, centerFormat);
             gfx.DrawString(message, subFont, subBrush, subRect, centerFormat);
 
             float barX = panelX + 40;

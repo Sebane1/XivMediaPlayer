@@ -13,6 +13,7 @@ using MediaPlayerCore.Compositing;
 using MediaPlayerCore.Twitch;
 using MediaPlayerCore.YtDlp;
 using XivMediaPlayer.Compositing;
+using XivMediaPlayer.Localization;
 using Dalamud.Bindings.ImGui;
 using System;
 using System.Collections.Generic;
@@ -29,7 +30,7 @@ namespace XivMediaPlayer
 {
     public sealed class Plugin : IDalamudPlugin
     {
-        public string Name => "XIV Media Player";
+        public string Name => Translate("XIV Media Player");
 
         // Static PluginService properties (following Dalamud SamplePlugin template)
         [PluginService] internal static IDalamudPluginInterface PluginInterface { get; private set; } = null!;
@@ -106,6 +107,8 @@ namespace XivMediaPlayer
         private readonly ConcurrentQueue<Action> _frameworkActions = new();
         private DateTime? _deferredBgmRestoreTime = null;
         private bool _killRestartQueued;
+        private int _translationRevision;
+        private bool _translationServerErrorNotified;
 
         private System.Numerics.Matrix4x4? _prevViewProjMatrix = null;
         private System.Numerics.Vector3? _prevCameraPos = null;
@@ -117,6 +120,114 @@ namespace XivMediaPlayer
         public Networking.ServerClient ServerClient { get; private set; }
         public Configuration Config => _config;
         public YtDlpManager YtDlpManager => _ytDlpManager;
+        internal int TranslationRevision => _translationRevision;
+
+        public string Translate(string text) => Localization.Translation.Get(text);
+
+        public void PrintChat(string text) => _chat.Print(Translate(text));
+
+        public void PrintChatFormat(string format, params object[] args) => _chat.Print(string.Format(Translate(format), args));
+
+        public void PrintErrorChat(string text) => _chat.PrintError(Translate(text));
+
+        public void PrintErrorChatFormat(string format, params object[] args) => _chat.PrintError(string.Format(Translate(format), args));
+
+        public void PrintChatWithBody(string body) => _chat.Print(Translate("[Media Player] ") + Translate(body));
+
+        public void PrintErrorChatWithBody(string body) => _chat.PrintError(Translate("[Media Player] ") + Translate(body));
+
+        public string FormatDmcaClipboardText(string url, string domain) =>
+            string.Format(Translate("Content URL: {0}\n\nPlease contact {1} to report this content."), url, domain);
+
+        public void ApplyUiLanguageFromConfig()
+        {
+            int lang = Math.Clamp(_config.UiLanguage, 0, Translator.LanguageStringsDisplay.Length - 1);
+            _config.UiLanguage = lang;
+            Translator.UiLanguage = (LanguageEnum)lang;
+            Translator.ServerUrl = _config.TranslationServerUrl;
+            Translator.ClearLastError();
+            _translationServerErrorNotified = false;
+            Interlocked.Increment(ref _translationRevision);
+            _titleTextureManager?.InvalidateLoadingCache();
+            UpdateMediaCommandHelp();
+
+            if (lang != (int)LanguageEnum.English)
+            {
+                _ = Task.Run(async () => await Translator.ProbeServerAsync());
+            }
+        }
+
+        private string GetMediaCommandHelpText()
+        {
+            return Translate("Media Player commands.\n") +
+                Translate(" /media — Open settings\n") +
+                Translate(" /media twitch <url> — Tune into a Twitch stream\n") +
+                Translate(" /media rtmp <url> — Tune into an RTMP stream\n") +
+                Translate(" /media play <url> — Play a media URL\n") +
+                Translate(" /media stop — Stop current stream\n") +
+                Translate(" /media video — Toggle video window\n") +
+                Translate(" /media emulate <ip> <session> — Connect to emulation server");
+        }
+
+        private string GetMediaHelpChatText()
+        {
+            return Translate("Media Player commands.\n") +
+                Translate(" /media — Open settings\n") +
+                Translate(" /media twitch <url> — Tune into a Twitch stream\n") +
+                Translate(" /media rtmp <url> — Tune into an RTMP stream\n") +
+                Translate(" /media play <url> — Play a media URL\n") +
+                Translate(" /media stop — Stop current stream\n") +
+                Translate(" /media video — Toggle video window\n") +
+                Translate(" /media emulate <ip> <session> — Connect to emulation server\n") +
+                Translate(" /media screen [place|move|rotate|scale|reset|save] — 3D screen\n") +
+                Translate(" /media listen — Tune into a shared stream\n") +
+                Translate(" /media ytdlp-update — Update yt-dlp\n") +
+                Translate(" /media help — Show this help");
+        }
+
+        private string GetScreenCommandHelpText()
+        {
+            return Translate("[Media Player] Screen commands:\n") +
+                Translate(" /media screen place — Place screen at your look-at point\n") +
+                Translate(" /media screen move <x> <y> <z> — Adjust position\n") +
+                Translate(" /media screen rotate <yaw> [pitch] — Set rotation\n") +
+                Translate(" /media screen scale <w> <h> — Set size (world units)\n") +
+                Translate(" /media screen reset — Return to overlay mode\n") +
+                Translate(" /media screen save — Save current placement");
+        }
+
+        private void UpdateMediaCommandHelp()
+        {
+            _commandManager.RemoveHandler("/media");
+            _commandManager.AddHandler("/media", new Dalamud.Game.Command.CommandInfo(OnMediaCommand)
+            {
+                HelpMessage = GetMediaCommandHelpText(),
+                ShowInHelp = true,
+            });
+        }
+
+        private void InitializeLocalization()
+        {
+            string cachePath = Path.Combine(_pluginInterface.ConfigDirectory.FullName, "translation-cache.json");
+            Translator.CacheLocation = cachePath;
+            Translator.LoadCache(cachePath);
+            ApplyUiLanguageFromConfig();
+            Translator.OnTranslationEvent += (_, _) =>
+            {
+                Interlocked.Increment(ref _translationRevision);
+                EnqueueFrameworkAction(RefreshLocalizedOverlays);
+            };
+            Translator.OnError += (_, ex) =>
+            {
+                _pluginLog.Warning($"[Localization] {ex.Message}");
+                if (_config.UiLanguage != (int)LanguageEnum.English && !_translationServerErrorNotified)
+                {
+                    _translationServerErrorNotified = true;
+                    EnqueueFrameworkAction(() =>
+                        PrintErrorChatFormat("[Media Player] Translation server unreachable ({0}). UI will stay in English until it responds.", Translator.ServerUrlDisplay));
+                }
+            };
+        }
         public bool IsHousingMenuOpen => _wasHousingMenuOpen;
         public Dalamud.Plugin.Services.IObjectTable ObjectTable => _objectTable;
         public Dalamud.Plugin.Services.IPluginLog PluginLog => _pluginLog;
@@ -229,6 +340,7 @@ namespace XivMediaPlayer
                  ?? new Configuration();
             _config.Initialize(_pluginInterface);
             _config.Migrate();
+            InitializeLocalization();
 
             // Initialize yt-dlp manager
             _ytDlpManager = new YtDlpManager(pluginDir, _config.PreferredQuality) { EnableSabrProxy = _config.EnableSabrProxy };
@@ -245,7 +357,7 @@ namespace XivMediaPlayer
                 _pluginLog.Warning(ex, "[yt-dlp] " + ex.Message);
                 if (MediaPlayerCore.YtDlp.YtDlpManager.IsYouTubeSessionError(ex.Message))
                 {
-                    EnqueueFrameworkAction(() => _chat.PrintError(
+                    EnqueueFrameworkAction(() => PrintErrorChat(
                         "[Media Player] YouTube rejected the session. Export fresh cookies via VRCVideoCacher (private/incognito window), restart the plugin, and retry."));
                 }
             };
@@ -312,19 +424,8 @@ namespace XivMediaPlayer
             _pluginInterface.UiBuilder.DisableCutsceneUiHide = true;
             _pluginInterface.UiBuilder.DisableAutomaticUiHide = true;
 
-            // Register commands
-            _commandManager.AddHandler("/media", new Dalamud.Game.Command.CommandInfo(OnMediaCommand)
-            {
-                HelpMessage = "Media Player commands.\n" +
-                " /media — Open settings\n" +
-                " /media twitch <url> — Tune into a Twitch stream\n" +
-                " /media rtmp <url> — Tune into an RTMP stream\n" +
-                " /media play <url> — Play a media URL\n" +
-                " /media stop — Stop current stream\n" +
-                " /media video — Toggle video window\n" +
-                " /media emulate <ip> <session> — Connect to emulation server",
-                ShowInHelp = true,
-            });
+            // Register commands (help text refreshed when language changes)
+            UpdateMediaCommandHelp();
 
             // Hook events
             _framework.Update += OnFrameworkUpdate;
@@ -727,7 +828,10 @@ namespace XivMediaPlayer
             {
                 case "depth":
                     _depthPreviewWindow.IsOpen = !_depthPreviewWindow.IsOpen;
-                    _chat.Print($"[Media Player] Depth preview {(_depthPreviewWindow.IsOpen ? "opened" : "closed")}.");
+                    if (_depthPreviewWindow.IsOpen)
+                        PrintChat("[Media Player] Depth preview opened.");
+                    else
+                        PrintChat("[Media Player] Depth preview closed.");
                     break;
                 case "twitch":
                     if (splitArgs.Length > 1 && splitArgs[1].Contains("twitch.tv"))
@@ -759,7 +863,7 @@ namespace XivMediaPlayer
                         }
                         else
                         {
-                            _chat.PrintError("[Media Player] No active stream. Use: /media twitch <url>");
+                            PrintErrorChat("[Media Player] No active stream. Use: /media twitch <url>");
                         }
                     }
                     break;
@@ -781,7 +885,7 @@ namespace XivMediaPlayer
                         string url = splitArgs[1];
                         if (_playerObject == null)
                         {
-                            _chat.PrintError("[Media Player] Not initialized yet. Are you logged in?");
+                            PrintErrorChat("[Media Player] Not initialized yet. Are you logged in?");
                             _pluginLog.Warning("[Media Player] _playerObject is null. _hasBeenInitialized=" + _hasBeenInitialized);
                             break;
                         }
@@ -805,7 +909,7 @@ namespace XivMediaPlayer
                     }
                     else
                     {
-                        _chat.PrintError("[Media Player] Usage: /media play <url>");
+                        PrintErrorChat("[Media Player] Usage: /media play <url>");
                     }
                     break;
 
@@ -816,12 +920,18 @@ namespace XivMediaPlayer
                         Task.Run(async () =>
                         {
                             bool success = await _ytDlpManager.SelfUpdate();
-                            EnqueueFrameworkAction(() => _chat.Print(success ? "[Media Player] yt-dlp updated." : "[Media Player] yt-dlp update failed."));
+                            EnqueueFrameworkAction(() =>
+                            {
+                                if (success)
+                                    PrintChat("[Media Player] yt-dlp updated.");
+                                else
+                                    PrintChat("[Media Player] yt-dlp update failed.");
+                            });
                         });
                     }
                     else
                     {
-                        _chat.PrintError("[Media Player] yt-dlp not found. Set the path in /media settings.");
+                        PrintErrorChat("[Media Player] yt-dlp not found. Set the path in /media settings.");
                     }
                     break;
 
@@ -829,13 +939,13 @@ namespace XivMediaPlayer
                     _mediaManager?.StopStream();
                     RestoreBgm();
                     ResetStreamValues();
-                    _chat.Print("[Media Player] Stream stopped.");
+                    PrintChat("[Media Player] Stream stopped.");
                     break;
 
                 case "fixaudio":
                     RestoreBgm();
                     FixWindowsVolume();
-                    _chat.Print("[Media Player] Game audio restored.");
+                    PrintChat("[Media Player] Game audio restored.");
                     break;
 
                 case "video":
@@ -851,7 +961,7 @@ namespace XivMediaPlayer
                     }
                     else
                     {
-                        _chat.PrintError("[Media Player] Usage: /media emulate <ip> <session>");
+                        PrintErrorChat("[Media Player] Usage: /media emulate <ip> <session>");
                     }
                     break;
 
@@ -871,7 +981,7 @@ namespace XivMediaPlayer
                     
                     if (!hasPrivileges)
                     {
-                        _chat.PrintError("[Media Player] The screen settings menu can only be accessed while the 'Edit Furnishings' housing menu is open or you are outdoors.");
+                        PrintErrorChat("[Media Player] The screen settings menu can only be accessed while the 'Edit Furnishings' housing menu is open or you are outdoors.");
                         break;
                     }
 
@@ -887,18 +997,7 @@ namespace XivMediaPlayer
                     break;
 
                 case "help":
-                    _chat.Print("[Media Player] Commands:\n" +
-                      " /media — Open settings\n" +
-                      " /media twitch <url> — Tune into a Twitch stream\n" +
-                      " /media rtmp <url> — Tune into an RTMP stream\n" +
-                      " /media play <url> — Play a media URL\n" +
-                      " /media stop — Stop current stream\n" +
-                      " /media video — Toggle video window\n" +
-                      " /media emulate <ip> <session> — Connect to emulation server\n" +
-                      " /media screen [place|move|rotate|scale|reset|save] — 3D screen\n" +
-                      " /media listen — Tune into a shared stream\n" +
-                      " /media ytdlp-update — Update yt-dlp\n" +
-                      " /media help — Show this help");
+                    PrintChat(GetMediaHelpChatText());
                     break;
 
                 default:
@@ -909,11 +1008,11 @@ namespace XivMediaPlayer
 
         private async Task ConnectEmulationAsync(string ip, string session)
         {
-            _chat.Print($"[Media Player] Connecting to emulation server at {ip}...");
+            PrintChatFormat("[Media Player] Connecting to emulation server at {0}...", ip);
             string rtsp = await Networking.EmulationClient.GetRtspUrlAsync(ip, session);
             if (string.IsNullOrEmpty(rtsp))
             {
-                _chat.PrintError("[Media Player] Failed to retrieve stream info from emulation server.");
+                PrintErrorChat("[Media Player] Failed to retrieve stream info from emulation server.");
                 return;
             }
 
@@ -990,7 +1089,7 @@ namespace XivMediaPlayer
 
             if (!isAutoSync && CurrentTvPlacement?.IsLocked == true && CurrentTvPlacement?.OwnerId != _config.OwnerId && !IsHousingMenuOpen)
             {
-                _chat.PrintError("[Media Player] Cannot play stream: The TV in this room is locked by its owner.");
+                PrintErrorChat("[Media Player] Cannot play stream: The TV in this room is locked by its owner.");
                 return;
             }
 
@@ -1150,7 +1249,7 @@ namespace XivMediaPlayer
                     catch (Exception ex)
                     {
                         _pluginLog.Warning(ex, "[Live] HLS proxy setup failed.");
-                        _chat.PrintError($"[Media Player] Live stream setup failed: {ex.Message}");
+                        PrintErrorChatFormat("[Media Player] Live stream setup failed: {0}", ex.Message);
                         return;
                     }
                 }
@@ -1255,16 +1354,53 @@ namespace XivMediaPlayer
             return true;
         }
 
+        private void RefreshLocalizedOverlays()
+        {
+            if (_isQueueMenuOpen)
+            {
+                _queueMenuTextureManager?.UpdateQueue(_mediaQueue,
+                    string.IsNullOrEmpty(_currentMediaTitle) ? Translate("Nothing Playing") : _currentMediaTitle);
+            }
+
+            if (_isHistoryMenuOpen)
+            {
+                _historyMenuTextureManager?.UpdateHistory(_config.WatchHistory);
+            }
+
+            _titleTextureManager?.InvalidateLoadingCache();
+        }
+
+        private string TranslateLoadingStatus(string msg)
+        {
+            if (Localization.TranslationGuard.ShouldSkipTranslation(msg))
+            {
+                return msg;
+            }
+
+            if (msg.StartsWith("SABR buffering...", StringComparison.OrdinalIgnoreCase))
+            {
+                var match = System.Text.RegularExpressions.Regex.Match(msg, @"\(([0-9.]+)\s*MB ready\)");
+                if (match.Success && double.TryParse(match.Groups[1].Value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double mb))
+                {
+                    return string.Format(Translate("SABR buffering... ({0:0.#} MB ready)"), mb);
+                }
+
+                return msg;
+            }
+
+            return Translate(msg);
+        }
+
         private string GetMediaLoadingMessage()
         {
             if (_mediaManager?.ActiveStream?.IsPendingResumeSeek == true)
             {
-                return "Buffering to resume position...";
+                return Translate("Buffering to resume position...");
             }
 
             if (!string.IsNullOrWhiteSpace(_mediaLoadingMessage))
             {
-                return _mediaLoadingMessage;
+                return TranslateLoadingStatus(_mediaLoadingMessage);
             }
 
             var path = _mediaManager?.ActiveStream?.SoundPath;
@@ -1274,17 +1410,17 @@ namespace XivMediaPlayer
                 if (sabrStatus.IsDownloading)
                 {
                     return mb > 0.01
-                        ? $"Buffering video... {mb:0.#} MB downloaded"
-                        : "Buffering video... starting download";
+                        ? string.Format(Translate("Buffering video... {0:0.#} MB downloaded"), mb)
+                        : Translate("Buffering video... starting download");
                 }
             }
 
             if (_isResolvingMedia)
             {
-                return "Preparing video...";
+                return Translate("Preparing video...");
             }
 
-            return "Loading video...";
+            return Translate("Loading video...");
         }
 
         private void ResetPlaybackEnsureState()
@@ -1433,7 +1569,7 @@ namespace XivMediaPlayer
 
             if (!isAutoSync && CurrentTvPlacement?.IsLocked == true && CurrentTvPlacement?.OwnerId != _config.OwnerId && !IsHousingMenuOpen)
             {
-                _chat.PrintError("[Media Player] Cannot play: The TV in this room is locked by its owner.");
+                PrintErrorChat("[Media Player] Cannot play: The TV in this room is locked by its owner.");
                 return;
             }
 
@@ -1442,7 +1578,7 @@ namespace XivMediaPlayer
             {
                 if (!IsUrlSafeForPublic(url))
                 {
-                    if (!isAutoSync) _chat.PrintError("[Media Player] Cannot play: Safe Mode is enabled for outdoor screens. Only verified domains (YouTube, Twitch, Vimeo) are allowed.");
+                    if (!isAutoSync) PrintErrorChat("[Media Player] Cannot play: Safe Mode is enabled for outdoor screens. Only verified domains (YouTube, Twitch, Vimeo) are allowed.");
                     _pluginLog.Warning($"[Social] Blocked playback of unsafe URL {url} due to Safe Mode.");
                     return;
                 }
@@ -1498,7 +1634,7 @@ namespace XivMediaPlayer
                         _currentStreamer = "Direct Stream";
                         _currentMediaTitle = "Direct Stream";
 
-                        _chat.Print($"[Media Player] Playing direct stream!\r\nUse \"/media video\" to toggle the video feed.\r\nUse \"/media stop\" to stop.");
+                        PrintChat("[Media Player] Playing direct stream!\r\nUse \"/media video\" to toggle the video feed.\r\nUse \"/media stop\" to stop.");
 
                         if (!isAutoSync)
                         {
@@ -1520,7 +1656,7 @@ namespace XivMediaPlayer
             {
                 if (_ytDlpInitTask != null && !_ytDlpInitTask.IsCompleted)
                 {
-                    EnqueueFrameworkAction(() => _chat.Print("[Media Player] Waiting for yt-dlp download/update to finish..."));
+                    EnqueueFrameworkAction(() => PrintChat("[Media Player] Waiting for yt-dlp download/update to finish..."));
                     await _ytDlpInitTask;
                 }
                 if (resolutionId != _currentResolutionId) return;
@@ -1624,7 +1760,7 @@ namespace XivMediaPlayer
                     if (streamUrls == null || streamUrls.Length == 0 || string.IsNullOrEmpty(streamUrls[0]))
                         {
                             // Fallback to CefSharp for heavily protected sites
-                            EnqueueFrameworkAction(() => _chat.Print("[Media Player] yt-dlp failed. Falling back to embedded browser resolver..."));
+                            EnqueueFrameworkAction(() => PrintChat("[Media Player] yt-dlp failed. Falling back to embedded browser resolver..."));
 
                         MediaPlayerCore.Resolvers.CefSharpResolverResult? cefResult = null;
                         try
@@ -1655,7 +1791,7 @@ namespace XivMediaPlayer
                                 });
                             }
 
-                            EnqueueFrameworkAction(() => _chat.Print("[Media Player] Embedded browser successfully found stream URL."));
+                            EnqueueFrameworkAction(() => PrintChat("[Media Player] Embedded browser successfully found stream URL."));
 
                             // Merge headers
                             if (metadata == null) metadata = new MediaPlayerCore.YtDlp.YtDlpMetadata();
@@ -1681,7 +1817,7 @@ namespace XivMediaPlayer
                             var fallbackHeaders = metadata?.HttpHeaders;
                             EnqueueFrameworkAction(() =>
                             {
-                                _chat.PrintError("[Media Player] Failed to resolve URL natively. Trying direct playback...");
+                                PrintErrorChat("[Media Player] Failed to resolve URL natively. Trying direct playback...");
                                 TuneIntoStream(url, audioGameObject, startTimeMs, fallbackHeaders);
                             });
                             return;
@@ -1756,11 +1892,10 @@ namespace XivMediaPlayer
                         _currentStreamer = !string.IsNullOrEmpty(uploader) ? uploader : title;
                         _currentMediaTitle = title;
 
-                        _chat.Print($"[Media Player] Now playing: {title}" +
-                          (!string.IsNullOrEmpty(uploader) ? $" by {uploader}" : "") +
-                          (!string.IsNullOrEmpty(statusMsg) ? $" [{statusMsg}]" : "") +
-                          "\r\nUse \"/media video\" to toggle the video feed." +
-                          "\r\nUse \"/media stop\" to stop.");
+                        PrintChatFormat("[Media Player] Now playing: {0}{1}{2}\r\nUse \"/media video\" to toggle the video feed.\r\nUse \"/media stop\" to stop.",
+                            title,
+                            !string.IsNullOrEmpty(uploader) ? string.Format(Translate(" by {0}"), uploader) : "",
+                            !string.IsNullOrEmpty(statusMsg) ? string.Format(Translate(" [{0}]"), statusMsg) : "");
 
                         if (!isAutoSync)
                         {
@@ -1939,7 +2074,7 @@ namespace XivMediaPlayer
         {
             if (_config.VerboseChatLogging)
             {
-                _chat.Print(message);
+                PrintChat(message);
             }
         }
 
@@ -1990,7 +2125,7 @@ namespace XivMediaPlayer
                         _lastStreamURL = value;
                         string cleanedURL = RemoveSpecialSymbols(value);
                         string streamer = cleanedURL.Replace(@"https://", null).Replace(@"www.", null).Replace("twitch.tv/", null);
-                        _chat.Print("[Media Player] " + streamer + " is hosting a stream! Use \"/media listen\" to tune in.");
+                        PrintChatFormat("[Media Player] {0} is hosting a stream! Use \"/media listen\" to tune in.", streamer);
                     }
                 }
             }
@@ -2208,7 +2343,7 @@ namespace XivMediaPlayer
                 // Start playback if there was a URL and auto resume is enabled
                 if (_config.AutoResumeMedia && !string.IsNullOrEmpty(state.CurrentUrl) && _playerObject != null)
                 {
-                    _chat.Print($"[Media Player] Resuming playback in this room...");
+                    PrintChat("[Media Player] Resuming playback in this room...");
                     _lastStreamObject = CurrentAudioSource;
                     PlayRouted(state.CurrentUrl, CurrentAudioSource, (int)state.TimecodeMs, isAutoSync: true);
                 }
@@ -2282,7 +2417,7 @@ namespace XivMediaPlayer
                     // If we successfully pushed a foreground sync, we are definitely the DJ now.
                     if (!isBackgroundSync)
                     {
-                        _chat.Print($"[Media Player] Server push successful!");
+                        PrintChat("[Media Player] Server push successful!");
                         _isLocalDj = true;
                         _currentMediaOwnerId = _config.OwnerId;
                     }
@@ -2299,7 +2434,7 @@ namespace XivMediaPlayer
                 {
                     _isLocalDj = false;
                     _currentMediaOwnerId = "";
-                    _chat.PrintError("[Media Player] Cannot share media: The TV in this room is locked by its owner.");
+                    PrintErrorChat("[Media Player] Cannot share media: The TV in this room is locked by its owner.");
                     await FetchMediaFromServerAsync();
                 }
                 catch (ArgumentException ex)
@@ -2309,11 +2444,11 @@ namespace XivMediaPlayer
 
                     if (IsPlayerAlone())
                     {
-                        _chat.Print($"[Media Player] {ex.Message} (Playing locally only since you are alone).");
+                        PrintChatFormat("[Media Player] {0} (Playing locally only since you are alone).", ex.Message);
                     }
                     else
                     {
-                        _chat.PrintError($"[Media Player] {ex.Message} Cannot share video because others are around.");
+                        PrintErrorChatFormat("[Media Player] {0} Cannot share video because others are around.", ex.Message);
                         await FetchMediaFromServerAsync();
                     }
                 }
@@ -2322,7 +2457,7 @@ namespace XivMediaPlayer
                     _pluginLog.Warning(ex, "[Sync] Server connection failed.");
                     if (!isBackgroundSync)
                     {
-                        _chat.PrintError("[Media Player] Cannot connect to sync server. It may be offline.");
+                        PrintErrorChat("[Media Player] Cannot connect to sync server. It may be offline.");
                     }
                 }
                 catch (Exception ex)
@@ -2430,7 +2565,7 @@ namespace XivMediaPlayer
                 _pluginLog.Information($"[Social] Syncing NEW media from server: {sync.CurrentUrl} at {targetTimeMs}ms (Playing: {sync.IsPlaying})");
                 EnqueueFrameworkAction(() =>
                 {
-                    _chat.Print($"[Media Player] Server Sync: Now playing media loaded by the room owner.");
+                    PrintChat("[Media Player] Server Sync: Now playing media loaded by the room owner.");
 
                     _mediaQueue.Clear();
                     foreach (var url in state.Playlist) _mediaQueue.Enqueue(url);
@@ -2657,7 +2792,7 @@ namespace XivMediaPlayer
             }
             else if (_mediaErrorCount == 5)
             {
-                _chat.PrintError("[Media Player] Failed to play media after multiple attempts.");
+                PrintErrorChat("[Media Player] Failed to play media after multiple attempts.");
                 EnqueueFrameworkAction(() =>
                 {
                     _mediaManager?.StopStream();
@@ -2790,17 +2925,17 @@ namespace XivMediaPlayer
                 {
                     ImGui.SetNextWindowPos(new System.Numerics.Vector2(ImGui.GetIO().DisplaySize.X / 2 - 200, ImGui.GetIO().DisplaySize.Y / 2 - 50));
                     ImGui.SetNextWindowSize(new System.Numerics.Vector2(400, 100));
-                    if (ImGui.Begin("XivMediaPlayer - Initial Setup", ImGuiWindowFlags.NoCollapse | ImGuiWindowFlags.NoResize | ImGuiWindowFlags.NoSavedSettings | ImGuiWindowFlags.NoMove))
+                    if (ImGui.Begin(Translate("XivMediaPlayer - Initial Setup"), ImGuiWindowFlags.NoCollapse | ImGuiWindowFlags.NoResize | ImGuiWindowFlags.NoSavedSettings | ImGuiWindowFlags.NoMove))
                     {
-                        ImGui.TextWrapped(_dependencyManager.Status);
+                        ImGui.TextWrapped(Translate(_dependencyManager.Status));
                         if (_dependencyManager.IsDownloading)
                         {
                             ImGui.ProgressBar(_dependencyManager.DownloadProgress, new System.Numerics.Vector2(-1, 0));
                         }
                         if (_dependencyManager.HasError)
                         {
-                            ImGui.TextColored(new System.Numerics.Vector4(1, 0, 0, 1), _dependencyManager.ErrorMessage);
-                            if (ImGui.Button("Retry Download"))
+                            ImGui.TextColored(new System.Numerics.Vector4(1, 0, 0, 1), Translate(_dependencyManager.ErrorMessage));
+                            if (ImGui.Button(Translate("Retry Download")))
                             {
                                 _ = _dependencyManager.DownloadDependenciesAsync();
                             }
@@ -3063,7 +3198,8 @@ namespace XivMediaPlayer
                                 } else if (action == "clear") {
                                     _mediaQueue.Clear();
                                     _ = PushMediaToServerAsync(false);
-                                    _queueMenuTextureManager?.UpdateQueue(_mediaQueue, _currentMediaTitle ?? "Nothing Playing");
+                                    _queueMenuTextureManager?.UpdateQueue(_mediaQueue,
+                    string.IsNullOrEmpty(_currentMediaTitle) ? Translate("Nothing Playing") : _currentMediaTitle);
                                 } else if (action == "paste") {
                                     Thread thread = new Thread(() =>
                                     {
@@ -3078,18 +3214,19 @@ namespace XivMediaPlayer
                                             EnqueueFrameworkAction(() =>
                                             {
                                                 _mediaQueue.Enqueue(clip);
-                                                _chat.Print($"[Media Player] Queued ({_mediaQueue.Count}): {clip}");
+                                                PrintChatFormat("[Media Player] Queued ({0}): {1}", _mediaQueue.Count, clip);
                                                 if (_mediaManager?.ActiveStream == null || _mediaManager.ActiveStream.PlaybackState == NAudio.Wave.PlaybackState.Stopped)
                                                 {
                                                     if (_playerObject != null) PlayRouted(_mediaQueue.Dequeue(), CurrentAudioSource);
                                                 }
                                                 else _ = PushMediaToServerAsync(false);
-                                                _queueMenuTextureManager?.UpdateQueue(_mediaQueue, _currentMediaTitle ?? "Nothing Playing");
+                                                _queueMenuTextureManager?.UpdateQueue(_mediaQueue,
+                    string.IsNullOrEmpty(_currentMediaTitle) ? Translate("Nothing Playing") : _currentMediaTitle);
                                             });
                                         }
                                         else
                                         {
-                                            EnqueueFrameworkAction(() => _chat.PrintError("[Media Player] Failed to read clipboard or clipboard was empty."));
+                                            EnqueueFrameworkAction(() => PrintErrorChat("[Media Player] Failed to read clipboard or clipboard was empty."));
                                         }
                                     });
                                     thread.SetApartmentState(ApartmentState.STA);
@@ -3101,7 +3238,8 @@ namespace XivMediaPlayer
                                             list.RemoveAt(idx);
                                             _mediaQueue = new Queue<string>(list);
                                             _ = PushMediaToServerAsync(false);
-                                            _queueMenuTextureManager?.UpdateQueue(_mediaQueue, _currentMediaTitle ?? "Nothing Playing");
+                                            _queueMenuTextureManager?.UpdateQueue(_mediaQueue,
+                    string.IsNullOrEmpty(_currentMediaTitle) ? Translate("Nothing Playing") : _currentMediaTitle);
                                         }
                                     }
                                 }
@@ -3147,14 +3285,20 @@ namespace XivMediaPlayer
                                 {
                                     _config.LoopEnabled = !_config.LoopEnabled;
                                     _config.Save();
-                                    _chat.Print($"[Media Player] Loop: {(_config.LoopEnabled ? "ON" : "OFF")}");
+                                    if (_config.LoopEnabled)
+                                        PrintChat("[Media Player] Loop: ON");
+                                    else
+                                        PrintChat("[Media Player] Loop: OFF");
                                 }
                                 // Shuffle (0.68 - 0.72)
                                 else if (uv.X >= 0.68f && uv.X <= 0.72f)
                                 {
                                     _config.ShuffleEnabled = !_config.ShuffleEnabled;
                                     _config.Save();
-                                    _chat.Print($"[Media Player] Shuffle: {(_config.ShuffleEnabled ? "ON" : "OFF")}");
+                                    if (_config.ShuffleEnabled)
+                                        PrintChat("[Media Player] Shuffle: ON");
+                                    else
+                                        PrintChat("[Media Player] Shuffle: OFF");
                                 }
                                 // Refresh (0.74 - 0.78)
                                 else if (uv.X >= 0.74f && uv.X <= 0.78f)
@@ -3170,7 +3314,10 @@ namespace XivMediaPlayer
                                         if (!string.IsNullOrEmpty(LocationKey))
                                         {
                                             _screenSettingsWindow.RegisterTvAsync(LocationKey);
-                                            _chat.Print($"[Media Player] TV is now {(CurrentTvPlacement.IsLocked ? "Locked" : "Unlocked")}.");
+                                            if (CurrentTvPlacement.IsLocked)
+                                                PrintChat("[Media Player] TV is now Locked.");
+                                            else
+                                                PrintChat("[Media Player] TV is now Unlocked.");
                                         }
                                     }
                                     else if (CurrentTvPlacement == null)
@@ -3180,9 +3327,9 @@ namespace XivMediaPlayer
                                         {
                                             _screenSettingsWindow.RegisterTvAsync(LocationKey);
                                         }
-                                        _chat.Print("[Media Player] TV registered and Unlocked.");
+                                        PrintChat("[Media Player] TV registered and Unlocked.");
                                     }
-                                    else { _chat.Print("[Media Player] You do not own this TV."); }
+                                    else { PrintChat("[Media Player] You do not own this TV."); }
                                 }
                                 // Paste (0.85 - 0.89)
                                 else if (uv.X >= 0.85f && uv.X <= 0.89f)
@@ -3208,7 +3355,7 @@ namespace XivMediaPlayer
                                             }
                                             else
                                             {
-                                                EnqueueFrameworkAction(() => _chat.PrintError("[Media Player] Failed to read clipboard or clipboard was empty."));
+                                                EnqueueFrameworkAction(() => PrintErrorChat("[Media Player] Failed to read clipboard or clipboard was empty."));
                                             }
                                         });
                                         thread.SetApartmentState(ApartmentState.STA);
@@ -3223,7 +3370,8 @@ namespace XivMediaPlayer
                                         _isQueueMenuOpen = !_isQueueMenuOpen;
                                         if (_isQueueMenuOpen)
                                         {
-                                            _queueMenuTextureManager?.UpdateQueue(_mediaQueue, _currentMediaTitle ?? "Nothing Playing");
+                                            _queueMenuTextureManager?.UpdateQueue(_mediaQueue,
+                    string.IsNullOrEmpty(_currentMediaTitle) ? Translate("Nothing Playing") : _currentMediaTitle);
                                         }
                                     });
                                 }
@@ -3250,18 +3398,18 @@ namespace XivMediaPlayer
                             {
                                 string url = _lastStreamURL;
                                 if (!string.IsNullOrEmpty(url)) {
-                                    string domain = "the site administrator";
+                                    string domain = Translate("the site administrator");
                                     try {
                                         Uri uri = new Uri(url);
                                         domain = uri.Host;
-                                        _chat.Print($"[Media Player] Opening DMCA Information...");
+                                        PrintChat("[Media Player] Opening DMCA Information...");
                                     } catch { }
                                     
-                                    string dmcaText = $"Content URL: {url}\n\nPlease contact {domain} to report this content.";
+                                    string dmcaText = FormatDmcaClipboardText(url, domain);
                                     ImGui.SetClipboardText(dmcaText);
-                                    _chat.Print("[Media Player] DMCA contact info and URL copied to clipboard.");
+                                    PrintChat("[Media Player] DMCA contact info and URL copied to clipboard.");
                                 } else {
-                                    _chat.PrintError("[Media Player] No active media URL to copy.");
+                                    PrintErrorChat("[Media Player] No active media URL to copy.");
                                 }
                             }
                             else if (_isHistoryMenuOpen)
@@ -3298,7 +3446,7 @@ namespace XivMediaPlayer
                     {
                         if (IsMediaLoading)
                         {
-                            _titleTextureManager.UpdateLoadingOverlay(MediaLoadingMessage, MediaLoadingPulse);
+                            _titleTextureManager.UpdateLoadingOverlay(MediaLoadingMessage, MediaLoadingPulse, _translationRevision);
                         }
                         else
                         {
@@ -3355,13 +3503,16 @@ namespace XivMediaPlayer
                     if (_gameGui.WorldToScreen(tr, out var sTR)) {
                         ImGui.SetNextWindowPos(new System.Numerics.Vector2(sTR.X + 20, sTR.Y));
                         ImGui.SetNextWindowBgAlpha(0.8f);
-                        if (ImGui.Begin("Emulation Controllers", ImGuiWindowFlags.AlwaysAutoResize | ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoMove)) {
-                            ImGui.Text("Controller Slot");
+                        if (ImGui.Begin(Translate("Emulation Controllers"), ImGuiWindowFlags.AlwaysAutoResize | ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoMove)) {
+                            ImGui.Text(Translate("Controller Slot"));
                             ImGui.Separator();
                             for (byte i = 0; i < 4; i++) {
-                                if (ImGui.Selectable($"Player {i+1}", _controllerService?.PlayerSlot == i)) {
+                                if (ImGui.Selectable(string.Format(Translate("Player {0}"), i + 1), _controllerService?.PlayerSlot == i)) {
                                     if (_controllerService != null) _controllerService.PlayerSlot = i;
                                 }
+                            }
+                            if (ImGui.Selectable(Translate("None"), _controllerService?.PlayerSlot == 255)) {
+                                if (_controllerService != null) _controllerService.PlayerSlot = 255;
                             }
                             ImGui.End();
                         }
@@ -3692,13 +3843,7 @@ namespace XivMediaPlayer
         {
             if (args.Length < 2)
             {
-                _chat.Print("[Media Player] Screen commands:\n" +
-                  " /media screen place — Place screen at your look-at point\n" +
-                  " /media screen move <x> <y> <z> — Adjust position\n" +
-                  " /media screen rotate <yaw> [pitch] — Set rotation\n" +
-                  " /media screen scale <w> <h> — Set size (world units)\n" +
-                  " /media screen reset — Return to overlay mode\n" +
-                  " /media screen save — Save current placement");
+                PrintChat(GetScreenCommandHelpText());
                 return;
             }
 
@@ -3716,11 +3861,11 @@ namespace XivMediaPlayer
                     {
                         _worldRenderer.MoveBy(new System.Numerics.Vector3(mx, my, mz));
                         var pos = _worldRenderer.Transform.Position;
-                        _chat.Print($"[Media Player] Screen moved to ({pos.X:F1}, {pos.Y:F1}, {pos.Z:F1})");
+                        PrintChatFormat("[Media Player] Screen moved to ({0:F1}, {1:F1}, {2:F1})", pos.X, pos.Y, pos.Z);
                     }
                     else
                     {
-                        _chat.PrintError("[Media Player] Usage: /media screen move <x> <y> <z>");
+                        PrintErrorChat("[Media Player] Usage: /media screen move <x> <y> <z>");
                     }
                     break;
 
@@ -3729,11 +3874,11 @@ namespace XivMediaPlayer
                     {
                         float pitch = args.Length >= 4 && float.TryParse(args[3], out float p) ? p : 0;
                         _worldRenderer.SetRotation(yaw, pitch);
-                        _chat.Print($"[Media Player] Screen rotation: yaw={yaw:F0}° pitch={pitch:F0}°");
+                        PrintChatFormat("[Media Player] Screen rotation: yaw={0:F0}° pitch={1:F0}°", yaw, pitch);
                     }
                     else
                     {
-                        _chat.PrintError("[Media Player] Usage: /media screen rotate <yaw> [pitch]");
+                        PrintErrorChat("[Media Player] Usage: /media screen rotate <yaw> [pitch]");
                     }
                     break;
 
@@ -3743,17 +3888,17 @@ namespace XivMediaPlayer
                       float.TryParse(args[3], out float sh))
                     {
                         _worldRenderer.SetScale(sw, sh);
-                        _chat.Print($"[Media Player] Screen size: {sw:F1} x {sh:F1} world units");
+                        PrintChatFormat("[Media Player] Screen size: {0:F1} x {1:F1} world units", sw, sh);
                     }
                     else
                     {
-                        _chat.PrintError("[Media Player] Usage: /media screen scale <width> <height>");
+                        PrintErrorChat("[Media Player] Usage: /media screen scale <width> <height>");
                     }
                     break;
 
                 case "reset":
                     _worldRenderer.Reset();
-                    _chat.Print("[Media Player] Screen returned to overlay mode.");
+                    PrintChat("[Media Player] Screen returned to overlay mode.");
                     break;
 
                 case "save":
@@ -3761,11 +3906,11 @@ namespace XivMediaPlayer
                     SaveScreenForCurrentLocation();
                     _config.Save();
                     var locKey = GetLocationKey();
-                    _chat.Print($"[Media Player] Screen placement saved for {locKey}.");
+                    PrintChatFormat("[Media Player] Screen placement saved for {0}.", locKey);
                     break;
 
                 default:
-                    _chat.PrintError($"[Media Player] Unknown screen command: {args[1]}");
+                    PrintErrorChatFormat("[Media Player] Unknown screen command: {0}", args[1]);
                     break;
             }
         }
@@ -3792,11 +3937,11 @@ namespace XivMediaPlayer
                 
                 var screenPos = camPos - forward * 5.0f;
                 _worldRenderer.PlaceAt(screenPos, camPos);
-                _chat.Print($"[Media Player] Screen placed at ({screenPos.X:F1}, {screenPos.Y:F1}, {screenPos.Z:F1})");
+                PrintChatFormat("[Media Player] Screen placed at ({0:F1}, {1:F1}, {2:F1})", screenPos.X, screenPos.Y, screenPos.Z);
             }
             else
             {
-                _chat.PrintError("[Media Player] Camera not available.");
+                PrintErrorChat("[Media Player] Camera not available.");
             }
         }
         #region Playback Controls
@@ -3808,7 +3953,7 @@ namespace XivMediaPlayer
 
             if (errorStr.Contains("Sign in to confirm", StringComparison.OrdinalIgnoreCase))
             {
-                EnqueueFrameworkAction(() => _chat.PrintError("[Media Player] YouTube blocked the request (bot check). Please configure cookies via VRCVideoCacher or cookies.txt to play YouTube videos!"));
+                EnqueueFrameworkAction(() => PrintErrorChat("[Media Player] YouTube blocked the request (bot check). Please configure cookies via VRCVideoCacher or cookies.txt to play YouTube videos!"));
                 return true;
             }
 
@@ -3818,7 +3963,7 @@ namespace XivMediaPlayer
                     || errorStr.Contains("Only images are available", StringComparison.OrdinalIgnoreCase)
                     || errorStr.Contains("SABR", StringComparison.OrdinalIgnoreCase)))
             {
-                EnqueueFrameworkAction(() => _chat.PrintError("[Media Player] YouTube playback failed. Check cookies in settings (VRCVideoCacher), or re-enable \"YouTube SABR mode\" if you turned it off."));
+                EnqueueFrameworkAction(() => PrintErrorChat("[Media Player] YouTube playback failed. Check cookies in settings (VRCVideoCacher), or re-enable \"YouTube SABR mode\" if you turned it off."));
                 return true;
             }
 
@@ -3837,7 +3982,7 @@ namespace XivMediaPlayer
 
             if (errorStr.Contains("Sign in to confirm", StringComparison.OrdinalIgnoreCase))
             {
-                EnqueueFrameworkAction(() => _chat.PrintError("[Media Player] YouTube blocked the request (bot check). Please configure cookies via VRCVideoCacher or cookies.txt to play YouTube videos!"));
+                EnqueueFrameworkAction(() => PrintErrorChat("[Media Player] YouTube blocked the request (bot check). Please configure cookies via VRCVideoCacher or cookies.txt to play YouTube videos!"));
                 return true;
             }
 
@@ -3847,7 +3992,7 @@ namespace XivMediaPlayer
                     || errorStr.Contains("Only images are available", StringComparison.OrdinalIgnoreCase)
                     || errorStr.Contains("SABR", StringComparison.OrdinalIgnoreCase)))
             {
-                EnqueueFrameworkAction(() => _chat.PrintError("[Media Player] YouTube playback failed. Check cookies in settings (VRCVideoCacher), or re-enable \"YouTube SABR mode\" if you turned it off."));
+                EnqueueFrameworkAction(() => PrintErrorChat("[Media Player] YouTube playback failed. Check cookies in settings (VRCVideoCacher), or re-enable \"YouTube SABR mode\" if you turned it off."));
                 return true;
             }
 
@@ -4060,7 +4205,7 @@ namespace XivMediaPlayer
         /// </summary>
         public void Stop()
         {
-            _chat.Print("[Media Player] Stopping media and clearing queue...");
+            PrintChat("[Media Player] Stopping media and clearing queue...");
             _mediaManager?.StopStream();
             _mediaQueue.Clear();
             ResetStreamValues(true);
@@ -4152,7 +4297,7 @@ namespace XivMediaPlayer
                 nextUrl = _mediaQueue.Dequeue();
             }
 
-            _chat.Print($"[Media Player] Playing next: {nextUrl}");
+            PrintChatFormat("[Media Player] Playing next: {0}", nextUrl);
             PlayRouted(nextUrl, CurrentAudioSource);
         }
 
@@ -4173,7 +4318,7 @@ namespace XivMediaPlayer
             }
 
             string prevUrl = _mediaHistory.Pop();
-            _chat.Print($"[Media Player] Playing previous: {prevUrl}");
+            PrintChatFormat("[Media Player] Playing previous: {0}", prevUrl);
             PlayRouted(prevUrl, CurrentAudioSource);
         }
 
@@ -4287,14 +4432,14 @@ namespace XivMediaPlayer
             catch (Exception e)
             {
                 _pluginLog.Warning(e, "[Media Player] Failed to reinitialize MediaManager during kill.");
-                _chat.PrintError("[Media Player] Failed to restart media pipeline.");
+                PrintErrorChat("[Media Player] Failed to restart media pipeline.");
                 return;
             }
 
             // Resume playback
             if (!string.IsNullOrEmpty(savedUrl) && _playerObject != null)
             {
-                _chat.Print("[Media Player] Resuming playback...");
+                PrintChat("[Media Player] Resuming playback...");
                 PlayRouted(savedUrl, CurrentAudioSource, savedTimeMs);
             }
             else

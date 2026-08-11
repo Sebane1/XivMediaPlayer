@@ -8,6 +8,7 @@ using System.Drawing.Imaging;
 using System.Drawing.Text;
 using System.Linq;
 using System.Runtime.InteropServices;
+using XivMediaPlayer.Localization;
 
 namespace XivMediaPlayer.Compositing
 {
@@ -87,7 +88,7 @@ namespace XivMediaPlayer.Compositing
             using var redBrush = new SolidBrush(Color.FromArgb(255, 80, 80));
 
             // Draw Header
-            gfx.DrawString("Up Next", titleFont, textBrush, new PointF(panelX + 40, panelY + 40));
+            gfx.DrawString(Translation.Get("Up Next"), titleFont, textBrush, new PointF(panelX + 40, panelY + 40));
 
             // Top Buttons
             float btnWidth = 250;
@@ -103,14 +104,14 @@ namespace XivMediaPlayer.Compositing
             // Paste from Clipboard Button
             gfx.FillRectangle(btnBgBrush, pasteBtnX, pasteBtnY, btnWidth, btnHeight);
             gfx.DrawRectangle(borderPen, pasteBtnX, pasteBtnY, btnWidth, btnHeight);
-            gfx.DrawString("Paste URL", itemFont, textBrush, new RectangleF(pasteBtnX, pasteBtnY, btnWidth, btnHeight), new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center });
+            gfx.DrawString(Translation.Get("Paste URL"), itemFont, textBrush, new RectangleF(pasteBtnX, pasteBtnY, btnWidth, btnHeight), new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center });
             
             _hitZones.Add(new QueueHitZone { StartX = pasteBtnX / width, EndX = (pasteBtnX + btnWidth) / width, StartY = pasteBtnY / height, EndY = (pasteBtnY + btnHeight) / height, Action = "paste" });
 
             // Clear Queue Button
             gfx.FillRectangle(btnBgBrush, clearBtnX, clearBtnY, btnWidth, btnHeight);
             gfx.DrawRectangle(borderPen, clearBtnX, clearBtnY, btnWidth, btnHeight);
-            gfx.DrawString("Clear Queue", itemFont, redBrush, new RectangleF(clearBtnX, clearBtnY, btnWidth, btnHeight), new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center });
+            gfx.DrawString(Translation.Get("Clear Queue"), itemFont, redBrush, new RectangleF(clearBtnX, clearBtnY, btnWidth, btnHeight), new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center });
             
             _hitZones.Add(new QueueHitZone { StartX = clearBtnX / width, EndX = (clearBtnX + btnWidth) / width, StartY = clearBtnY / height, EndY = (clearBtnY + btnHeight) / height, Action = "clear" });
 
@@ -121,10 +122,10 @@ namespace XivMediaPlayer.Compositing
             float itemHeight = 80;
 
             // Currently Playing
-            gfx.DrawString("Now Playing:", subFont, subBrush, new PointF(panelX + 40, currentY));
+            gfx.DrawString(Translation.Get("Now Playing:"), subFont, subBrush, new PointF(panelX + 40, currentY));
             currentY += 40;
             
-            string playingText = string.IsNullOrEmpty(currentPlayingTitle) ? "Nothing" : currentPlayingTitle;
+            string playingText = string.IsNullOrEmpty(currentPlayingTitle) ? Translation.Get("Nothing") : currentPlayingTitle;
             if (playingText.Length > 70) playingText = playingText.Substring(0, 67) + "...";
             gfx.DrawString(playingText, itemFont, textBrush, new PointF(panelX + 60, currentY));
             currentY += 60;
@@ -167,11 +168,11 @@ namespace XivMediaPlayer.Compositing
 
             if (queueList.Count == 0)
             {
-                gfx.DrawString("The queue is empty.", itemFont, subBrush, new PointF(panelX + 60, currentY + 20));
+                gfx.DrawString(Translation.Get("The queue is empty."), itemFont, subBrush, new PointF(panelX + 60, currentY + 20));
             }
             else if (queueList.Count > limit)
             {
-                gfx.DrawString($"... and {queueList.Count - limit} more items.", subFont, subBrush, new PointF(panelX + 60, currentY + 20));
+                gfx.DrawString(string.Format(Translation.Get("... and {0} more items."), queueList.Count - limit), subFont, subBrush, new PointF(panelX + 60, currentY + 20));
             }
 
             // Extract the BGRA bytes

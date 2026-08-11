@@ -2,6 +2,7 @@ using Dalamud.Configuration;
 using Dalamud.Plugin;
 using System;
 using System.Collections.Generic;
+using XivMediaPlayer.Localization;
 
 namespace XivMediaPlayer {
   [Serializable]
@@ -58,7 +59,13 @@ namespace XivMediaPlayer {
     public int PreferredQuality { get; set; } = 720;
     public bool EnableSabrProxy { get; set; } = true;
 
-    public const int CurrentConfigVersion = 2;
+    public const int CurrentConfigVersion = 4;
+
+    /// <summary>UI language index matching <see cref="LanguageEnum"/>.</summary>
+    public int UiLanguage { get; set; } = (int)LanguageEnum.English;
+
+    /// <summary>RoleplayingQuestCore-compatible translation proxy base URL.</summary>
+    public string TranslationServerUrl { get; set; } = "http://127.0.0.1:5681";
 
     // World screen compositing settings (legacy single placement)
     public MediaPlayerCore.Compositing.WorldScreenTransform WorldScreen { get; set; } = new MediaPlayerCore.Compositing.WorldScreenTransform();
@@ -109,6 +116,16 @@ namespace XivMediaPlayer {
       // v2: SABR for YouTube VOD + automatic live detection became the default path.
       if (versioned.Version < 2) {
         EnableSabrProxy = true;
+      }
+
+      if (versioned.Version < 3) {
+        UiLanguage = (int)LanguageEnum.English;
+      }
+
+      if (versioned.Version < 4) {
+        if (string.IsNullOrWhiteSpace(TranslationServerUrl)) {
+          TranslationServerUrl = "http://127.0.0.1:5681";
+        }
       }
 
       versioned.Version = CurrentConfigVersion;

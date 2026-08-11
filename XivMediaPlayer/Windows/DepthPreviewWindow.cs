@@ -6,6 +6,7 @@ using Dalamud.Bindings.ImGui;
 using System;
 using System.Numerics;
 using XivMediaPlayer.Compositing;
+using XivMediaPlayer.Localization;
 using FFXIVClientStructs.FFXIV.Client.Graphics.Render;
 using FFXIVClientStructs.FFXIV.Client.Graphics.Kernel;
 using Vortice.Direct3D11;
@@ -30,7 +31,8 @@ namespace XivMediaPlayer.Windows {
     private ID3D11Texture2D _dynamicCopyTex;
     
     private int _selectedPreviewMode = 0;
-    private readonly string[] _previewModes = {
+    private static readonly string[] PreviewModeKeys =
+    {
         "Depth Buffer (Raw Capture)",
         "UI BackBuffer (Raw Capture)",
         "RTM: DepthStencil",
@@ -52,6 +54,8 @@ namespace XivMediaPlayer.Windows {
         "RTM: SwapChainDepthStencil",
         "Reconstructed Scene (GBuffer2 * GBuffer3)"
     };
+
+    private string L(string text) => Translation.Get(text);
 
     private ID3D11ShaderResourceView _dynamicSrv;
     private IntPtr _dynamicSrvTexPtr;
@@ -75,21 +79,23 @@ namespace XivMediaPlayer.Windows {
     public override unsafe void Draw() {
       if (_disposed) return;
 
-      ImGui.Combo("Preview Mode", ref _selectedPreviewMode, _previewModes, _previewModes.Length);
+      WindowName = L("Depth Buffer Preview");
+      string[] previewModes = Array.ConvertAll(PreviewModeKeys, L);
+      ImGui.Combo(L("Preview Mode"), ref _selectedPreviewMode, previewModes, previewModes.Length);
       ImGui.SameLine();
-      if (ImGui.Button("Copy to Clipboard")) {
+      if (ImGui.Button(L("Copy to Clipboard"))) {
           CopyToClipboard();
       }
       ImGui.SameLine();
-      if (ImGui.Button("Export Preview Frame to Desktop")) {
+      if (ImGui.Button(L("Export Preview Frame to Desktop"))) {
           ExportPreviewFrame();
       }
       ImGui.SameLine();
-      if (ImGui.Button("Dump RTM Fields to Log")) {
+      if (ImGui.Button(L("Dump RTM Fields to Log"))) {
           DumpRtmFields();
       }
       ImGui.SameLine();
-      if (ImGui.Button("Bulk Export Buffers to Desktop")) {
+      if (ImGui.Button(L("Bulk Export Buffers to Desktop"))) {
           BulkExportBuffers();
       }
       ImGui.Separator();
@@ -101,7 +107,7 @@ namespace XivMediaPlayer.Windows {
 
       var rtm = RenderTargetManager.Instance();
       if (rtm == null) {
-        ImGui.TextColored(new Vector4(1, 0, 0, 1), "RenderTargetManager is null");
+        ImGui.TextColored(new Vector4(1, 0, 0, 1), L("RenderTargetManager is null"));
         return;
       }
 
@@ -122,19 +128,19 @@ namespace XivMediaPlayer.Windows {
           }
           
           int showMode = _sceneRenderer.ShowMode;
-          if (ImGui.RadioButton("Reconstructed Scene", showMode == 0)) { _sceneRenderer.ShowMode = 0; }
+          if (ImGui.RadioButton(L("Reconstructed Scene"), showMode == 0)) { _sceneRenderer.ShowMode = 0; }
           ImGui.SameLine();
-          if (ImGui.RadioButton("Difference Map", showMode == 1)) { _sceneRenderer.ShowMode = 1; }
+          if (ImGui.RadioButton(L("Difference Map"), showMode == 1)) { _sceneRenderer.ShowMode = 1; }
           ImGui.SameLine();
-          if (ImGui.RadioButton("Alpha Mask", showMode == 2)) { _sceneRenderer.ShowMode = 2; }
+          if (ImGui.RadioButton(L("Alpha Mask"), showMode == 2)) { _sceneRenderer.ShowMode = 2; }
           ImGui.SameLine();
-          if (ImGui.RadioButton("Inverted Difference", showMode == 3)) { _sceneRenderer.ShowMode = 3; }
+          if (ImGui.RadioButton(L("Inverted Difference"), showMode == 3)) { _sceneRenderer.ShowMode = 3; }
           ImGui.SameLine();
-          if (ImGui.RadioButton("Native SwapChain Alpha", showMode == 4)) { _sceneRenderer.ShowMode = 4; }
+          if (ImGui.RadioButton(L("Native SwapChain Alpha"), showMode == 4)) { _sceneRenderer.ShowMode = 4; }
           ImGui.SameLine();
-          if (ImGui.RadioButton("Alpha Difference", showMode == 5)) { _sceneRenderer.ShowMode = 5; }
+          if (ImGui.RadioButton(L("Alpha Difference"), showMode == 5)) { _sceneRenderer.ShowMode = 5; }
           ImGui.SameLine();
-          if (ImGui.RadioButton("UI Extraction (Colored)", showMode == 6)) { _sceneRenderer.ShowMode = 6; }
+          if (ImGui.RadioButton(L("UI Extraction (Colored)"), showMode == 6)) { _sceneRenderer.ShowMode = 6; }
           
           if (_sceneRenderer.PreviewTextureHandle != IntPtr.Zero) {
               var avail = ImGui.GetContentRegionAvail();
@@ -149,7 +155,7 @@ namespace XivMediaPlayer.Windows {
               var textureId = System.Runtime.CompilerServices.Unsafe.As<IntPtr, Dalamud.Bindings.ImGui.ImTextureID>(ref srvHandle);
               ImGui.Image(textureId, new Vector2(drawW, drawH));
           } else {
-              ImGui.TextColored(new Vector4(1, 0, 0, 1), "Failed to render reconstructed scene.");
+              ImGui.TextColored(new Vector4(1, 0, 0, 1), L("Failed to render reconstructed scene."));
           }
           return;
       }
@@ -176,13 +182,13 @@ namespace XivMediaPlayer.Windows {
       }
 
       if (tex == null || tex->D3D11Texture2D == null) {
-        ImGui.TextColored(new Vector4(1, 1, 0, 1), "Selected texture is null or not initialized.");
+        ImGui.TextColored(new Vector4(1, 1, 0, 1), L("Selected texture is null or not initialized."));
         return;
       }
 
       var srv = GetOrCreateSRV(tex);
       if (srv == null) {
-        ImGui.TextColored(new Vector4(1, 0, 0, 1), "Failed to create ShaderResourceView for this texture.");
+        ImGui.TextColored(new Vector4(1, 0, 0, 1), L("Failed to create ShaderResourceView for this texture."));
         return;
       }
 
@@ -328,14 +334,14 @@ namespace XivMediaPlayer.Windows {
           ImGui.Image(_previewTexture.Handle, new Vector2(drawW, drawH));
         }
       } else {
-        ImGui.TextColored(new Vector4(1, 1, 0, 1), "No depth data captured yet.");
+        ImGui.TextColored(new Vector4(1, 1, 0, 1), L("No depth data captured yet."));
       }
 
       // UI Capture debug section
       if (UICapture != null) {
         ImGui.Separator();
         UICapture.GeneratePreview();
-        ImGui.TextColored(new Vector4(0, 1, 1, 1), $"UI Capture: {UICapture.DebugInfo}");
+        ImGui.TextColored(new Vector4(0, 1, 1, 1), string.Format(L("UI Capture: {0}"), UICapture.DebugInfo));
         
         var uiData = UICapture.LastAlphaData;
         
@@ -371,8 +377,8 @@ namespace XivMediaPlayer.Windows {
           }
         }
 
-        ImGui.Text($"Addon rects: {UICapture.LastAddonRects.Count}");
-        if (ImGui.CollapsingHeader("Detected Addons")) {
+        ImGui.Text(string.Format(L("Addon rects: {0}"), UICapture.LastAddonRects.Count));
+        if (ImGui.CollapsingHeader(L("Detected Addons"))) {
           for (int i = 0; i < UICapture.LastAddonRects.Count; i++) {
             var r = UICapture.LastAddonRects[i];
             ImGui.Text($"  [{i}] {r.Name}: ({r.X},{r.Y}) {r.W}x{r.H}");
