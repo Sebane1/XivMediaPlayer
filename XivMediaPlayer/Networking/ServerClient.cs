@@ -187,6 +187,33 @@ namespace XivMediaPlayer.Networking
             return new List<RoomMediaStateSync>();
         }
 
+        public async Task<DiagnosticLogSubmitResult?> SubmitDiagnosticLogsAsync(DiagnosticLogReport report)
+        {
+            try
+            {
+                using var request = new HttpRequestMessage(HttpMethod.Post, $"{_baseUrl}/api/diagnostics/logs")
+                {
+                    Content = JsonContent.Create(report),
+                };
+                request.Headers.UserAgent.ParseAdd("XivMediaPlayer/1.0");
+
+                using var response = await _httpClient.SendAsync(request);
+                if (response.IsSuccessStatusCode)
+                {
+                    return await response.Content.ReadFromJsonAsync<DiagnosticLogSubmitResult>();
+                }
+
+                string body = await response.Content.ReadAsStringAsync();
+                _log.Warning($"Diagnostic log upload failed ({(int)response.StatusCode}): {body}");
+            }
+            catch (Exception ex)
+            {
+                _log.Error(ex, "Failed to upload diagnostic logs");
+            }
+
+            return null;
+        }
+
         public void Dispose()
         {
             _httpClient.Dispose();

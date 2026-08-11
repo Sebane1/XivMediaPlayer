@@ -89,6 +89,7 @@ namespace MediaPlayerCore.YtDlp
         private readonly SemaphoreSlim _bgutilServerGate = new(1, 1);
         private Process? _bgutilServerProcess;
         private volatile bool _bgutilServerReady;
+        private int _youTubeSetupRunning;
 
         /// <summary>HTTP headers from the most recent yt-dlp format resolve (-j).</summary>
         public Dictionary<string, string>? LastResolvedHttpHeaders { get; private set; }
@@ -484,6 +485,60 @@ namespace MediaPlayerCore.YtDlp
             _bgutilServerGate.Dispose();
         }
 
+        private void StopBgutilServerProcess()
+        {
+            try
+            {
+                if (_bgutilServerProcess != null && !_bgutilServerProcess.HasExited)
+                {
+                    _bgutilServerProcess.Kill(true);
+                }
+            }
+            catch { }
+            _bgutilServerProcess?.Dispose();
+            _bgutilServerProcess = null;
+        }
+
+        private async Task ResetYouTubeHelperAsync()
+        {
+            await _bgutilServerGate.WaitAsync().ConfigureAwait(false);
+            try
+            {
+                _bgutilServerReady = false;
+                StopBgutilServerProcess();
+                TryClearBgutilInstallArtifacts();
+            }
+            finally
+            {
+                _bgutilServerGate.Release();
+            }
+        }
+
+        private void TryClearBgutilInstallArtifacts()
+        {
+            if (File.Exists(BgutilReadyMarker))
+            {
+                try { File.Delete(BgutilReadyMarker); } catch { }
+            }
+
+            if (!Directory.Exists(BgutilNodeModulesDir))
+            {
+                return;
+            }
+
+            try
+            {
+                Directory.Delete(BgutilNodeModulesDir, true);
+            }
+            catch (Exception ex)
+            {
+                OnError?.Invoke(this, new Exception(
+                    "Could not reset YouTube helper files. Close the game and try again, or delete the " +
+                    "'bgutil-pot-provider/server/node_modules' folder in the plugin directory.",
+                    ex));
+            }
+        }
+
         /// <summary>
         /// Returns true if a valid cookies file was found (e.g. from VRCVideoCacher).
         /// </summary>
@@ -495,6 +550,44 @@ namespace MediaPlayerCore.YtDlp
         public bool IsAvailable()
         {
             return !string.IsNullOrEmpty(_ytDlpPath) && File.Exists(_ytDlpPath);
+        }
+
+        /// <summary>True when the local PO Token helper server is running (YouTube SABR).</summary>
+        public bool IsPoTokenServerReady => _bgutilServerReady;
+
+        /// <summary>True while Fix YouTube setup / first-run helper install is running.</summary>
+        public bool IsYouTubeSetupRunning => Interlocked.CompareExchange(ref _youTubeSetupRunning, 0, 0) != 0;
+
+        /// <summary>
+        /// Clears a failed YouTube helper install and runs setup again.
+        /// Use when Deno network permission was denied or PO Token server failed to start.
+        /// </summary>
+        public async Task<bool> RetryYouTubeHelperSetupAsync()
+        {
+            if (!EnableSabrProxy)
+            {
+                return true;
+            }
+
+            if (Interlocked.CompareExchange(ref _youTubeSetupRunning, 1, 0) != 0)
+            {
+                return _bgutilServerReady;
+            }
+
+            try
+            {
+                OnStatusUpdate?.Invoke(this, "Retrying YouTube helper setup...");
+                await ResetYouTubeHelperAsync().ConfigureAwait(false);
+                await EnsureDeno().ConfigureAwait(false);
+                await EnsureFfmpeg().ConfigureAwait(false);
+                await EnsurePotProvider().ConfigureAwait(false);
+                await EnsureBgutilServerAsync().ConfigureAwait(false);
+                return _bgutilServerReady;
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _youTubeSetupRunning, 0);
+            }
         }
 
         public static bool IsYouTubeSessionError(string? errorText)
@@ -2478,7 +2571,10 @@ namespace MediaPlayerCore.YtDlp
                 }
                 else
                 {
-                    OnError?.Invoke(this, new Exception("PO Token provider server failed to start on http://127.0.0.1:4416."));
+                    OnError?.Invoke(this, new Exception(
+                        "PO Token provider server failed to start on http://127.0.0.1:4416. " +
+                        "Open Media Player Settings → Sources and click Fix YouTube setup. " +
+                        "If Windows asks to allow internet access, click Allow."));
                 }
             }
             finally
@@ -2515,11 +2611,24 @@ namespace MediaPlayerCore.YtDlp
         {
             if (Directory.Exists(BgutilNodeModulesDir))
             {
-                if (!File.Exists(BgutilReadyMarker))
+                if (File.Exists(BgutilReadyMarker))
                 {
-                    File.WriteAllText(BgutilReadyMarker, DateTime.UtcNow.ToString("O"));
+                    return true;
                 }
-                return true;
+
+                // Partial install (e.g. user denied Deno network permission) — remove and retry.
+                try
+                {
+                    Directory.Delete(BgutilNodeModulesDir, true);
+                }
+                catch (Exception ex)
+                {
+                    OnError?.Invoke(this, new Exception(
+                        "PO Token provider setup looks incomplete. Close the game, delete the " +
+                        "'bgutil-pot-provider/server/node_modules' folder in the plugin directory, then restart.",
+                        ex));
+                    return false;
+                }
             }
 
             if (!Directory.Exists(BgutilServerWorkDir))
@@ -2531,7 +2640,7 @@ namespace MediaPlayerCore.YtDlp
             OnStatusUpdate?.Invoke(this, "Setting up PO Token provider (first run may take 1-2 minutes)...");
             var (ok, output) = await RunProcessAsync(
                 DenoExecutablePath,
-                "install --allow-scripts --frozen",
+                "install --allow-net --allow-read --allow-write --allow-scripts --frozen",
                 BgutilServerWorkDir,
                 TimeSpan.FromMinutes(10));
 
