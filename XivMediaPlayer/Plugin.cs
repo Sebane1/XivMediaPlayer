@@ -1035,7 +1035,51 @@ namespace XivMediaPlayer
         private DateTime _lastPlaybackEnsureUtc = DateTime.MinValue;
         private string _playbackEnsureUrl = "";
         private Guid _currentResolutionId = Guid.Empty;
+        private bool _liveProxyFallbackPending = false;
         private bool _lastStreamIsLive = false;
+
+        private void PlayResolvedLiveStream(
+            IMediaGameObject audioGameObject,
+            string resolvedStreamUrl,
+            Dictionary<string, string> resolvedHeaders,
+            bool isYouTube,
+            int finalStartTimeMs,
+            string? resolvedSlaveAudioUrl)
+        {
+            string playUrl = resolvedStreamUrl;
+            bool useProxy = _liveProxyFallbackPending;
+
+            if (playUrl.StartsWith("http", StringComparison.OrdinalIgnoreCase) && !playUrl.Contains("127.0.0.1"))
+            {
+                if (!useProxy && isYouTube && YtDlpManager.IsHlsStreamUrl(resolvedStreamUrl))
+                {
+                    _pluginLog.Information("[Live] Direct HLS from CDN (VLC forwards cookies to segments).");
+                    playUrl = resolvedStreamUrl;
+                }
+                else if (YtDlpManager.IsHlsStreamUrl(resolvedStreamUrl))
+                {
+                    try
+                    {
+                        playUrl = MediaPlayerCore.StreamProxy.Instance.RegisterStream(resolvedStreamUrl, resolvedHeaders);
+                        _pluginLog.Information($"[Live] Proxying HLS via {playUrl}");
+                    }
+                    catch (Exception ex)
+                    {
+                        _pluginLog.Warning(ex, "[Live] HLS proxy setup failed.");
+                        _chat.PrintError($"[Media Player] Live stream setup failed: {ex.Message}");
+                        return;
+                    }
+                }
+                else
+                {
+                    playUrl = MediaPlayerCore.StreamProxy.Instance.RegisterDirectMediaSession(resolvedStreamUrl, resolvedHeaders);
+                    _pluginLog.Warning("[Live] Non-HLS live URL — playback may fail.");
+                }
+            }
+
+            _liveProxyFallbackPending = false;
+            _mediaManager.PlayStream(audioGameObject, playUrl, _config.SpatialAudioEnabled, finalStartTimeMs, resolvedHeaders, false, resolvedSlaveAudioUrl, true);
+        }
         private bool _isIntentionallyPaused = false;
         private DateTime _lastUrlLoadTime = DateTime.MinValue;
 
@@ -1370,10 +1414,7 @@ namespace XivMediaPlayer
             }
 
             _isResolvingMedia = true;
-            _mediaLoadingMessage = (_config.EnableSabrProxy
-                && (url.Contains("youtube.com") || url.Contains("youtu.be")))
-                ? "Buffering video..."
-                : "Preparing video...";
+            _mediaLoadingMessage = "Preparing video...";
 
             Task.Run(async () =>
             {
@@ -1391,11 +1432,27 @@ namespace XivMediaPlayer
                 {
                     _lastStreamURL = url; // Save the original requested URL so PushMediaToServerAsync pushes it instead of the raw .m3u8
 
+                    bool isYouTube = url.Contains("youtube.com") || url.Contains("youtu.be");
+                    bool? youTubeLiveProbe = null;
+                    if (isYouTube && _config.EnableSabrProxy)
+                    {
+                        youTubeLiveProbe = await _ytDlpManager.ProbeYouTubeLiveBroadcastAsync(url).ConfigureAwait(false);
+                        if (resolutionId != _currentResolutionId) return;
+
+                        if (youTubeLiveProbe == true)
+                        {
+                            EnqueueFrameworkAction(() => _mediaLoadingMessage = "Connecting to live stream...");
+                        }
+                        else if (youTubeLiveProbe == false)
+                        {
+                            EnqueueFrameworkAction(() => _mediaLoadingMessage = "Buffering video...");
+                        }
+                    }
+
                     // Metadata fetch runs a second yt-dlp process and can trigger bot checks alongside SABR.
-                    // For SABR, fetch metadata first then start download — concurrent yt-dlp processes
+                    // For SABR VOD, fetch metadata after download starts — concurrent yt-dlp processes
                     // fight over browser cookies and can kill long downloads.
-                    bool isYouTubeSabr = _config.EnableSabrProxy
-                        && (url.Contains("youtube.com") || url.Contains("youtu.be"));
+                    bool isYouTubeSabr = _config.EnableSabrProxy && isYouTube && youTubeLiveProbe == false;
 
                     MediaPlayerCore.YtDlp.YtDlpMetadata? metadata = null;
                     string[]? streamUrls = null;
@@ -1569,11 +1626,24 @@ namespace XivMediaPlayer
                     // Twitch streams often don't explicitly return is_live=true, but they lack a duration!
                     // Also explicitly check if it's a twitch channel URL (not a video)
                     bool isTwitchLive = url.Contains("twitch.tv") && !url.Contains("/videos/");
-                    bool isLive = (metadata?.IsLive == true) || (metadata != null && metadata.Duration == null) || isTwitchLive;
+                    bool isYouTubeLive = youTubeLiveProbe == true
+                        || (youTubeLiveProbe == null && isYouTube && YtDlpManager.IsYouTubeLiveUrlHeuristic(url));
+                    bool isLive = isYouTubeLive
+                        || metadata?.IsLiveBroadcast == true
+                        || (isTwitchLive && metadata?.IsLiveBroadcast != false)
+                        || (!isYouTube && !isTwitchLive && metadata != null && metadata.Duration == null);
                     var resolvedStreamUrl = streamUrls[0];
-                    var resolvedSlaveAudioUrl = streamUrls.Length > 1 ? streamUrls[1] : null;
-                    var resolvedHeaders = metadata?.HttpHeaders;
-                    var resolvedDurationMs = metadata?.Duration * 1000.0;
+                    if (isYouTube && YtDlpManager.IsHlsStreamUrl(resolvedStreamUrl))
+                    {
+                        isLive = true;
+                    }
+
+                    var resolvedHeaders = _ytDlpManager.BuildPlaybackHeaders(
+                        metadata?.HttpHeaders,
+                        _ytDlpManager.LastResolvedHttpHeaders,
+                        url);
+                    var resolvedSlaveAudioUrl = (!isLive && streamUrls.Length > 1) ? streamUrls[1] : null;
+                    var resolvedDurationMs = isLive ? null : metadata?.Duration * 1000.0;
                     string statusMsg = isLive ? "LIVE" : (metadata?.Duration.HasValue == true
                       ? TimeSpan.FromSeconds(metadata.Duration.Value).ToString(@"mm\:ss") : "");
 
@@ -1586,19 +1656,33 @@ namespace XivMediaPlayer
                         _streamURLs = new string[] { resolvedStreamUrl };
                         _videoWindow.IsOpen = _config.DefaultVideoOpen == 0;
 
-                        string playUrl = resolvedStreamUrl;
-                        if (playUrl.StartsWith("http", StringComparison.OrdinalIgnoreCase) && !playUrl.Contains("127.0.0.1"))
-                        {
-                            playUrl = MediaPlayerCore.StreamProxy.Instance.RegisterDirectMediaSession(resolvedStreamUrl, resolvedHeaders);
-                        }
-
-                        int finalStartTimeMs = startTimeMs;
+                        int finalStartTimeMs = isLive ? 0 : startTimeMs;
                         if (isAutoSync && !isLive)
                         {
                             finalStartTimeMs += (int)(DateTime.UtcNow - resolutionStartTime).TotalMilliseconds;
                         }
 
-                        _mediaManager.PlayStream(audioGameObject, playUrl, _config.SpatialAudioEnabled, finalStartTimeMs, resolvedHeaders, false, resolvedSlaveAudioUrl);
+                        if (isLive)
+                        {
+                            PlayResolvedLiveStream(
+                                audioGameObject,
+                                resolvedStreamUrl,
+                                resolvedHeaders,
+                                isYouTube,
+                                finalStartTimeMs,
+                                resolvedSlaveAudioUrl);
+                        }
+                        else
+                        {
+                            string playUrl = resolvedStreamUrl;
+                            if (playUrl.StartsWith("http", StringComparison.OrdinalIgnoreCase) && !playUrl.Contains("127.0.0.1"))
+                            {
+                                playUrl = MediaPlayerCore.StreamProxy.Instance.RegisterDirectMediaSession(resolvedStreamUrl, resolvedHeaders);
+                            }
+
+                            _mediaManager.PlayStream(audioGameObject, playUrl, _config.SpatialAudioEnabled, finalStartTimeMs, resolvedHeaders, false, resolvedSlaveAudioUrl, false);
+                        }
+
                         _lastStreamURL = url;
                         _currentMediaDurationMs = resolvedDurationMs;
                         _currentStreamer = !string.IsNullOrEmpty(uploader) ? uploader : title;
@@ -1679,6 +1763,35 @@ namespace XivMediaPlayer
         private void _mediaManager_OnPlaybackFinished(object? sender, string e)
         {
             PrintVerbose("[Media Player] Playback finished.");
+
+            if (_lastStreamIsLive && !_playbackHasRenderedFrames && _streamWasPlaying)
+            {
+                bool isYouTube = (_lastStreamURL ?? "").Contains("youtube", StringComparison.OrdinalIgnoreCase)
+                    || (_lastStreamURL ?? "").Contains("youtu.be", StringComparison.OrdinalIgnoreCase);
+
+                if (!_liveProxyFallbackPending
+                    && _lastStreamObject != null
+                    && _streamURLs != null
+                    && _streamURLs.Length > 0
+                    && !string.IsNullOrEmpty(_streamURLs[0])
+                    && isYouTube
+                    && YtDlpManager.IsHlsStreamUrl(_streamURLs[0]))
+                {
+                    _pluginLog.Warning("[Media Player] Live direct HLS failed — retrying via proxy.");
+                    _liveProxyFallbackPending = true;
+                    _mediaManager?.StopStream();
+                    var headers = _ytDlpManager.BuildPlaybackHeaders(
+                        null,
+                        _ytDlpManager.LastResolvedHttpHeaders,
+                        _lastStreamURL ?? "");
+                    PlayResolvedLiveStream(_lastStreamObject, _streamURLs[0], headers, true, 0, null);
+                    return;
+                }
+
+                _pluginLog.Warning("[Media Player] Live stream ended before any video frames were decoded.");
+                TryEnsurePlaybackStarted(force: true);
+                return;
+            }
 
             var activeStream = _mediaManager?.ActiveStream;
             string? sabrPath = activeStream?.SoundPath;
@@ -2436,6 +2549,22 @@ namespace XivMediaPlayer
         private void OnMediaError(object? sender, MediaError e)
         {
             string errorMsg = e.Exception?.Message ?? string.Empty;
+
+            // Harmless on live/HLS demuxers — querying playback time is unsupported.
+            if (errorMsg.Contains("DEMUX_GET_TIME", StringComparison.OrdinalIgnoreCase)
+                || errorMsg.Contains("DEMUX_GET_LENGTH", StringComparison.OrdinalIgnoreCase)
+                || errorMsg.Contains("Failed to create demuxer", StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+
+            if (string.IsNullOrEmpty(errorMsg))
+            {
+                return;
+            }
+
+            _pluginLog.Warning(e.Exception, $"[Media Player] Media error: {errorMsg}");
+
             if (!errorMsg.Contains("demux", StringComparison.OrdinalIgnoreCase))
             {
                 return;
@@ -3334,6 +3463,8 @@ namespace XivMediaPlayer
 
         #region Utilities
 
+        private static bool IsHlsStreamUrl(string url) => YtDlpManager.IsHlsStreamUrl(url);
+
         private static string CleanUrl(string url)
         {
             if (string.IsNullOrWhiteSpace(url)) return url;
@@ -3622,6 +3753,11 @@ namespace XivMediaPlayer
         /// </summary>
         public long GetPlaybackDurationMs()
         {
+            if (_lastStreamIsLive)
+            {
+                return 0;
+            }
+
             var activeStream = _mediaManager?.ActiveStream;
             if (activeStream != null && activeStream.Length > 0)
             {
@@ -3809,7 +3945,7 @@ namespace XivMediaPlayer
             if (string.IsNullOrEmpty(_lastStreamURL) || _playerObject == null) return;
 
             var activeStream = _mediaManager?.ActiveStream;
-            int currentTimeMs = activeStream != null ? (int)activeStream.Time : 0;
+            int currentTimeMs = (!_lastStreamIsLive && activeStream != null) ? (int)activeStream.Time : 0;
 
             PrintVerbose("[Media Player] Refreshing media...");
             _mediaManager?.StopStream();

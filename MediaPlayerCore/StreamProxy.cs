@@ -56,9 +56,29 @@ namespace MediaPlayerCore
             Start();
             ClearSessions();
             string sessionId = Guid.NewGuid().ToString("N");
-            
+
+            var client = CreateStreamingHttpClient(headers, m3u8Url);
+
+            if (string.IsNullOrEmpty(preFetchedM3u8Content))
+            {
+                preFetchedM3u8Content = PrefetchHlsPlaylist(client, m3u8Url);
+            }
+
+            _sessions[sessionId] = new ProxySession
+            {
+                OriginalM3u8Url = m3u8Url,
+                PreFetchedM3u8Content = preFetchedM3u8Content,
+                Headers = headers,
+                Client = client
+            };
+
+            return $"http://127.0.0.1:{_port}/stream.m3u8?sid={sessionId}";
+        }
+
+        private HttpClient CreateStreamingHttpClient(Dictionary<string, string>? headers, string targetUrl)
+        {
             var handler = new HttpClientHandler();
-            handler.UseCookies = false; // We are manually injecting the Cookie header
+            handler.UseCookies = false;
             if (handler.SupportsAutomaticDecompression)
             {
                 handler.AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate;
@@ -84,21 +104,43 @@ namespace MediaPlayerCore
             {
                 client.DefaultRequestHeaders.TryAddWithoutValidation("Accept", "*/*");
             }
-            client.DefaultRequestHeaders.TryAddWithoutValidation("Sec-Fetch-Site", "cross-site");
-            client.DefaultRequestHeaders.TryAddWithoutValidation("Sec-Fetch-Mode", "cors");
-            client.DefaultRequestHeaders.TryAddWithoutValidation("Sec-Fetch-Dest", "empty");
-            client.DefaultRequestHeaders.TryAddWithoutValidation("Accept-Language", "en-US,en;q=0.9");
 
-            _sessions[sessionId] = new ProxySession
+            bool isYouTubeCdn = targetUrl.Contains("googlevideo.com", StringComparison.OrdinalIgnoreCase)
+                || targetUrl.Contains("youtube.com", StringComparison.OrdinalIgnoreCase);
+            if (isYouTubeCdn)
             {
-                OriginalM3u8Url = m3u8Url,
-                PreFetchedM3u8Content = preFetchedM3u8Content,
-                Headers = headers,
-                Client = client
-            };
+                if (!client.DefaultRequestHeaders.TryGetValues("Referer", out _))
+                {
+                    client.DefaultRequestHeaders.TryAddWithoutValidation("Referer", "https://www.youtube.com/");
+                }
 
-            return $"http://127.0.0.1:{_port}/stream.m3u8?sid={sessionId}";
+                if (!client.DefaultRequestHeaders.TryGetValues("Origin", out _))
+                {
+                    client.DefaultRequestHeaders.TryAddWithoutValidation("Origin", "https://www.youtube.com");
+                }
+            }
+
+            return client;
         }
+
+        private static string PrefetchHlsPlaylist(HttpClient client, string m3u8Url)
+        {
+            using var response = client.GetAsync(m3u8Url).ConfigureAwait(false).GetAwaiter().GetResult();
+            if (!response.IsSuccessStatusCode)
+            {
+                throw new InvalidOperationException(
+                    $"HLS playlist fetch failed ({(int)response.StatusCode} {response.ReasonPhrase}). YouTube live requires valid cookies.");
+            }
+
+            string text = response.Content.ReadAsStringAsync().ConfigureAwait(false).GetAwaiter().GetResult();
+            if (!text.TrimStart().StartsWith("#EXTM3U", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException("HLS playlist fetch returned invalid data (not M3U8).");
+            }
+
+            return text;
+        }
+
         public string RegisterDirectMediaSession(string mediaUrl, Dictionary<string, string>? headers = null)
         {
             if (string.IsNullOrEmpty(mediaUrl)) return string.Empty;
@@ -106,22 +148,7 @@ namespace MediaPlayerCore
             ClearSessions();
             string sessionId = Guid.NewGuid().ToString("N");
             
-            var handler = new HttpClientHandler { UseCookies = true, AutomaticDecompression = DecompressionMethods.All };
-            var client = new HttpClient(handler);
-            bool hasUserAgent = false;
-            bool hasAccept = false;
-
-            if (headers != null)
-            {
-                foreach (var kvp in headers)
-                {
-                    if (kvp.Key.Equals("User-Agent", StringComparison.OrdinalIgnoreCase)) hasUserAgent = true;
-                    if (kvp.Key.Equals("Accept", StringComparison.OrdinalIgnoreCase)) hasAccept = true;
-                    try { client.DefaultRequestHeaders.TryAddWithoutValidation(kvp.Key, kvp.Value); } catch { }
-                }
-            }
-            if (!hasUserAgent) client.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent", "Mozilla/5.0");
-            if (!hasAccept) client.DefaultRequestHeaders.TryAddWithoutValidation("Accept", "*/*");
+            var client = CreateStreamingHttpClient(headers, mediaUrl);
 
             _sessions[sessionId] = new ProxySession { OriginalM3u8Url = mediaUrl, Headers = headers, Client = client };
 
@@ -194,7 +221,9 @@ namespace MediaPlayerCore
                         } 
                         catch (Exception netEx)
                         {
-                            res.StatusCode = 502; // Bad Gateway
+                            System.Diagnostics.Debug.WriteLine(
+                                $"[StreamProxy] HLS fetch failed for {m3u8Url}: {netEx.Message}");
+                            res.StatusCode = 502;
                             res.Close();
                             return;
                         }
@@ -207,31 +236,7 @@ namespace MediaPlayerCore
 
                     foreach (var line in lines)
                     {
-                        if (line.StartsWith("#"))
-                        {
-                            sb.AppendLine(line);
-                        }
-                        else
-                        {
-                            // This is a URL
-                            Uri absoluteUrl;
-                            if (!Uri.TryCreate(baseUri, line, out absoluteUrl))
-                            {
-                                sb.AppendLine(line);
-                                continue;
-                            }
-
-                            if (absoluteUrl.ToString().Contains(".m3u8"))
-                            {
-                                string targetBase64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(absoluteUrl.ToString()));
-                                sb.AppendLine($"http://127.0.0.1:{_port}/stream.m3u8?sid={sid}&target={Uri.EscapeDataString(targetBase64)}");
-                            }
-                            else
-                            {
-                                // Let VLC fetch .ts files directly
-                                sb.AppendLine(absoluteUrl.ToString());
-                            }
-                        }
+                        sb.AppendLine(RewriteHlsLine(baseUri, line, sid));
                     }
 
                     byte[] outBytes = Encoding.UTF8.GetBytes(sb.ToString());
@@ -332,6 +337,54 @@ namespace MediaPlayerCore
             {
                 try { context.Response.Close(); } catch { }
             }
+        }
+
+        private string RewriteProxiedUrl(Uri baseUri, string originalUrl, string sid)
+        {
+            if (!Uri.TryCreate(baseUri, originalUrl, out Uri absoluteUrl))
+            {
+                return originalUrl;
+            }
+
+            string absolute = absoluteUrl.ToString();
+            string targetBase64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(absolute));
+
+            if (absolute.Contains(".m3u8", StringComparison.OrdinalIgnoreCase))
+            {
+                return $"http://127.0.0.1:{_port}/stream.m3u8?sid={sid}&target={Uri.EscapeDataString(targetBase64)}";
+            }
+
+            return $"http://127.0.0.1:{_port}/proxy_media?sid={sid}&target={Uri.EscapeDataString(targetBase64)}";
+        }
+
+        private string RewriteHlsLine(Uri baseUri, string line, string sid)
+        {
+            if (string.IsNullOrWhiteSpace(line))
+            {
+                return line;
+            }
+
+            if (!line.StartsWith("#"))
+            {
+                return RewriteProxiedUrl(baseUri, line.Trim(), sid);
+            }
+
+            int uriIndex = line.IndexOf("URI=\"", StringComparison.OrdinalIgnoreCase);
+            if (uriIndex < 0)
+            {
+                return line;
+            }
+
+            int valueStart = uriIndex + 5;
+            int valueEnd = line.IndexOf('"', valueStart);
+            if (valueEnd < 0)
+            {
+                return line;
+            }
+
+            string uriValue = line.Substring(valueStart, valueEnd - valueStart);
+            string rewritten = RewriteProxiedUrl(baseUri, uriValue, sid);
+            return line.Substring(0, valueStart) + rewritten + line.Substring(valueEnd);
         }
 
         /// <summary>

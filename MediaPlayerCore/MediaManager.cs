@@ -49,7 +49,7 @@ namespace MediaPlayerCore {
       _updateLoop = Task.Run(() => Update());
     }
 
-    public void PlayStream(IMediaGameObject playerObject, string audioPath, bool spatialAllowed, int startTimeMs = 0, Dictionary<string, string>? httpHeaders = null, bool audioOnly = false, string? slaveAudioPath = null) {
+    public void PlayStream(IMediaGameObject playerObject, string audioPath, bool spatialAllowed, int startTimeMs = 0, Dictionary<string, string>? httpHeaders = null, bool audioOnly = false, string? slaveAudioPath = null, bool isLiveStream = false) {
       Task.Run(() => {
         try {
           if (!audioOnly) {
@@ -57,7 +57,7 @@ namespace MediaPlayerCore {
           }
           OnNewMediaTriggered?.Invoke(this, EventArgs.Empty);
           if (!string.IsNullOrEmpty(audioPath)) {
-            ConfigureStream(playerObject, audioPath, spatialAllowed, startTimeMs, httpHeaders, audioOnly, slaveAudioPath);
+            ConfigureStream(playerObject, audioPath, spatialAllowed, startTimeMs, httpHeaders, audioOnly, slaveAudioPath, isLiveStream);
           }
         } catch (Exception e) {
           OnErrorReceived?.Invoke(this, new MediaError() { Exception = e });
@@ -170,7 +170,7 @@ namespace MediaPlayerCore {
       return false;
     }
 
-    public void ConfigureStream(IMediaGameObject playerObject, string audioPath, bool spatialAllowed, int startTimeMs, Dictionary<string, string>? httpHeaders = null, bool audioOnly = false, string? slaveAudioPath = null) {
+    public void ConfigureStream(IMediaGameObject playerObject, string audioPath, bool spatialAllowed, int startTimeMs, Dictionary<string, string>? httpHeaders = null, bool audioOnly = false, string? slaveAudioPath = null, bool isLiveStream = false) {
       if (playerObject != null) {
           MediaObject stream = null;
           bool isNew = false;
@@ -214,10 +214,10 @@ namespace MediaPlayerCore {
               stream.PlaybackFinished += (s, e) => {
                  OnPlaybackFinished?.Invoke(this, e);
               };
-              stream.Play(audioPath, _livestreamVolume, startTimeMs, httpHeaders, slaveAudioPath);
+              stream.Play(audioPath, _livestreamVolume, startTimeMs, httpHeaders, slaveAudioPath, isLiveStream);
             }
           } else {
-             stream.ChangeVideoStream(audioPath, LastFrameWidth, startTimeMs, httpHeaders, slaveAudioPath);
+             stream.ChangeVideoStream(audioPath, LastFrameWidth, startTimeMs, httpHeaders, slaveAudioPath, isLiveStream);
           }
       }
     }

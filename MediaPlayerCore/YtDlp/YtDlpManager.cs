@@ -30,17 +30,32 @@ namespace MediaPlayerCore.YtDlp
         [JsonProperty("url")]
         public string? Url { get; set; }
 
+        [JsonProperty("manifest_url")]
+        public string? ManifestUrl { get; set; }
+
         [JsonProperty("webpage_url")]
         public string? WebpageUrl { get; set; }
 
+        /// <summary>Best URL for playback (manifest or progressive).</summary>
+        public string? PlaybackUrl => !string.IsNullOrEmpty(Url) ? Url : ManifestUrl;
+
         [JsonProperty("is_live")]
         public bool? IsLive { get; set; }
+
+        [JsonProperty("live_status")]
+        public string? LiveStatus { get; set; }
 
         [JsonProperty("http_headers")]
         public Dictionary<string, string>? HttpHeaders { get; set; }
 
         [JsonProperty("ext")]
         public string? Extension { get; set; }
+
+        /// <summary>True for active or upcoming broadcasts; false for VOD and finished live replays.</summary>
+        public bool IsLiveBroadcast =>
+            IsLive == true
+            || string.Equals(LiveStatus, "is_live", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(LiveStatus, "is_upcoming", StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>
@@ -65,10 +80,14 @@ namespace MediaPlayerCore.YtDlp
 
         private readonly ConcurrentDictionary<string, SabrSession> _sabrSessions = new();
         private readonly ConcurrentQueue<string> _pendingSabrDirDeletes = new();
+        private readonly ConcurrentDictionary<string, (bool? IsLive, DateTime ExpiresUtc)> _youTubeLiveProbeCache = new();
         private readonly List<Process> _runningProcesses = new();
         private readonly SemaphoreSlim _bgutilServerGate = new(1, 1);
         private Process? _bgutilServerProcess;
         private volatile bool _bgutilServerReady;
+
+        /// <summary>HTTP headers from the most recent yt-dlp format resolve (-j).</summary>
+        public Dictionary<string, string>? LastResolvedHttpHeaders { get; private set; }
 
         private sealed class SabrSession
         {
@@ -409,6 +428,32 @@ namespace MediaPlayerCore.YtDlp
         }
 
         /// <summary>
+        /// Probes whether a YouTube URL is a live/upcoming broadcast vs a VOD.
+        /// Returns true (live), false (confirmed VOD/replay), or null (probe failed).
+        /// </summary>
+        public async Task<bool?> ProbeYouTubeLiveBroadcastAsync(string url)
+        {
+            if (!IsYouTubeUrl(url))
+            {
+                return false;
+            }
+
+            if (IsYouTubeLiveUrl(url))
+            {
+                return true;
+            }
+
+            if (_youTubeLiveProbeCache.TryGetValue(url, out var cached) && cached.ExpiresUtc > DateTime.UtcNow)
+            {
+                return cached.IsLive;
+            }
+
+            bool? probed = await ProbeYouTubeLiveBroadcastCoreAsync(url).ConfigureAwait(false);
+            _youTubeLiveProbeCache[url] = (probed, DateTime.UtcNow.AddMinutes(2));
+            return probed;
+        }
+
+        /// <summary>
         /// Resolves a URL to a direct stream URL suitable for VLC playback.
         /// Returns null if resolution fails.
         /// </summary>
@@ -422,54 +467,84 @@ namespace MediaPlayerCore.YtDlp
 
             try
             {
+                LastResolvedHttpHeaders = null;
+                bool? youTubeLive = IsYouTubeUrl(url) ? await ProbeYouTubeLiveBroadcastAsync(url).ConfigureAwait(false) : false;
+
                 if (EnableSabrProxy && IsYouTubeUrl(url))
                 {
-                    if (_proxyPort == 0) StartProxyListener();
-                    if (_proxyPort != 0)
+                    // SABR only works for VOD. Skip when live, upcoming, or probe failed.
+                    if (youTubeLive == false)
                     {
-                        await EnsureBgutilServerAsync();
-                        bool isLive = IsYouTubeLiveUrl(url);
+                        if (_proxyPort == 0) StartProxyListener();
+                        if (_proxyPort != 0)
+                        {
+                            await EnsureBgutilServerAsync();
+                            bool isLive = false;
 
-                        SabrSession? existing = _sabrSessions.Values.FirstOrDefault(
-                            s => s.Url == url && !s.Failed && !s.IsLive);
-                        if (existing != null)
-                        {
-                            existing.LastAccessUtc = DateTime.UtcNow;
-                            string[]? localPaths = await TryResolveSabrLocalPlayUrl(existing);
-                            if (localPaths != null)
+                            SabrSession? existing = _sabrSessions.Values.FirstOrDefault(
+                                s => s.Url == url && !s.Failed && !s.IsLive);
+                            if (existing != null)
                             {
-                                OnStatusUpdate?.Invoke(this, "SABR reusing active download.");
-                                return localPaths;
-                            }
-                        }
-
-                        ReleaseSabrSessions();
-                        SabrSession session = StartSabrSession(url, isLive);
-                        if (session.Failed)
-                        {
-                            OnStatusUpdate?.Invoke(this, "SABR Proxy failed to start. Falling back to direct yt-dlp resolution.");
-                        }
-                        else
-                        {
-                            string[]? localPaths = await TryResolveSabrLocalPlayUrl(session);
-                            if (localPaths != null)
-                            {
-                                return localPaths;
+                                existing.LastAccessUtc = DateTime.UtcNow;
+                                string[]? localPaths = await TryResolveSabrLocalPlayUrl(existing);
+                                if (localPaths != null)
+                                {
+                                    OnStatusUpdate?.Invoke(this, "SABR reusing active download.");
+                                    return localPaths;
+                                }
                             }
 
-                            OnStatusUpdate?.Invoke(this, "SABR Proxy failed to buffer. Falling back to direct yt-dlp resolution.");
+                            ReleaseSabrSessions();
+                            SabrSession session = StartSabrSession(url, isLive);
+                            if (session.Failed)
+                            {
+                                OnStatusUpdate?.Invoke(this, "SABR Proxy failed to start. Falling back to direct yt-dlp resolution.");
+                            }
+                            else
+                            {
+                                string[]? localPaths = await TryResolveSabrLocalPlayUrl(session);
+                                if (localPaths != null)
+                                {
+                                    return localPaths;
+                                }
+
+                                OnStatusUpdate?.Invoke(this, "SABR Proxy failed to buffer. Falling back to direct yt-dlp resolution.");
+                            }
                         }
+                    }
+                    else if (youTubeLive == true)
+                    {
+                        OnStatusUpdate?.Invoke(this, "YouTube live stream detected — using direct playback.");
+                    }
+                }
+
+                if (youTubeLive == true)
+                {
+                    string[]? liveUrls = await ResolveYouTubeLiveStreamUrls(url).ConfigureAwait(false);
+                    if (liveUrls != null && liveUrls.Length > 0)
+                    {
+                        return liveUrls;
                     }
                 }
 
                 OnStatusUpdate?.Invoke(this, "Resolving stream URL...");
 
-                string formatArg = _preferredMaxHeight > 0
-                  ? $"bv[height<={_preferredMaxHeight}]+ba/b"
-                  : "bv+ba/b";
+                string formatArg;
+                if (youTubeLive == true)
+                {
+                    formatArg = _preferredMaxHeight > 0
+                      ? $"best[height<={_preferredMaxHeight}][protocol*=m3u8_native]/best[height<={_preferredMaxHeight}][protocol*=m3u8]/b[height<={_preferredMaxHeight}]"
+                      : "best[protocol*=m3u8_native]/best[protocol*=m3u8]/b";
+                }
+                else
+                {
+                    formatArg = _preferredMaxHeight > 0
+                      ? $"bv[height<={_preferredMaxHeight}]+ba/b"
+                      : "bv+ba/b";
+                }
 
-                string result = await RunYtDlp($"--get-url -f \"{formatArg}\" \"{url}\"");
-                string[]? streamUrls = result?.Trim().Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+                string result = await RunYtDlp($"--no-playlist --get-url -f \"{formatArg}\" \"{url}\"", isLiveYouTube: youTubeLive == true);
+                string[]? streamUrls = ParseStreamUrls(result);
 
                 if (streamUrls != null && streamUrls.Length > 0)
                 {
@@ -795,12 +870,222 @@ namespace MediaPlayerCore.YtDlp
             }
         }
 
-        private async Task<string> RunYtDlp(string arguments, bool withCommonArgs = true)
+        private static string[]? ParseStreamUrls(string? result)
+        {
+            if (string.IsNullOrWhiteSpace(result))
+            {
+                return null;
+            }
+
+            string[] urls = result.Trim()
+                .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+                .Select(u => u.Trim())
+                .Where(u => u.StartsWith("http", StringComparison.OrdinalIgnoreCase))
+                .ToArray();
+
+            return urls.Length > 0 ? urls : null;
+        }
+
+        public static bool IsHlsStreamUrl(string? url)
+        {
+            if (string.IsNullOrEmpty(url))
+            {
+                return false;
+            }
+
+            string path = url.Split('?')[0];
+            return path.EndsWith(".m3u8", StringComparison.OrdinalIgnoreCase)
+                || url.Contains("/manifest/hls", StringComparison.OrdinalIgnoreCase)
+                || url.Contains("hls_playlist", StringComparison.OrdinalIgnoreCase)
+                || url.Contains("playlist_type/live", StringComparison.OrdinalIgnoreCase);
+        }
+
+        public static Dictionary<string, string> EnsureYouTubeHttpHeaders(
+            Dictionary<string, string>? headers,
+            string pageUrl)
+        {
+            headers ??= new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+            if (!headers.ContainsKey("Referer"))
+            {
+                headers["Referer"] = IsYouTubeUrl(pageUrl) ? pageUrl : "https://www.youtube.com/";
+            }
+
+            if (!headers.ContainsKey("Origin"))
+            {
+                headers["Origin"] = "https://www.youtube.com";
+            }
+
+            if (!headers.ContainsKey("User-Agent"))
+            {
+                headers["User-Agent"] =
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+            }
+
+            return headers;
+        }
+
+        public static Dictionary<string, string> MergeStreamHeaders(
+            Dictionary<string, string>? primary,
+            Dictionary<string, string>? secondary,
+            string pageUrl)
+        {
+            var merged = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            if (secondary != null)
+            {
+                foreach (var kvp in secondary)
+                {
+                    merged[kvp.Key] = kvp.Value;
+                }
+            }
+
+            if (primary != null)
+            {
+                foreach (var kvp in primary)
+                {
+                    merged[kvp.Key] = kvp.Value;
+                }
+            }
+
+            return IsYouTubeUrl(pageUrl) ? EnsureYouTubeHttpHeaders(merged, pageUrl) : merged;
+        }
+
+        /// <summary>
+        /// Builds HTTP headers for VLC/proxy playback, including cookies from cookies.txt when needed.
+        /// </summary>
+        public Dictionary<string, string> BuildPlaybackHeaders(
+            Dictionary<string, string>? primary,
+            Dictionary<string, string>? secondary,
+            string pageUrl)
+        {
+            var merged = MergeStreamHeaders(primary, secondary, pageUrl);
+            if (!merged.ContainsKey("Cookie"))
+            {
+                string? cookieHeader = BuildCookieHeaderForStreaming();
+                if (!string.IsNullOrEmpty(cookieHeader))
+                {
+                    merged["Cookie"] = cookieHeader;
+                }
+            }
+
+            return merged;
+        }
+
+        /// <summary>
+        /// Builds a Cookie header from the Netscape cookies.txt (YouTube / googlevideo domains).
+        /// </summary>
+        public string? BuildCookieHeaderForStreaming()
+        {
+            if (!HasCookies)
+            {
+                return null;
+            }
+
+            try
+            {
+                var pairs = new List<string>();
+                foreach (string line in File.ReadAllLines(_cookiesPath!))
+                {
+                    if (string.IsNullOrWhiteSpace(line) || line.StartsWith('#'))
+                    {
+                        continue;
+                    }
+
+                    string[] parts = line.Split('\t');
+                    if (parts.Length < 7)
+                    {
+                        continue;
+                    }
+
+                    string domain = parts[0];
+                    if (!domain.Contains("youtube", StringComparison.OrdinalIgnoreCase)
+                        && !domain.Contains("googlevideo", StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+
+                    if (long.TryParse(parts[4], out long expiry) && expiry > 0 && expiry < DateTimeOffset.UtcNow.ToUnixTimeSeconds())
+                    {
+                        continue;
+                    }
+
+                    string name = parts[5];
+                    string value = parts[6];
+                    if (!string.IsNullOrEmpty(name))
+                    {
+                        pairs.Add($"{name}={value}");
+                    }
+                }
+
+                return pairs.Count > 0 ? string.Join("; ", pairs) : null;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private static YtDlpMetadata? TryParseYtDlpJson(string? result)
+        {
+            if (string.IsNullOrWhiteSpace(result))
+            {
+                return null;
+            }
+
+            string? jsonLine = result
+                .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+                .FirstOrDefault(l => l.TrimStart().StartsWith("{"));
+            return jsonLine == null ? null : JsonConvert.DeserializeObject<YtDlpMetadata>(jsonLine);
+        }
+
+        private async Task<string[]?> ResolveYouTubeLiveStreamUrls(string url)
+        {
+            string heightFilter = _preferredMaxHeight > 0 ? $"[height<={_preferredMaxHeight}]" : "";
+            string[] formatAttempts =
+            {
+                $"best{heightFilter}[protocol*=m3u8_native]/best{heightFilter}[protocol*=m3u8]",
+                $"96{heightFilter}/b{heightFilter}",
+                $"b{heightFilter}[protocol*=m3u8]/b{heightFilter}",
+            };
+
+            foreach (string formatArg in formatAttempts)
+            {
+                try
+                {
+                    string result = await RunYtDlp(
+                        $"--no-playlist -j -f \"{formatArg}\" \"{url}\"",
+                        isLiveYouTube: true);
+                    YtDlpMetadata? info = TryParseYtDlpJson(result);
+                    string? playbackUrl = info?.PlaybackUrl;
+                    if (info == null || string.IsNullOrEmpty(playbackUrl))
+                    {
+                        continue;
+                    }
+
+                    if (!IsHlsStreamUrl(playbackUrl))
+                    {
+                        continue;
+                    }
+
+                    LastResolvedHttpHeaders = info.HttpHeaders;
+                    OnStatusUpdate?.Invoke(this, "YouTube live HLS URL resolved.");
+                    return new[] { playbackUrl };
+                }
+                catch (Exception e)
+                {
+                    OnError?.Invoke(this, e);
+                }
+            }
+
+            return null;
+        }
+
+        private async Task<string> RunYtDlp(string arguments, bool withCommonArgs = true, bool isLiveYouTube = false)
         {
             return await Task.Run(() =>
             {
                 // Inject cookies if available (e.g. from VRCVideoCacher browser extension)
-                string fullArgs = (withCommonArgs ? BuildCommonArgs() : "") + arguments;
+                string fullArgs = (withCommonArgs ? BuildCommonArgs(isLiveYouTube) : "") + arguments;
                 var psi = new ProcessStartInfo
                 {
                     FileName = _ytDlpPath,
@@ -944,9 +1229,9 @@ namespace MediaPlayerCore.YtDlp
         /// <summary>
         /// Builds the common argument prefix (cookies, etc.) for all yt-dlp calls.
         /// </summary>
-        private string BuildCommonArgs()
+        private string BuildCommonArgs(bool isLiveYouTube = false)
         {
-            string args = $"--extractor-args \"{BuildYouTubeExtractorArgs(isLive: false, includeSabrFormats: false)}\" --extractor-args \"youtubetab:skip=authcheck\" ";
+            string args = $"--extractor-args \"{BuildYouTubeExtractorArgs(isLive: isLiveYouTube, includeSabrFormats: false)}\" --extractor-args \"youtubetab:skip=authcheck\" ";
 
             if (File.Exists(DenoExecutablePath))
             {
@@ -981,9 +1266,14 @@ namespace MediaPlayerCore.YtDlp
         private string BuildYouTubeExtractorArgs(bool isLive, bool includeSabrFormats)
         {
             // web/mweb need PO tokens from bgutil; tv works with cookies without tokens.
-            string clients = HasYouTubeAuth
-                ? (_bgutilServerReady ? "web,mweb,tv" : "tv")
-                : (_bgutilServerReady ? "tv,mweb,web_embedded" : "tv,web_embedded");
+            // android often exposes m3u8_native for YouTube live streams.
+            string clients = isLive && !includeSabrFormats
+                ? (HasYouTubeAuth
+                    ? (_bgutilServerReady ? "android,web,tv" : "android,tv")
+                    : "android,tv,web_embedded")
+                : (HasYouTubeAuth
+                    ? (_bgutilServerReady ? "web,mweb,tv" : "tv")
+                    : (_bgutilServerReady ? "tv,mweb,web_embedded" : "tv,web_embedded"));
 
             var parts = new List<string>
             {
@@ -1032,12 +1322,98 @@ namespace MediaPlayerCore.YtDlp
                 || url.Contains("youtu.be", StringComparison.OrdinalIgnoreCase);
         }
 
+        /// <summary>Fast URL-shape check for /live/ links. Does not detect watch?v= live streams.</summary>
+        public static bool IsYouTubeLiveUrlHeuristic(string url)
+            => IsYouTubeLiveUrl(url);
+
         private static bool IsYouTubeLiveUrl(string url)
         {
             return url.Contains("youtube.com/live/", StringComparison.OrdinalIgnoreCase)
                 || url.Contains("youtu.be/live/", StringComparison.OrdinalIgnoreCase)
                 || (url.Contains("/live", StringComparison.OrdinalIgnoreCase)
                     && url.Contains("youtube.com", StringComparison.OrdinalIgnoreCase));
+        }
+
+        private static bool ParseYouTubeLiveProbeLines(IReadOnlyList<string> lines, out bool isLiveBroadcast)
+        {
+            isLiveBroadcast = false;
+            if (lines.Count == 0)
+            {
+                return false;
+            }
+
+            string liveStatus = lines[0].Trim();
+            if (!string.IsNullOrEmpty(liveStatus))
+            {
+                if (string.Equals(liveStatus, "is_live", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(liveStatus, "is_upcoming", StringComparison.OrdinalIgnoreCase))
+                {
+                    isLiveBroadcast = true;
+                    return true;
+                }
+
+                if (string.Equals(liveStatus, "not_live", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(liveStatus, "was_live", StringComparison.OrdinalIgnoreCase))
+                {
+                    isLiveBroadcast = false;
+                    return true;
+                }
+            }
+
+            if (lines.Count > 1)
+            {
+                string isLiveValue = lines[1].Trim();
+                if (bool.TryParse(isLiveValue, out bool parsed))
+                {
+                    isLiveBroadcast = parsed;
+                    return true;
+                }
+
+                if (isLiveValue == "1")
+                {
+                    isLiveBroadcast = true;
+                    return true;
+                }
+
+                if (isLiveValue == "0")
+                {
+                    isLiveBroadcast = false;
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private async Task<bool?> ProbeYouTubeLiveBroadcastCoreAsync(string url)
+        {
+            if (!IsAvailable())
+            {
+                return null;
+            }
+
+            try
+            {
+                OnStatusUpdate?.Invoke(this, "Checking if YouTube link is live...");
+                string result = await RunYtDlp(
+                    $"--no-download --no-playlist --print live_status --print is_live \"{url}\"");
+                var lines = result
+                    .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+                    .Select(l => l.Trim())
+                    .Where(l => !string.IsNullOrEmpty(l))
+                    .ToArray();
+
+                if (ParseYouTubeLiveProbeLines(lines, out bool isLiveBroadcast))
+                {
+                    return isLiveBroadcast;
+                }
+            }
+            catch (Exception e)
+            {
+                OnError?.Invoke(this, e);
+            }
+
+            return null;
         }
 
         private string DenoExecutablePath => Path.Combine(PluginDir, "deno.exe");
