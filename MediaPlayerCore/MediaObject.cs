@@ -1,4 +1,5 @@
 using LibVLCSharp.Shared;
+using MediaPlayerCore.YtDlp;
 using NAudio.Wave;
 using NAudio.Wave.SampleProviders;
 using NAudio.CoreAudioApi;
@@ -163,7 +164,11 @@ namespace MediaPlayerCore {
       set {
         if (_vlcPlayer != null) {
           try {
-            if (!_vlcPlayer.IsSeekable && _vlcPlayer.State == LibVLCSharp.Shared.VLCState.Playing) {
+            bool isSabrProxy = YtDlpManager.IsSabrProxyUrl(_soundPath);
+            if (!isSabrProxy
+                && !_vlcPlayer.IsSeekable
+                && _vlcPlayer.State == LibVLCSharp.Shared.VLCState.Playing)
+            {
                 return; // Cannot seek, ignore request to prevent stream crash
             }
           } catch {}
@@ -259,6 +264,8 @@ namespace MediaPlayerCore {
                       media.AddOption(":drop-late-frames");
                       media.AddOption(":skip-frames");
                   }
+              } else if (YtDlpManager.IsSabrProxyUrl(mediaPath)) {
+                  media.AddOption(":network-caching=5000");
               } else {
                   media.AddOption(":network-caching=2000");
               }
@@ -407,6 +414,8 @@ namespace MediaPlayerCore {
                 media.AddOption(":clock-jitter=0");
                 media.AddOption(":drop-late-frames");
                 media.AddOption(":skip-frames");
+            } else if (YtDlpManager.IsSabrProxyUrl(soundPath)) {
+                media.AddOption(":network-caching=5000");
             } else {
                 media.AddOption(":network-caching=2000");
             }

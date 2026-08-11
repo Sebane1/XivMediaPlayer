@@ -207,22 +207,23 @@ namespace XivMediaPlayer.Windows {
         }
 
         //  Seek Slider (VODs only) 
-        if (_mediaManager != null) {
+        if (_mediaManager != null && _plugin != null) {
           var activeStream = _mediaManager.ActiveStream;
-          if (activeStream != null && activeStream.Length > 0) {
+          long durationMs = _plugin.GetPlaybackDurationMs();
+          if (activeStream != null && durationMs > 0) {
             float progress;
             if (!_isDraggingSeek) {
-                _seekDragProgress = (float)activeStream.Time / (float)activeStream.Length;
+                _seekDragProgress = (float)activeStream.Time / durationMs;
             }
             progress = _seekDragProgress;
 
             ImGui.SetNextItemWidth(-1);
             
             // Format timecode based on drag progress if dragging, else use actual time
-            long displayTime = _isDraggingSeek ? (long)(progress * activeStream.Length) : activeStream.Time;
+            long displayTime = _isDraggingSeek ? (long)(progress * durationMs) : activeStream.Time;
             
             if (ImGui.SliderFloat("##seek", ref progress, 0f, 1f, 
-                FormatTimeCode(displayTime) + " / " + FormatTimeCode(activeStream.Length))) {
+                FormatTimeCode(displayTime) + " / " + FormatTimeCode(durationMs))) {
               _seekDragProgress = progress;
             }
 
@@ -232,7 +233,7 @@ namespace XivMediaPlayer.Windows {
             
             if (ImGui.IsItemDeactivatedAfterEdit() || (ImGui.IsItemDeactivated() && _isDraggingSeek)) {
                 _isDraggingSeek = false;
-                activeStream.Time = (long)(_seekDragProgress * activeStream.Length);
+                activeStream.Time = (long)(_seekDragProgress * durationMs);
             }
           }
         }

@@ -82,6 +82,28 @@ namespace MediaPlayerCore.YtDlp
             public volatile bool DownloadFinished;
             public string? Error { get; set; }
             public int StreamConsumers;
+            public DateTime LastAccessUtc { get; set; } = DateTime.UtcNow;
+        }
+
+        public static bool IsSabrProxyUrl(string? url)
+        {
+            return !string.IsNullOrEmpty(url)
+                && url.Contains("127.0.0.1", StringComparison.OrdinalIgnoreCase)
+                && url.Contains("/stream/", StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// <summary>
+        /// Stops and removes all active SABR download sessions.
+        /// </summary>
+        public void ReleaseSabrSessions()
+        {
+            foreach (var session in _sabrSessions.Values.ToArray())
+            {
+                if (_sabrSessions.TryRemove(session.Id, out _))
+                {
+                    CleanupSabrSession(session);
+                }
+            }
         }
 
         public event EventHandler<string>? OnStatusUpdate;
@@ -284,6 +306,18 @@ namespace MediaPlayerCore.YtDlp
                     {
                         await EnsureBgutilServerAsync();
                         bool isLive = IsYouTubeLiveUrl(url);
+
+                        SabrSession? existing = _sabrSessions.Values.FirstOrDefault(
+                            s => s.Url == url && !s.Failed && !s.IsLive);
+                        if (existing != null)
+                        {
+                            existing.LastAccessUtc = DateTime.UtcNow;
+                            string reuseUrl = $"http://127.0.0.1:{_proxyPort}/stream/{existing.Id}";
+                            OnStatusUpdate?.Invoke(this, "SABR Proxy reusing active download.");
+                            return new string[] { reuseUrl };
+                        }
+
+                        ReleaseSabrSessions();
                         SabrSession session = StartSabrSession(url, isLive);
                         if (session.Failed)
                         {
@@ -320,6 +354,45 @@ namespace MediaPlayerCore.YtDlp
                 OnError?.Invoke(this, e);
                 return null;
             }
+        }
+
+        /// <summary>
+        /// Fetches lightweight metadata without starting a full download.
+        /// Used alongside SABR downloads so duration/title are available for seeking UI.
+        /// </summary>
+        public async Task<YtDlpMetadata?> GetLightMetadata(string url)
+        {
+            if (!IsAvailable()) return null;
+
+            try
+            {
+                string result = await RunYtDlp(
+                    $"--no-download --no-playlist --print title --print duration --print uploader \"{url}\"");
+                if (string.IsNullOrWhiteSpace(result)) return null;
+
+                var lines = result.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+                if (lines.Length < 2) return null;
+
+                double? duration = null;
+                if (double.TryParse(lines[1].Trim(), System.Globalization.NumberStyles.Float,
+                        System.Globalization.CultureInfo.InvariantCulture, out double dur))
+                {
+                    duration = dur;
+                }
+
+                return new YtDlpMetadata
+                {
+                    Title = lines[0].Trim(),
+                    Duration = duration,
+                    Uploader = lines.Length > 2 ? lines[2].Trim() : null,
+                };
+            }
+            catch (Exception e)
+            {
+                OnError?.Invoke(this, e);
+            }
+
+            return null;
         }
 
         /// <summary>
@@ -1096,15 +1169,132 @@ namespace MediaPlayerCore.YtDlp
             return GetSabrOutputLength(session) > 0;
         }
 
+        private static bool TryParseRangeHeader(string? rangeHeader, out long start, out long? end)
+        {
+            start = 0;
+            end = null;
+            if (string.IsNullOrEmpty(rangeHeader)
+                || !rangeHeader.StartsWith("bytes=", StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            string spec = rangeHeader["bytes=".Length..].Trim();
+            int dash = spec.IndexOf('-');
+            if (dash < 0) return false;
+
+            string startPart = spec[..dash];
+            string endPart = spec[(dash + 1)..];
+
+            if (!string.IsNullOrEmpty(startPart))
+            {
+                if (!long.TryParse(startPart, out start) || start < 0) return false;
+            }
+            else
+            {
+                return false; // suffix ranges not supported
+            }
+
+            if (!string.IsNullOrEmpty(endPart))
+            {
+                if (!long.TryParse(endPart, out long parsedEnd) || parsedEnd < start) return false;
+                end = parsedEnd;
+            }
+
+            return true;
+        }
+
+        private bool WaitForSabrBytes(SabrSession session, long requiredOffset, int timeoutMs = 120000)
+        {
+            var deadline = Environment.TickCount64 + timeoutMs;
+            while (Environment.TickCount64 < deadline)
+            {
+                if (session.Failed) return false;
+
+                long length = GetSabrOutputLength(session);
+                if (length > requiredOffset) return true;
+
+                if (session.DownloadFinished)
+                {
+                    if (session.Failed) return false;
+                    return length > requiredOffset;
+                }
+
+                if (session.Process?.HasExited == true)
+                {
+                    if (session.Failed) return false;
+                    return length > requiredOffset;
+                }
+
+                Thread.Sleep(50);
+            }
+
+            return GetSabrOutputLength(session) > requiredOffset;
+        }
+
         private void StreamSabrFileToResponse(SabrSession session, HttpListenerContext context)
         {
-            context.Response.ContentType = "video/x-matroska";
-            context.Response.SendChunked = true;
-            context.Response.AddHeader("Cache-Control", "no-cache");
+            var request = context.Request;
+            var response = context.Response;
+
+            response.AddHeader("Accept-Ranges", "bytes");
+            response.ContentType = "video/x-matroska";
+            response.AddHeader("Cache-Control", "no-cache");
+
+            bool hasRange = TryParseRangeHeader(request.Headers["Range"], out long rangeStart, out long? rangeEnd);
+            long offset = hasRange ? rangeStart : 0;
+
+            if (string.Equals(request.HttpMethod, "HEAD", StringComparison.OrdinalIgnoreCase))
+            {
+                long headLength = GetSabrOutputLength(session);
+                bool complete = session.DownloadFinished && !IsDownloadStillRunning(session);
+                if (complete && headLength > 0)
+                {
+                    response.ContentLength64 = headLength;
+                }
+
+                response.StatusCode = 200;
+                return;
+            }
+
+            if (hasRange && !WaitForSabrBytes(session, offset))
+            {
+                response.StatusCode = 416;
+                response.StatusDescription = "Range Not Satisfiable";
+                return;
+            }
+
+            bool downloadComplete = session.DownloadFinished && !IsDownloadStillRunning(session);
+            long fileLength = GetSabrOutputLength(session);
+
+            if (hasRange)
+            {
+                response.StatusCode = 206;
+                if (downloadComplete && fileLength > 0)
+                {
+                    response.Headers["Content-Range"] = $"bytes {offset}-{fileLength - 1}/{fileLength}";
+                    response.ContentLength64 = Math.Max(0, fileLength - offset);
+                    response.SendChunked = false;
+                }
+                else
+                {
+                    response.Headers["Content-Range"] = $"bytes {offset}-/*";
+                    response.SendChunked = true;
+                }
+            }
+            else if (downloadComplete && fileLength > 0)
+            {
+                response.ContentLength64 = fileLength;
+                response.SendChunked = false;
+            }
+            else
+            {
+                response.SendChunked = true;
+            }
 
             var buffer = new byte[128 * 1024];
-            long offset = 0;
             string? openPath = null;
+            long endByte = rangeEnd ?? long.MaxValue;
 
             while (true)
             {
@@ -1120,13 +1310,25 @@ namespace MediaPlayerCore.YtDlp
                 session.TempPath = outputPath;
                 if (openPath != null && openPath != outputPath)
                 {
-                    // yt-dlp renamed temp -> final; continue from same byte offset.
                     openPath = outputPath;
                 }
                 else if (openPath == null)
                 {
                     openPath = outputPath;
                 }
+
+                fileLength = TryGetFileLength(outputPath);
+                downloadComplete = session.DownloadFinished && !IsDownloadStillRunning(session);
+
+                if (offset >= fileLength)
+                {
+                    if (!IsDownloadStillRunning(session)) break;
+                    if (session.Failed) break;
+                    Thread.Sleep(50);
+                    continue;
+                }
+
+                if (rangeEnd.HasValue && offset > endByte) break;
 
                 try
                 {
@@ -1138,17 +1340,33 @@ namespace MediaPlayerCore.YtDlp
 
                     if (offset > fs.Length)
                     {
-                        offset = fs.Length;
+                        if (!IsDownloadStillRunning(session)) break;
+                        Thread.Sleep(50);
+                        continue;
                     }
 
                     fs.Seek(offset, SeekOrigin.Begin);
-                    int read = fs.Read(buffer, 0, buffer.Length);
+
+                    long bytesRemaining = long.MaxValue;
+                    if (rangeEnd.HasValue)
+                    {
+                        bytesRemaining = endByte - offset + 1;
+                    }
+                    else if (downloadComplete && fileLength > 0)
+                    {
+                        bytesRemaining = fileLength - offset;
+                    }
+
+                    int toRead = (int)Math.Min(buffer.Length, bytesRemaining);
+                    if (toRead <= 0) break;
+
+                    int read = fs.Read(buffer, 0, toRead);
                     if (read > 0)
                     {
                         try
                         {
-                            context.Response.OutputStream.Write(buffer, 0, read);
-                            context.Response.OutputStream.Flush();
+                            response.OutputStream.Write(buffer, 0, read);
+                            response.OutputStream.Flush();
                         }
                         catch (Exception ex) when (IsClientDisconnect(ex))
                         {
@@ -1156,6 +1374,12 @@ namespace MediaPlayerCore.YtDlp
                         }
 
                         offset += read;
+                        if (bytesRemaining != long.MaxValue)
+                        {
+                            bytesRemaining -= read;
+                            if (bytesRemaining <= 0) break;
+                        }
+
                         continue;
                     }
                 }
@@ -1268,6 +1492,7 @@ namespace MediaPlayerCore.YtDlp
                 }
 
                 OnStatusUpdate?.Invoke(this, "SABR Proxy streaming to player...");
+                session.LastAccessUtc = DateTime.UtcNow;
                 Interlocked.Increment(ref session.StreamConsumers);
                 if (!WaitForSabrData(session))
                 {
@@ -1290,10 +1515,10 @@ namespace MediaPlayerCore.YtDlp
             {
                 try { context.Response.Close(); } catch { }
 
-                if (session != null && Interlocked.Decrement(ref session.StreamConsumers) == 0)
+                if (session != null)
                 {
-                    _sabrSessions.TryRemove(session.Id, out _);
-                    CleanupSabrSession(session);
+                    session.LastAccessUtc = DateTime.UtcNow;
+                    Interlocked.Decrement(ref session.StreamConsumers);
                 }
             }
         }

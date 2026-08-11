@@ -1170,9 +1170,11 @@ namespace XivMediaPlayer
                     _lastStreamURL = url; // Save the original requested URL so PushMediaToServerAsync pushes it instead of the raw .m3u8
 
                     // Metadata fetch runs a second yt-dlp process and can trigger bot checks alongside SABR.
-                    Task<YtDlpMetadata?> metadataTask = (_config.EnableSabrProxy
-                        && (url.Contains("youtube.com") || url.Contains("youtu.be")))
-                        ? Task.FromResult<YtDlpMetadata?>(null)
+                    // Use lightweight metadata for SABR so duration/title are available for seeking UI.
+                    bool isYouTubeSabr = _config.EnableSabrProxy
+                        && (url.Contains("youtube.com") || url.Contains("youtu.be"));
+                    Task<YtDlpMetadata?> metadataTask = isYouTubeSabr
+                        ? _ytDlpManager.GetLightMetadata(url)
                         : _ytDlpManager.GetMetadata(url);
                     var resolveTask = _ytDlpManager.ResolveStreamUrl(url);
 
@@ -1463,6 +1465,7 @@ namespace XivMediaPlayer
             _controllerService = null;
             _cefBrowserHandle?.Dispose();
             _cefBrowserHandle = null;
+            _ytDlpManager?.ReleaseSabrSessions();
 
             bool wasPlaying = _streamWasPlaying;
             _streamWasPlaying = false;
@@ -2422,8 +2425,9 @@ namespace XivMediaPlayer
                     var activeStream = _mediaManager?.ActiveStream;
                     if (activeStream != null)
                     {
-                        if (activeStream.Length > 0)
-                            progress = activeStream.Time / (float)activeStream.Length;
+                        long durationMs = GetPlaybackDurationMs();
+                        if (durationMs > 0)
+                            progress = activeStream.Time / (float)durationMs;
 
                         isPlaying = activeStream.PlaybackState == NAudio.Wave.PlaybackState.Playing;
                         if (isPlaying) playbackState = 1.0f;
@@ -2562,10 +2566,14 @@ namespace XivMediaPlayer
                                 if (activeStream != null)
                                 {
                                     float seekProgress = (uv.X - 0.32f) / 0.28f;
-                                    long newTime = (long)(seekProgress * activeStream.Length);
-                                    activeStream.Time = newTime;
-                                    _isLocalDj = true;
-                                    _ = PushMediaToServerAsync(isBackgroundSync: false, overrideTimeMs: newTime);
+                                    long durationMs = GetPlaybackDurationMs();
+                                    if (durationMs > 0)
+                                    {
+                                        long newTime = (long)(seekProgress * durationMs);
+                                        activeStream.Time = newTime;
+                                        _isLocalDj = true;
+                                        _ = PushMediaToServerAsync(isBackgroundSync: false, overrideTimeMs: newTime);
+                                    }
                                 }
                             }
                         }
@@ -3317,10 +3325,11 @@ namespace XivMediaPlayer
         public void SeekRelative(int seconds)
         {
             var activeStream = _mediaManager?.ActiveStream;
-            if (activeStream == null || activeStream.Length <= 0) return;
+            long length = GetPlaybackDurationMs();
+            if (activeStream == null || length <= 0) return;
 
             long newTime = activeStream.Time + (seconds * 1000L);
-            newTime = Math.Clamp(newTime, 0, activeStream.Length);
+            newTime = Math.Clamp(newTime, 0, length);
             activeStream.Time = newTime;
 
             if (_isLocalDj)
@@ -3330,11 +3339,31 @@ namespace XivMediaPlayer
         }
 
         /// <summary>
+        /// Returns the best-known playback duration in milliseconds (VLC length or yt-dlp metadata).
+        /// </summary>
+        public long GetPlaybackDurationMs()
+        {
+            var activeStream = _mediaManager?.ActiveStream;
+            if (activeStream != null && activeStream.Length > 0)
+            {
+                return activeStream.Length;
+            }
+
+            if (_currentMediaDurationMs.HasValue && _currentMediaDurationMs.Value > 0)
+            {
+                return (long)_currentMediaDurationMs.Value;
+            }
+
+            return 0;
+        }
+
+        /// <summary>
         /// Completely stops playback, clears the queue, and clears the saved room resume state.
         /// </summary>
         public void Stop()
         {
             _chat.Print("[Media Player] Stopping media and clearing queue...");
+            _ytDlpManager?.ReleaseSabrSessions();
             _mediaManager?.StopStream();
             _mediaQueue.Clear();
             ResetStreamValues(true);
@@ -3368,14 +3397,15 @@ namespace XivMediaPlayer
             {
                 if (activeStream.PlaybackState == NAudio.Wave.PlaybackState.Stopped && !string.IsNullOrEmpty(_lastStreamURL))
                 {
+                    long resumeTime = activeStream.Time;
                     _mediaManager?.StopStream();
                     if (YtDlpManager.IsUrlSupported(_lastStreamURL) && _ytDlpManager.IsAvailable())
                     {
-                        PlayRouted(_lastStreamURL, CurrentAudioSource, 0);
+                        PlayRouted(_lastStreamURL, CurrentAudioSource, (int)resumeTime);
                     }
                     else
                     {
-                        TuneIntoStream(_lastStreamURL, CurrentAudioSource, 0);
+                        TuneIntoStream(_lastStreamURL, CurrentAudioSource, (int)resumeTime);
                     }
                     _isIntentionallyPaused = false;
                     return;
