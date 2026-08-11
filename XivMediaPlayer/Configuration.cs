@@ -61,11 +61,26 @@ namespace XivMediaPlayer {
 
     public const int CurrentConfigVersion = 5;
 
+    public const string DefaultTranslationServerUrl = "http://ai.hubujubu.com:5681";
+
     /// <summary>UI language index matching <see cref="LanguageEnum"/>.</summary>
     public int UiLanguage { get; set; } = (int)LanguageEnum.English;
 
-    /// <summary>RoleplayingQuestCore-compatible translation proxy base URL.</summary>
-    public string TranslationServerUrl { get; set; } = "http://ai.hubujubu.com:5681";
+    /// <summary>Dev-only override for the translation proxy. Ignored unless <see cref="DevMode"/> is enabled.</summary>
+    public string TranslationServerUrl { get; set; } = DefaultTranslationServerUrl;
+
+    /// <summary>Unlocks developer settings such as the translation server URL override.</summary>
+    public bool DevMode { get; set; } = false;
+
+    public string GetEffectiveTranslationServerUrl()
+    {
+      if (DevMode && !string.IsNullOrWhiteSpace(TranslationServerUrl))
+      {
+        return TranslationServerUrl.Trim().TrimEnd('/');
+      }
+
+      return DefaultTranslationServerUrl;
+    }
 
     // World screen compositing settings (legacy single placement)
     public MediaPlayerCore.Compositing.WorldScreenTransform WorldScreen { get; set; } = new MediaPlayerCore.Compositing.WorldScreenTransform();

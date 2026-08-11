@@ -66,7 +66,9 @@ namespace XivMediaPlayer.Windows {
       if (!string.IsNullOrWhiteSpace(Translator.LastErrorMessage))
       {
         ImGui.TextColored(new Vector4(1f, 0.35f, 0.35f, 1f),
-          string.Format(Localize("Translation server unreachable. UI stays in English until {0} responds."), Translator.ServerUrlDisplay));
+          _plugin.Config.DevMode
+            ? string.Format(Localize("Translation server unreachable. UI stays in English until {0} responds."), Translator.ServerUrlDisplay)
+            : Localize("Translation server unreachable. UI stays in English until the translation service responds."));
         ImGui.TextWrapped(Translator.LastErrorMessage);
       }
       else if (Translator.ServerRespondedSuccessfully || cached > 0)
@@ -101,14 +103,20 @@ namespace XivMediaPlayer.Windows {
 
       DrawTranslationStatus(langIdx);
 
-      string translationServerUrl = _plugin.Config.TranslationServerUrl ?? "http://ai.hubujubu.com:5681";
-      if (ImGui.InputText(Localize("Translation Server URL"), ref translationServerUrl, 256)) {
-        _plugin.Config.TranslationServerUrl = translationServerUrl;
-        _plugin.Config.Save();
-        _plugin.ApplyUiLanguageFromConfig();
-      }
-      if (ImGui.IsItemHovered()) {
-        ImGui.SetTooltip(Localize("RoleplayingQuestCore-compatible translation proxy. Override only if you run your own service (e.g. http://127.0.0.1:5681 or a LAN IP when loopback is blocked)."));
+      if (_plugin.Config.DevMode) {
+        ImGui.Spacing();
+        ImGui.TextColored(new Vector4(0.7f, 0.9f, 1.0f, 1.0f), Localize("Developer"));
+        ImGui.Separator();
+
+        string translationServerUrl = _plugin.Config.TranslationServerUrl ?? Configuration.DefaultTranslationServerUrl;
+        if (ImGui.InputText(Localize("Translation Server URL"), ref translationServerUrl, 256)) {
+          _plugin.Config.TranslationServerUrl = translationServerUrl;
+          _plugin.Config.Save();
+          _plugin.ApplyUiLanguageFromConfig();
+        }
+        if (ImGui.IsItemHovered()) {
+          ImGui.SetTooltip(Localize("Override the RoleplayingQuestCore-compatible translation proxy (e.g. local loopback or LAN IP)."));
+        }
       }
 
       ImGui.Spacing();
@@ -363,6 +371,16 @@ namespace XivMediaPlayer.Windows {
       }
       if (ImGui.IsItemHovered()) {
         ImGui.SetTooltip(Localize("Shows detailed plugin status messages in the chat."));
+      }
+
+      bool devMode = _plugin.Config.DevMode;
+      if (ImGui.Checkbox(Localize("Developer Mode"), ref devMode)) {
+        _plugin.Config.DevMode = devMode;
+        _plugin.Config.Save();
+        _plugin.ApplyUiLanguageFromConfig();
+      }
+      if (ImGui.IsItemHovered()) {
+        ImGui.SetTooltip(Localize("Shows developer-only settings such as the translation server URL override."));
       }
 
       ImGui.Spacing();

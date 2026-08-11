@@ -144,7 +144,7 @@ namespace XivMediaPlayer
             int lang = Math.Clamp(_config.UiLanguage, 0, Translator.LanguageStringsDisplay.Length - 1);
             _config.UiLanguage = lang;
             Translator.UiLanguage = (LanguageEnum)lang;
-            Translator.ServerUrl = _config.TranslationServerUrl;
+            Translator.ServerUrl = _config.GetEffectiveTranslationServerUrl();
             Translator.ClearLastError();
             _translationServerErrorNotified = false;
             Interlocked.Increment(ref _translationRevision);
@@ -224,7 +224,7 @@ namespace XivMediaPlayer
                 {
                     _translationServerErrorNotified = true;
                     EnqueueFrameworkAction(() =>
-                        PrintErrorChatFormat("[Media Player] Translation server unreachable ({0}). UI will stay in English until it responds.", Translator.ServerUrlDisplay));
+                        PrintErrorChat("[Media Player] Translation server unreachable. UI will stay in English until it responds."));
                 }
             };
         }
