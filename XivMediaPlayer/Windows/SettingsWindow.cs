@@ -66,7 +66,7 @@ namespace XivMediaPlayer.Windows {
       if (!string.IsNullOrWhiteSpace(Translator.LastErrorMessage))
       {
         ImGui.TextColored(new Vector4(1f, 0.35f, 0.35f, 1f),
-          Localize("Translation server unreachable. UI stays in English until http://ai.hubujubu.com:5681 responds."));
+          string.Format(Localize("Translation server unreachable. UI stays in English until {0} responds."), Translator.ServerUrlDisplay));
         ImGui.TextWrapped(Translator.LastErrorMessage);
       }
       else if (Translator.ServerRespondedSuccessfully || cached > 0)
@@ -100,6 +100,16 @@ namespace XivMediaPlayer.Windows {
       }
 
       DrawTranslationStatus(langIdx);
+
+      string translationServerUrl = _plugin.Config.TranslationServerUrl ?? "http://127.0.0.1:5681";
+      if (ImGui.InputText(Localize("Translation Server URL"), ref translationServerUrl, 256)) {
+        _plugin.Config.TranslationServerUrl = translationServerUrl;
+        _plugin.Config.Save();
+        _plugin.ApplyUiLanguageFromConfig();
+      }
+      if (ImGui.IsItemHovered()) {
+        ImGui.SetTooltip(Localize("RoleplayingQuestCore-compatible translation proxy. Use http://127.0.0.1:5681 for a local service, or http://ai.hubujubu.com:5681 for the public host. If loopback is blocked, try your LAN IP instead of 127.0.0.1."));
+      }
 
       ImGui.Spacing();
       ImGui.TextColored(new Vector4(0.7f, 0.9f, 1.0f, 1.0f), Localize("Audio"));

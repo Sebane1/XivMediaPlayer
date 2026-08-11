@@ -32,6 +32,15 @@ namespace XivMediaPlayer.Localization
 
         private static LanguageEnum _uiLanguage = LanguageEnum.English;
         private static string _cacheLocation = string.Empty;
+        private static string _serverUrl = "http://127.0.0.1:5681";
+
+        public static string ServerUrl
+        {
+            get => _serverUrl;
+            set => _serverUrl = NormalizeServerUrl(value);
+        }
+
+        public static string ServerUrlDisplay => _serverUrl;
 
         public static string[] LanguageStringsDisplay => LanguageStrings;
 
@@ -146,13 +155,12 @@ namespace XivMediaPlayer.Localization
 
                 using var httpClient = new HttpClient
                 {
-                    BaseAddress = new Uri("http://ai.hubujubu.com:5681"),
                     Timeout = TimeSpan.FromSeconds(30),
                 };
                 httpClient.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
 
                 using var post = await httpClient.PostAsync(
-                    httpClient.BaseAddress,
+                    _serverUrl,
                     new StringContent(JsonConvert.SerializeObject(languageRequest), Encoding.UTF8, "application/json"));
 
                 if (!post.IsSuccessStatusCode)
@@ -226,6 +234,23 @@ namespace XivMediaPlayer.Localization
         {
             LastErrorMessage = ex.Message;
             OnError?.Invoke(null, ex);
+        }
+
+        private static string NormalizeServerUrl(string url)
+        {
+            if (string.IsNullOrWhiteSpace(url))
+            {
+                return "http://127.0.0.1:5681";
+            }
+
+            url = url.Trim().TrimEnd('/');
+            if (!url.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
+                && !url.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+            {
+                url = "http://" + url;
+            }
+
+            return url;
         }
 
         public static string LocalizeUI(string translationText)
