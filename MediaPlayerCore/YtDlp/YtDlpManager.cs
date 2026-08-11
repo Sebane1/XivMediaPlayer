@@ -885,25 +885,41 @@ namespace MediaPlayerCore.YtDlp
         private static string GetSabrMergedOutputPath(SabrSession session)
             => Path.Combine(session.TempDir, "stream.mkv");
 
+        private static string GetSabrTempOutputPath(SabrSession session)
+            => Path.Combine(session.TempDir, "stream.temp.mkv");
+
+        private static bool IsBenignSabrFinalizeError(string text)
+        {
+            return text.Contains("Access is denied", StringComparison.OrdinalIgnoreCase)
+                && text.Contains("stream.temp.mkv", StringComparison.OrdinalIgnoreCase);
+        }
+
         private static string? FindSabrOutputFile(SabrSession session)
         {
-            // Only serve the ffmpeg-merged output — not separate stream.f###.mkv video fragments.
             string merged = GetSabrMergedOutputPath(session);
-            if (File.Exists(merged) && new FileInfo(merged).Length > 0)
-            {
-                return merged;
-            }
+            string temp = GetSabrTempOutputPath(session);
 
+            long mergedLen = File.Exists(merged) ? TryGetFileLength(merged) : 0;
+            long tempLen = File.Exists(temp) ? TryGetFileLength(temp) : 0;
+
+            if (tempLen > mergedLen) return tempLen > 0 ? temp : null;
+            if (mergedLen > 0) return merged;
+            if (tempLen > 0) return temp;
             return null;
+        }
+
+        private static long TryGetFileLength(string path)
+        {
+            try { return new FileInfo(path).Length; }
+            catch { return 0; }
         }
 
         private static long GetSabrOutputLength(SabrSession session)
         {
-            string merged = GetSabrMergedOutputPath(session);
-            if (!File.Exists(merged)) return 0;
-            session.TempPath = merged;
-            try { return new FileInfo(merged).Length; }
-            catch { return 0; }
+            string? path = FindSabrOutputFile(session);
+            if (path == null) return 0;
+            session.TempPath = path;
+            return TryGetFileLength(path);
         }
 
         private SabrSession StartSabrSession(string url, bool isLive)
@@ -965,6 +981,7 @@ namespace MediaPlayerCore.YtDlp
             {
                 if (e.Data == null) return;
                 stderr.AppendLine(e.Data);
+                if (IsBenignSabrFinalizeError(e.Data)) return;
                 if (e.Data.Contains("ERROR:", StringComparison.OrdinalIgnoreCase)
                     || e.Data.Contains("Requested format is not available", StringComparison.OrdinalIgnoreCase))
                 {
@@ -984,8 +1001,14 @@ namespace MediaPlayerCore.YtDlp
                     session.DownloadFinished = true;
                     if (process.HasExited && process.ExitCode != 0)
                     {
+                        string err = stderr.ToString();
+                        if (IsBenignSabrFinalizeError(err) && GetSabrOutputLength(session) > 0)
+                        {
+                            return;
+                        }
+
                         session.Failed = true;
-                        session.Error = stderr.Length > 0 ? stderr.ToString() : $"yt-dlp exited with code {process.ExitCode}";
+                        session.Error = err.Length > 0 ? err : $"yt-dlp exited with code {process.ExitCode}";
                         OnError?.Invoke(this, new Exception($"SABR download failed: {session.Error}"));
                     }
                 }
@@ -1075,46 +1098,51 @@ namespace MediaPlayerCore.YtDlp
 
         private void StreamSabrFileToResponse(SabrSession session, HttpListenerContext context)
         {
-            string? outputPath = FindSabrOutputFile(session);
-            if (outputPath == null)
-            {
-                return;
-            }
-
-            session.TempPath = outputPath;
-
             context.Response.ContentType = "video/x-matroska";
             context.Response.SendChunked = true;
             context.Response.AddHeader("Cache-Control", "no-cache");
 
-            using var fs = new FileStream(outputPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
             var buffer = new byte[128 * 1024];
             long offset = 0;
+            string? openPath = null;
 
             while (true)
             {
-                fs.Seek(offset, SeekOrigin.Begin);
-                int read = fs.Read(buffer, 0, buffer.Length);
-                if (read > 0)
+                string? outputPath = FindSabrOutputFile(session);
+                if (outputPath == null)
                 {
-                    try
-                    {
-                        context.Response.OutputStream.Write(buffer, 0, read);
-                        context.Response.OutputStream.Flush();
-                    }
-                    catch (Exception ex) when (IsClientDisconnect(ex))
-                    {
-                        break;
-                    }
-
-                    offset += read;
+                    if (!IsDownloadStillRunning(session)) break;
+                    if (session.Failed) break;
+                    Thread.Sleep(50);
                     continue;
                 }
 
-                if (!IsDownloadStillRunning(session))
+                session.TempPath = outputPath;
+                if (openPath != null && openPath != outputPath)
                 {
+                    // yt-dlp renamed temp -> final; continue from same byte offset.
+                    openPath = outputPath;
+                }
+                else if (openPath == null)
+                {
+                    openPath = outputPath;
+                }
+
+                try
+                {
+                    using var fs = new FileStream(
+                        outputPath,
+                        FileMode.Open,
+                        FileAccess.Read,
+                        FileShare.ReadWrite | FileShare.Delete);
+
+                    if (offset > fs.Length)
+                    {
+                        offset = fs.Length;
+                    }
+
                     fs.Seek(offset, SeekOrigin.Begin);
-                    read = fs.Read(buffer, 0, buffer.Length);
+                    int read = fs.Read(buffer, 0, buffer.Length);
                     if (read > 0)
                     {
                         try
@@ -1122,10 +1150,24 @@ namespace MediaPlayerCore.YtDlp
                             context.Response.OutputStream.Write(buffer, 0, read);
                             context.Response.OutputStream.Flush();
                         }
-                        catch (Exception ex) when (IsClientDisconnect(ex)) { }
+                        catch (Exception ex) when (IsClientDisconnect(ex))
+                        {
+                            break;
+                        }
+
                         offset += read;
                         continue;
                     }
+                }
+                catch (IOException)
+                {
+                    if (!IsDownloadStillRunning(session)) break;
+                    Thread.Sleep(50);
+                    continue;
+                }
+
+                if (!IsDownloadStillRunning(session))
+                {
                     break;
                 }
 
