@@ -9,6 +9,7 @@ namespace XivMediaPlayer.Windows {
   internal class SettingsWindow : Window {
     private Plugin _plugin;
     private Action _onVolumeFix;
+    private string _diagnosticUserNote = string.Empty;
 
     public SettingsWindow(Plugin plugin, Action onVolumeFix = null) :
       base("Media Player Settings", ImGuiWindowFlags.NoCollapse, false) {
@@ -303,6 +304,8 @@ namespace XivMediaPlayer.Windows {
       ImGui.TextWrapped(
         Localize("Videos: buffered local download for reliable playback and seeking. Live streams are detected automatically and play via HLS instead. Requires cookies for most YouTube content."));
 
+      DrawYouTubeHelperSection();
+
       ImGui.Spacing();
       ImGui.TextColored(new Vector4(0.5f, 0.5f, 0.5f, 1f),
         Localize("yt-dlp is automatically downloaded and updated."));
@@ -329,6 +332,40 @@ namespace XivMediaPlayer.Windows {
             });
           } catch { }
         }
+      }
+    }
+
+    private void DrawYouTubeHelperSection()
+    {
+      if (!_plugin.Config.EnableSabrProxy || _plugin.YtDlpManager == null)
+      {
+        return;
+      }
+
+      ImGui.Spacing();
+      ImGui.TextColored(new Vector4(0.7f, 0.9f, 1.0f, 1.0f), Localize("YouTube helper"));
+      ImGui.Separator();
+
+      var yt = _plugin.YtDlpManager;
+      if (yt.IsPoTokenServerReady)
+      {
+        ImGui.TextColored(new Vector4(0.4f, 1f, 0.4f, 1f), Localize("Status: Ready"));
+      }
+      else
+      {
+        ImGui.TextColored(new Vector4(1f, 0.7f, 0.3f, 1f), Localize("Status: Setup needed"));
+        ImGui.TextWrapped(
+          Localize("If a Windows popup asked about internet access and you clicked Block or No, use the button below — no game restart required."));
+      }
+
+      if (yt.IsYouTubeSetupRunning)
+      {
+        ImGui.Spacing();
+        ImGui.TextWrapped(Localize("Setting up... This can take 1–2 minutes. If Windows asks to allow internet access, click Allow."));
+      }
+      else if (ImGui.Button(Localize("Fix YouTube setup")))
+      {
+        _plugin.RetryYouTubeSetup();
       }
     }
 
@@ -430,6 +467,53 @@ namespace XivMediaPlayer.Windows {
             UseShellExecute = true
           });
         } catch { }
+      }
+
+      DrawDiagnosticReportSection();
+    }
+
+    private void DrawDiagnosticReportSection()
+    {
+      ImGui.Spacing();
+      ImGui.TextColored(new Vector4(0.7f, 0.9f, 1.0f, 1.0f), Localize("Error reports"));
+      ImGui.Separator();
+      ImGui.TextWrapped(
+        Localize("If something isn't working, you can send recent plugin warnings and errors from your Dalamud log. Only XivMediaPlayer messages are included — not your whole log file."));
+
+      if (_plugin.HasPendingDiagnosticReports)
+      {
+        ImGui.TextColored(new Vector4(1f, 0.7f, 0.3f, 1f),
+          string.Format(Localize("Detected {0} recent issue(s)."), _plugin.DiagnosticPendingCount));
+      }
+      else
+      {
+        ImGui.TextColored(new Vector4(0.5f, 0.8f, 0.5f, 1f), Localize("No recent plugin errors detected."));
+      }
+
+      bool autoSend = _plugin.Config.AutoSendDiagnosticLogs;
+      if (ImGui.Checkbox(Localize("Automatically send error reports"), ref autoSend))
+      {
+        _plugin.Config.AutoSendDiagnosticLogs = autoSend;
+        _plugin.Config.Save();
+      }
+      if (ImGui.IsItemHovered())
+      {
+        ImGui.SetTooltip(Localize("When enabled, recent plugin errors are uploaded automatically (at most once every 10 minutes)."));
+      }
+
+      ImGui.InputText(Localize("What went wrong? (optional)"), ref _diagnosticUserNote, 256);
+
+      if (_plugin.IsSendingDiagnosticLogs)
+      {
+        ImGui.BeginDisabled();
+        ImGui.Button(Localize("Sending error report..."));
+        ImGui.EndDisabled();
+      }
+      else if (ImGui.Button(Localize("Send error report")))
+      {
+        string note = _diagnosticUserNote;
+        _plugin.SendDiagnosticReport(note);
+        _diagnosticUserNote = string.Empty;
       }
     }
 

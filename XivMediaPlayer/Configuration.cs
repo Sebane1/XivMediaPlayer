@@ -59,7 +59,13 @@ namespace XivMediaPlayer {
     public int PreferredQuality { get; set; } = 720;
     public bool EnableSabrProxy { get; set; } = true;
 
-    public const int CurrentConfigVersion = 5;
+    /// <summary>Automatically upload XivMediaPlayer warnings/errors from dalamud.log to the sync server.</summary>
+    public bool AutoSendDiagnosticLogs { get; set; } = false;
+
+    /// <summary>Show a chat hint when new plugin warnings/errors are detected in dalamud.log.</summary>
+    public bool NotifyOnDiagnosticLogs { get; set; } = true;
+
+    public const int CurrentConfigVersion = 6;
 
     public const string DefaultTranslationServerUrl = "http://ai.hubujubu.com:5681";
 
@@ -149,6 +155,11 @@ namespace XivMediaPlayer {
             || string.Equals(TranslationServerUrl, "http://localhost:5681", StringComparison.OrdinalIgnoreCase)) {
           TranslationServerUrl = "http://ai.hubujubu.com:5681";
         }
+      }
+
+      if (versioned.Version < 6) {
+        AutoSendDiagnosticLogs = false;
+        NotifyOnDiagnosticLogs = true;
       }
 
       versioned.Version = CurrentConfigVersion;

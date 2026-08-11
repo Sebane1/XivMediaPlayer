@@ -13,7 +13,9 @@ using MediaPlayerCore.Compositing;
 using MediaPlayerCore.Twitch;
 using MediaPlayerCore.YtDlp;
 using XivMediaPlayer.Compositing;
+using XivMediaPlayer.Diagnostics;
 using XivMediaPlayer.Localization;
+using XivMediaPlayer.Networking.Models;
 using Dalamud.Bindings.ImGui;
 using System;
 using System.Collections.Generic;
@@ -79,6 +81,12 @@ namespace XivMediaPlayer
         public MediaManager MediaManager => _mediaManager;
         private YtDlpManager _ytDlpManager;
         private Task _ytDlpInitTask;
+        private readonly DalamudLogMonitor _diagnosticLogMonitor = new();
+        private readonly string _pluginVersion;
+        private DateTime _lastDiagnosticScanUtc = DateTime.MinValue;
+        private DateTime _lastAutoDiagnosticSendUtc = DateTime.MinValue;
+        private bool _diagnosticNotifyShown;
+        private int _isSendingDiagnostics;
 
         private string _lastLocationKey = "";
         private MediaGameObject? _playerObject;
@@ -121,6 +129,10 @@ namespace XivMediaPlayer
         public Configuration Config => _config;
         public YtDlpManager YtDlpManager => _ytDlpManager;
         internal int TranslationRevision => _translationRevision;
+        public bool HasPendingDiagnosticReports => _diagnosticLogMonitor.HasPendingReports;
+        public bool IsSendingDiagnosticLogs => Interlocked.CompareExchange(ref _isSendingDiagnostics, 0, 0) != 0;
+        public int DiagnosticPendingCount => _diagnosticLogMonitor.PendingLineCount;
+        public string DiagnosticPendingSummary => _diagnosticLogMonitor.PendingSummary;
 
         public string Translate(string text) => Localization.Translation.Get(text);
 
@@ -135,6 +147,165 @@ namespace XivMediaPlayer
         public void PrintChatWithBody(string body) => _chat.Print(Translate("[Media Player] ") + Translate(body));
 
         public void PrintErrorChatWithBody(string body) => _chat.PrintError(Translate("[Media Player] ") + Translate(body));
+
+        /// <summary>Re-runs YouTube SABR helper setup (PO Token server). Safe without restarting the game.</summary>
+        public void RetryYouTubeSetup()
+        {
+            if (_ytDlpManager == null || !_config.EnableSabrProxy)
+            {
+                PrintChat("[Media Player] YouTube SABR mode is off. Turn it on in Settings → Sources if you want buffered YouTube playback.");
+                return;
+            }
+
+            if (_ytDlpManager.IsYouTubeSetupRunning)
+            {
+                PrintChat("[Media Player] YouTube setup is already running. Please wait a minute.");
+                return;
+            }
+
+            PrintChat("[Media Player] Setting up YouTube helper... If Windows asks to use the internet, click Allow.");
+            _ = Task.Run(async () =>
+            {
+                bool ready = await _ytDlpManager.RetryYouTubeHelperSetupAsync().ConfigureAwait(false);
+                EnqueueFrameworkAction(() =>
+                {
+                    if (ready)
+                    {
+                        PrintChat("[Media Player] YouTube helper is ready. Try your video again.");
+                    }
+                    else
+                    {
+                        PrintErrorChat(
+                            "[Media Player] YouTube setup did not finish. Open Settings → Sources and click Fix YouTube setup again. " +
+                            "If a Windows popup appears, click Allow.");
+                    }
+                });
+            });
+        }
+
+        /// <summary>Uploads recent XivMediaPlayer warnings/errors from dalamud.log to the sync server.</summary>
+        public void SendDiagnosticReport(string? userNote = null)
+        {
+            _diagnosticLogMonitor.ScanForNewIssues();
+            if (!_diagnosticLogMonitor.HasPendingReports)
+            {
+                PrintChat("[Media Player] No recent plugin errors were found to send.");
+                return;
+            }
+
+            if (Interlocked.CompareExchange(ref _isSendingDiagnostics, 1, 0) != 0)
+            {
+                PrintChat("[Media Player] Error report upload already in progress.");
+                return;
+            }
+
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    bool ok = await SendDiagnosticReportCoreAsync("manual", userNote).ConfigureAwait(false);
+                    EnqueueFrameworkAction(() =>
+                    {
+                        if (ok)
+                        {
+                            PrintChat("[Media Player] Error report sent. Thank you!");
+                            _diagnosticNotifyShown = false;
+                        }
+                        else
+                        {
+                            PrintErrorChat("[Media Player] Could not send error report. Check your internet connection and try again.");
+                        }
+                    });
+                }
+                finally
+                {
+                    Interlocked.Exchange(ref _isSendingDiagnostics, 0);
+                }
+            });
+        }
+
+        private async Task<bool> SendDiagnosticReportCoreAsync(string trigger, string? userNote)
+        {
+            _diagnosticLogMonitor.ScanForNewIssues();
+            List<string> lines = _diagnosticLogMonitor.GetPendingLinesSnapshot();
+            if (lines.Count == 0)
+            {
+                return false;
+            }
+
+            var report = new DiagnosticLogReport
+            {
+                PluginVersion = _pluginVersion,
+                OwnerId = _config.OwnerId,
+                Trigger = trigger,
+                UserNote = string.IsNullOrWhiteSpace(userNote) ? null : userNote.Trim(),
+                Summary = _diagnosticLogMonitor.PendingSummary,
+                ClientUtc = DateTime.UtcNow,
+                LogLines = lines,
+            };
+
+            DiagnosticLogSubmitResult? result = await ServerClient.SubmitDiagnosticLogsAsync(report).ConfigureAwait(false);
+            if (result == null)
+            {
+                return false;
+            }
+
+            _diagnosticLogMonitor.ClearPending();
+            return true;
+        }
+
+        private void TryPeriodicDiagnosticScan()
+        {
+            if ((DateTime.UtcNow - _lastDiagnosticScanUtc).TotalSeconds < 30)
+            {
+                return;
+            }
+
+            _lastDiagnosticScanUtc = DateTime.UtcNow;
+            int newCount = _diagnosticLogMonitor.ScanForNewIssues();
+            if (newCount <= 0)
+            {
+                return;
+            }
+
+            if (_config.AutoSendDiagnosticLogs
+                && (DateTime.UtcNow - _lastAutoDiagnosticSendUtc).TotalMinutes >= 10)
+            {
+                _lastAutoDiagnosticSendUtc = DateTime.UtcNow;
+                _ = Task.Run(async () =>
+                {
+                    if (Interlocked.CompareExchange(ref _isSendingDiagnostics, 1, 0) != 0)
+                    {
+                        return;
+                    }
+
+                    try
+                    {
+                        bool ok = await SendDiagnosticReportCoreAsync("auto", null).ConfigureAwait(false);
+                        if (ok)
+                        {
+                            EnqueueFrameworkAction(() =>
+                            {
+                                PrintChat("[Media Player] An error report was sent automatically to help fix a recent issue.");
+                                _diagnosticNotifyShown = false;
+                            });
+                        }
+                    }
+                    finally
+                    {
+                        Interlocked.Exchange(ref _isSendingDiagnostics, 0);
+                    }
+                });
+                return;
+            }
+
+            if (_config.NotifyOnDiagnosticLogs && !_diagnosticNotifyShown)
+            {
+                _diagnosticNotifyShown = true;
+                EnqueueFrameworkAction(() => PrintChat(
+                    "[Media Player] Something may have gone wrong. Open Media Player Settings and click Send error report if you need help."));
+            }
+        }
 
         public string FormatDmcaClipboardText(string url, string domain) =>
             string.Format(Translate("Content URL: {0}\n\nPlease contact {1} to report this content."), url, domain);
@@ -316,6 +487,7 @@ namespace XivMediaPlayer
             string configDir = _pluginInterface.ConfigDirectory.FullName;
             string pluginDir = System.IO.Path.GetDirectoryName(_pluginInterface.AssemblyLocation.FullName) ?? "";
             string version = this.GetType().Assembly.GetName().Version?.ToString() ?? "0.0.0.0";
+            _pluginVersion = version;
             _dependencyManager = new DependencyManager(configDir, pluginDir, version, _pluginLog);
 
             // Bypass Dalamud's assembly resolver for CefSharp natively (just in case)
@@ -355,6 +527,7 @@ namespace XivMediaPlayer
             _ytDlpManager.OnError += (s, ex) =>
             {
                 _pluginLog.Warning(ex, "[yt-dlp] " + ex.Message);
+                _ = Task.Run(() => _diagnosticLogMonitor.ScanForNewIssues());
                 if (MediaPlayerCore.YtDlp.YtDlpManager.IsYouTubeSessionError(ex.Message))
                 {
                     EnqueueFrameworkAction(() => PrintErrorChat(
@@ -471,6 +644,8 @@ namespace XivMediaPlayer
             }
 
             if (!_clientState.IsLoggedIn) return;
+
+            TryPeriodicDiagnosticScan();
 
             var localPlayerObj = GetLocalPlayer();
             if (localPlayerObj != null) {
