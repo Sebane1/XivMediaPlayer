@@ -1543,6 +1543,9 @@ namespace MediaPlayerCore.YtDlp
             args += "--remote-components ejs:github --socket-timeout 30 --no-part --merge-output-format mkv --embed-metadata ";
             args += "--retries 10 --fragment-retries 20 --skip-unavailable-fragments ";
 
+            // SABR merged formats cannot be partially downloaded (--download-sections aborts).
+            // Resume is handled by downloading from the start and deferred seek in MediaObject.
+
             if (!string.IsNullOrEmpty(CookieBrowser))
             {
                 args += $"--cookies-from-browser {CookieBrowser} ";

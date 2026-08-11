@@ -251,27 +251,33 @@ namespace XivMediaPlayer.Windows {
             uint progressColor = ImGui.ColorConvertFloat4ToU32(new System.Numerics.Vector4(0.8f, 0.2f, 0.2f, 1f));
 
             drawList.AddRectFilled(trackMin, trackMax, trackColor, 3f);
-            if (bufferProgress > 0f) {
+            if (bufferProgress > 0f && !_plugin.BlocksYouTubeUserSeek()) {
               drawList.AddRectFilled(trackMin, new Vector2(trackMin.X + barW * bufferProgress, trackMax.Y), bufferColor, 3f);
             }
             if (progress > 0f) {
               drawList.AddRectFilled(trackMin, new Vector2(trackMin.X + barW * progress, trackMax.Y), progressColor, 3f);
             }
 
-            ImGui.InvisibleButton("##seek", new Vector2(barW, ImGui.GetFrameHeight()));
-            if (ImGui.IsItemHovered() || ImGui.IsItemActive()) {
-              ImGui.SetMouseCursor(ImGuiMouseCursor.Hand);
-            }
-            if (ImGui.IsItemActive()) {
-              _isDraggingSeek = true;
-              float mouseX = ImGui.GetIO().MousePos.X;
-              _seekDragProgress = Math.Clamp((mouseX - trackMin.X) / barW, 0f, bufferProgress);
-              progress = _seekDragProgress;
-            }
+            bool seekDisabled = _plugin.BlocksYouTubeUserSeek();
+            if (!seekDisabled) {
+              ImGui.InvisibleButton("##seek", new Vector2(barW, ImGui.GetFrameHeight()));
+              if (ImGui.IsItemHovered() || ImGui.IsItemActive()) {
+                ImGui.SetMouseCursor(ImGuiMouseCursor.Hand);
+              }
+              if (ImGui.IsItemActive()) {
+                _isDraggingSeek = true;
+                float mouseX = ImGui.GetIO().MousePos.X;
+                _seekDragProgress = Math.Clamp((mouseX - trackMin.X) / barW, 0f, bufferProgress);
+                progress = _seekDragProgress;
+              }
 
-            if (ImGui.IsItemDeactivated() && _isDraggingSeek) {
-                _isDraggingSeek = false;
-                _plugin.SeekToMs((long)(_seekDragProgress * durationMs));
+              if (ImGui.IsItemDeactivated() && _isDraggingSeek) {
+                  _isDraggingSeek = false;
+                  _plugin.SeekToMs((long)(_seekDragProgress * durationMs));
+              }
+            } else {
+              ImGui.Dummy(new Vector2(barW, ImGui.GetFrameHeight()));
+              _isDraggingSeek = false;
             }
 
             long displayTime = _isDraggingSeek ? (long)(progress * durationMs) : activeStream.Time;

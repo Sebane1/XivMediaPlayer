@@ -1053,7 +1053,7 @@ namespace XivMediaPlayer
             _sabrSeekCacheTick = 0;
         }
 
-        private void EnsureSabrSeekCache(string mediaPath, long metadataLength, long vlcLength, long timeMs)
+        private void EnsureSabrSeekCache(string mediaPath, long metadataLength, long vlcLength, long fileTimeMs)
         {
             long now = Environment.TickCount64;
             if (_sabrSeekCachePath != null
@@ -1083,10 +1083,16 @@ namespace XivMediaPlayer
             _sabrSeekCachePath = mediaPath;
             _sabrSeekCacheTick = now;
             _sabrSeekCacheDurationMs = durationMs;
-            _sabrSeekCacheMaxSeekMs = ComputeSabrMaxSeekMs(durationMs, muxedMs, fullyBuffered, vlcLength, timeMs);
+            _sabrSeekCacheMaxSeekMs = ComputeSabrMaxSeekMs(
+                durationMs, muxedMs, fullyBuffered, vlcLength, fileTimeMs);
         }
 
-        private static long ComputeSabrMaxSeekMs(long fullDuration, long muxedMs, bool fullyBuffered, long vlcLength, long timeMs)
+        private static long ComputeSabrMaxSeekMs(
+            long fullDuration,
+            long muxedMs,
+            bool fullyBuffered,
+            long vlcLength,
+            long fileTimeMs)
         {
             const long safetyMs = 3000;
 
@@ -1103,7 +1109,7 @@ namespace XivMediaPlayer
 
             if (fullDuration > 0 && vlcLength >= fullDuration - 2000)
             {
-                return Math.Min(fullDuration, Math.Max(0, timeMs));
+                return Math.Min(fullDuration, Math.Max(0, fileTimeMs));
             }
 
             if (vlcLength > safetyMs)
@@ -1113,7 +1119,7 @@ namespace XivMediaPlayer
             }
 
             long fallbackCap = fullDuration > 0 ? fullDuration : long.MaxValue;
-            return Math.Min(fallbackCap, Math.Max(0, timeMs));
+            return Math.Min(fallbackCap, Math.Max(0, fileTimeMs));
         }
 
         private void PlayResolvedLiveStream(
@@ -2449,7 +2455,7 @@ namespace XivMediaPlayer
                     else
                     {
                         _pluginLog.Information($"[Social] Adjusting timecode to sync with server. Local Time: {activeStream.Time}ms | Target Time: {targetTimeMs}ms");
-                        activeStream.Time = ClampSeekTimeMs((long)targetTimeMs);
+                        SeekToMs((long)targetTimeMs, syncToServer: false, userInitiated: false);
                     }
                 }
 
@@ -3027,7 +3033,7 @@ namespace XivMediaPlayer
                             // Seek Bar Drag (0.32 - 0.60, matches drawn bar at y 0.90-0.92)
                             if (uv.Y > 0.90f && uv.Y < 0.92f && uv.X >= 0.32f && uv.X <= 0.60f)
                             {
-                                if (activeStream != null)
+                                if (activeStream != null && !BlocksYouTubeUserSeek())
                                 {
                                     float seekProgress = (uv.X - 0.32f) / 0.28f;
                                     long durationMs = GetPlaybackDurationMs();
@@ -3861,8 +3867,38 @@ namespace XivMediaPlayer
         {
             var activeStream = _mediaManager?.ActiveStream;
             if (activeStream == null) return;
+            if (BlocksYouTubeUserSeek()) return;
 
             SeekToMs(activeStream.Time + (seconds * 1000L));
+        }
+
+        /// <summary>
+        /// True when YouTube SABR is still downloading and user seek input should be ignored.
+        /// </summary>
+        public bool BlocksYouTubeUserSeek()
+        {
+            if (_lastStreamIsLive)
+            {
+                return false;
+            }
+
+            var activeStream = _mediaManager?.ActiveStream;
+            string? mediaPath = activeStream?.SoundPath;
+            if (mediaPath == null || !YtDlpManager.IsSabrLocalFile(mediaPath))
+            {
+                return false;
+            }
+
+            if (_ytDlpManager?.IsSabrDownloadActiveForPath(mediaPath) == true)
+            {
+                return true;
+            }
+
+            long metadataLength = _currentMediaDurationMs.HasValue && _currentMediaDurationMs.Value > 0
+                ? (long)_currentMediaDurationMs.Value
+                : 0;
+            long muxedMs = MatroskaMuxFrontier.ProbeDurationMs(mediaPath);
+            return _ytDlpManager?.IsSabrFileFullyBuffered(mediaPath, metadataLength, muxedMs) != true;
         }
 
         /// <summary>
@@ -3893,10 +3929,15 @@ namespace XivMediaPlayer
         /// <summary>
         /// Seeks to the given time, clamped to the buffered portion for in-progress SABR downloads.
         /// </summary>
-        public void SeekToMs(long targetMs, bool syncToServer = true)
+        public void SeekToMs(long targetMs, bool syncToServer = true, bool userInitiated = true)
         {
             var activeStream = _mediaManager?.ActiveStream;
             if (activeStream == null)
+            {
+                return;
+            }
+
+            if (userInitiated && BlocksYouTubeUserSeek())
             {
                 return;
             }
@@ -3933,6 +3974,11 @@ namespace XivMediaPlayer
             seekableProgress = seekableMs > 0
                 ? Math.Clamp(seekableMs / (float)durationMs, 0f, 1f)
                 : 0f;
+
+            if (BlocksYouTubeUserSeek())
+            {
+                seekableProgress = playbackProgress;
+            }
         }
 
         /// <summary>
