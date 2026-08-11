@@ -59,13 +59,13 @@ namespace XivMediaPlayer {
     public int PreferredQuality { get; set; } = 720;
     public bool EnableSabrProxy { get; set; } = true;
 
-    public const int CurrentConfigVersion = 4;
+    public const int CurrentConfigVersion = 5;
 
     /// <summary>UI language index matching <see cref="LanguageEnum"/>.</summary>
     public int UiLanguage { get; set; } = (int)LanguageEnum.English;
 
     /// <summary>RoleplayingQuestCore-compatible translation proxy base URL.</summary>
-    public string TranslationServerUrl { get; set; } = "http://127.0.0.1:5681";
+    public string TranslationServerUrl { get; set; } = "http://ai.hubujubu.com:5681";
 
     // World screen compositing settings (legacy single placement)
     public MediaPlayerCore.Compositing.WorldScreenTransform WorldScreen { get; set; } = new MediaPlayerCore.Compositing.WorldScreenTransform();
@@ -124,7 +124,15 @@ namespace XivMediaPlayer {
 
       if (versioned.Version < 4) {
         if (string.IsNullOrWhiteSpace(TranslationServerUrl)) {
-          TranslationServerUrl = "http://127.0.0.1:5681";
+          TranslationServerUrl = "http://ai.hubujubu.com:5681";
+        }
+      }
+
+      // v5: revert mistaken localhost default from an earlier v4 build
+      if (versioned.Version < 5) {
+        if (string.Equals(TranslationServerUrl, "http://127.0.0.1:5681", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(TranslationServerUrl, "http://localhost:5681", StringComparison.OrdinalIgnoreCase)) {
+          TranslationServerUrl = "http://ai.hubujubu.com:5681";
         }
       }
 

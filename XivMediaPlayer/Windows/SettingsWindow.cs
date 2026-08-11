@@ -101,14 +101,14 @@ namespace XivMediaPlayer.Windows {
 
       DrawTranslationStatus(langIdx);
 
-      string translationServerUrl = _plugin.Config.TranslationServerUrl ?? "http://127.0.0.1:5681";
+      string translationServerUrl = _plugin.Config.TranslationServerUrl ?? "http://ai.hubujubu.com:5681";
       if (ImGui.InputText(Localize("Translation Server URL"), ref translationServerUrl, 256)) {
         _plugin.Config.TranslationServerUrl = translationServerUrl;
         _plugin.Config.Save();
         _plugin.ApplyUiLanguageFromConfig();
       }
       if (ImGui.IsItemHovered()) {
-        ImGui.SetTooltip(Localize("RoleplayingQuestCore-compatible translation proxy. Use http://127.0.0.1:5681 for a local service, or http://ai.hubujubu.com:5681 for the public host. If loopback is blocked, try your LAN IP instead of 127.0.0.1."));
+        ImGui.SetTooltip(Localize("RoleplayingQuestCore-compatible translation proxy. Override only if you run your own service (e.g. http://127.0.0.1:5681 or a LAN IP when loopback is blocked)."));
       }
 
       ImGui.Spacing();

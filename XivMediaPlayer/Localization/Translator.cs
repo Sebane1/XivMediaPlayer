@@ -32,7 +32,7 @@ namespace XivMediaPlayer.Localization
 
         private static LanguageEnum _uiLanguage = LanguageEnum.English;
         private static string _cacheLocation = string.Empty;
-        private static string _serverUrl = "http://127.0.0.1:5681";
+        private static string _serverUrl = "http://ai.hubujubu.com:5681";
 
         public static string ServerUrl
         {
@@ -240,7 +240,7 @@ namespace XivMediaPlayer.Localization
         {
             if (string.IsNullOrWhiteSpace(url))
             {
-                return "http://127.0.0.1:5681";
+                return "http://ai.hubujubu.com:5681";
             }
 
             url = url.Trim().TrimEnd('/');
