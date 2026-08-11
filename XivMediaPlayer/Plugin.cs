@@ -1697,6 +1697,8 @@ namespace XivMediaPlayer
             _controllerService = null;
             _cefBrowserHandle?.Dispose();
             _cefBrowserHandle = null;
+
+            _mediaManager?.StopStream();
             _ytDlpManager?.ReleaseSabrSessions();
 
             bool wasPlaying = _streamWasPlaying;
@@ -3609,7 +3611,6 @@ namespace XivMediaPlayer
         public void Stop()
         {
             _chat.Print("[Media Player] Stopping media and clearing queue...");
-            _ytDlpManager?.ReleaseSabrSessions();
             _mediaManager?.StopStream();
             _mediaQueue.Clear();
             ResetStreamValues(true);

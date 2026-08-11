@@ -64,6 +64,7 @@ namespace MediaPlayerCore.YtDlp
         private int _proxyPort = 0;
 
         private readonly ConcurrentDictionary<string, SabrSession> _sabrSessions = new();
+        private readonly ConcurrentQueue<string> _pendingSabrDirDeletes = new();
         private readonly List<Process> _runningProcesses = new();
         private readonly SemaphoreSlim _bgutilServerGate = new(1, 1);
         private Process? _bgutilServerProcess;
@@ -166,6 +167,46 @@ namespace MediaPlayerCore.YtDlp
                     CleanupSabrSession(session);
                 }
             }
+
+            ProcessPendingSabrDirDeletes();
+            CleanupOrphanedSabrTempDirs();
+        }
+
+        /// <summary>
+        /// Deletes leftover SABR temp folders from prior sessions (e.g. after a crash or failed cleanup).
+        /// Returns approximate bytes freed.
+        /// </summary>
+        public long CleanupOrphanedSabrTempDirs()
+        {
+            long freedBytes = 0;
+            try
+            {
+                var activeDirs = new HashSet<string>(
+                    _sabrSessions.Values.Select(s => s.TempDir),
+                    StringComparer.OrdinalIgnoreCase);
+
+                foreach (string dir in Directory.EnumerateDirectories(Path.GetTempPath(), "xivmp-sabr-*"))
+                {
+                    if (activeDirs.Contains(dir))
+                    {
+                        continue;
+                    }
+
+                    long size = GetDirectorySizeBytes(dir);
+                    if (TryDeleteSabrTempDir(dir))
+                    {
+                        freedBytes += size;
+                    }
+                    else
+                    {
+                        QueueSabrTempDirDelete(dir);
+                    }
+                }
+            }
+            catch { }
+
+            ProcessPendingSabrDirDeletes();
+            return freedBytes;
         }
 
         public event EventHandler<string>? OnStatusUpdate;
@@ -196,6 +237,7 @@ namespace MediaPlayerCore.YtDlp
             _preferredMaxHeight = preferredMaxHeight;
             _cookiesPath = FindCookiesFile();
             StartCookieListener();
+            Task.Run(CleanupOrphanedSabrTempDirs);
         }
 
         private void StartCookieListener()
@@ -313,6 +355,7 @@ namespace MediaPlayerCore.YtDlp
                 CleanupSabrSession(session);
             }
             _sabrSessions.Clear();
+            CleanupOrphanedSabrTempDirs();
 
             try
             {
@@ -1181,7 +1224,7 @@ namespace MediaPlayerCore.YtDlp
             return session;
         }
 
-        private static void CleanupSabrSession(SabrSession session)
+        private void CleanupSabrSession(SabrSession session)
         {
             try
             {
@@ -1199,14 +1242,85 @@ namespace MediaPlayerCore.YtDlp
             }
             catch { }
 
+            if (!TryDeleteSabrTempDir(session.TempDir))
+            {
+                QueueSabrTempDirDelete(session.TempDir);
+            }
+        }
+
+        private void QueueSabrTempDirDelete(string tempDir)
+        {
+            if (!string.IsNullOrEmpty(tempDir))
+            {
+                _pendingSabrDirDeletes.Enqueue(tempDir);
+            }
+        }
+
+        private void ProcessPendingSabrDirDeletes()
+        {
+            int pending = _pendingSabrDirDeletes.Count;
+            for (int i = 0; i < pending; i++)
+            {
+                if (!_pendingSabrDirDeletes.TryDequeue(out string? dir))
+                {
+                    break;
+                }
+
+                if (!TryDeleteSabrTempDir(dir))
+                {
+                    _pendingSabrDirDeletes.Enqueue(dir);
+                }
+            }
+        }
+
+        private static bool TryDeleteSabrTempDir(string? tempDir, int retries = 5)
+        {
+            if (string.IsNullOrEmpty(tempDir) || !Directory.Exists(tempDir))
+            {
+                return true;
+            }
+
+            for (int attempt = 0; attempt < retries; attempt++)
+            {
+                try
+                {
+                    Directory.Delete(tempDir, true);
+                    return true;
+                }
+                catch (IOException) when (attempt < retries - 1)
+                {
+                    Thread.Sleep(150 * (attempt + 1));
+                }
+                catch (UnauthorizedAccessException) when (attempt < retries - 1)
+                {
+                    Thread.Sleep(150 * (attempt + 1));
+                }
+                catch
+                {
+                    break;
+                }
+            }
+
+            return !Directory.Exists(tempDir);
+        }
+
+        private static long GetDirectorySizeBytes(string dir)
+        {
+            long size = 0;
             try
             {
-                if (Directory.Exists(session.TempDir))
+                foreach (string file in Directory.EnumerateFiles(dir, "*", SearchOption.AllDirectories))
                 {
-                    Directory.Delete(session.TempDir, true);
+                    try
+                    {
+                        size += new FileInfo(file).Length;
+                    }
+                    catch { }
                 }
             }
             catch { }
+
+            return size;
         }
 
         private static bool IsDownloadStillRunning(SabrSession session)
