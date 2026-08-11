@@ -23,6 +23,7 @@ namespace MediaPlayerCore {
 
     private MemoryMappedFile _vlcMappedFile;
     private MemoryMappedViewAccessor _vlcMappedViewAccessor;
+    private byte[] _audioCopyBuffer = Array.Empty<byte>();
     private IntPtr _vlcBuffer = IntPtr.Zero;
 
     private IWavePlayer _waveOut;
@@ -598,9 +599,11 @@ namespace MediaPlayerCore {
         private void PlayAudio(IntPtr data, IntPtr samples, uint count, long pts) {
             if (_bufferedWaveProvider != null && _waveFormat != null) {
                 int bytes = (int)count * _waveFormat.BlockAlign;
-                byte[] buffer = new byte[bytes];
-                Marshal.Copy(samples, buffer, 0, bytes);
-                _bufferedWaveProvider.AddSamples(buffer, 0, bytes);
+                if (_audioCopyBuffer.Length < bytes) {
+                    _audioCopyBuffer = new byte[bytes];
+                }
+                Marshal.Copy(samples, _audioCopyBuffer, 0, bytes);
+                _bufferedWaveProvider.AddSamples(_audioCopyBuffer, 0, bytes);
 
                 if (_waveOut != null) {
                     if (_waveOut.PlaybackState != PlaybackState.Playing) {

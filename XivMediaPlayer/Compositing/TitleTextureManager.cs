@@ -16,15 +16,11 @@ namespace XivMediaPlayer.Compositing
         private string _lastTitle = "";
         private string _lastStreamer = "";
         private string _lastLoadingMessage = "";
-        private int _lastLoadingPulseStep = -1;
-        private DateTime _lastLoadingOverlayRebuildUtc = DateTime.MinValue;
         private byte[] _loadingRawBuffer = Array.Empty<byte>();
         private bool _disposed = false;
 
         private const int LoadingOverlayWidth = 960;
         private const int LoadingOverlayHeight = 540;
-        private const int LoadingPulseSteps = 8;
-        private const double MinLoadingOverlayRebuildMs = 250;
 
         public unsafe IntPtr TextureHandle
         {
@@ -45,7 +41,6 @@ namespace XivMediaPlayer.Compositing
         {
             if (_disposed) return;
             _lastLoadingMessage = "";
-            _lastLoadingPulseStep = -1;
             if (title == _lastTitle && streamer == _lastStreamer) return;
 
             _lastTitle = title ?? "";
@@ -124,29 +119,19 @@ namespace XivMediaPlayer.Compositing
 
         /// <summary>
         /// Renders a centered loading overlay for the world-space TV.
+        /// Rebuilds only when the status message changes — no per-frame GPU textures.
         /// </summary>
         public void UpdateLoadingOverlay(string message, float pulse)
         {
             if (_disposed) return;
 
             message = string.IsNullOrWhiteSpace(message) ? "Loading video..." : message;
-            int pulseStep = (int)(pulse * LoadingPulseSteps);
-            bool messageChanged = message != _lastLoadingMessage;
-            if (!messageChanged && pulseStep == _lastLoadingPulseStep)
-            {
-                return;
-            }
-
-            // Pulse animates every frame throttle GPU texture rebuilds to avoid OOM.
-            if (!messageChanged
-                && (DateTime.UtcNow - _lastLoadingOverlayRebuildUtc).TotalMilliseconds < MinLoadingOverlayRebuildMs)
+            if (message == _lastLoadingMessage && _textureWrap != null)
             {
                 return;
             }
 
             _lastLoadingMessage = message;
-            _lastLoadingPulseStep = pulseStep;
-            _lastLoadingOverlayRebuildUtc = DateTime.UtcNow;
             _lastTitle = "";
             _lastStreamer = "";
 
@@ -204,7 +189,7 @@ namespace XivMediaPlayer.Compositing
 
             float segmentW = barW * 0.34f;
             float travel = barW - segmentW;
-            float segX = barX + travel * pulse;
+            float segX = barX + travel * 0.5f;
             using (var fillBrush = new SolidBrush(Color.FromArgb(255, 79, 195, 247)))
             {
                 gfx.FillRectangle(fillBrush, segX, barY, segmentW, barH);

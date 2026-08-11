@@ -178,8 +178,9 @@ namespace MediaPlayerCore {
               // Ensure we only ever have ONE active video stream decoding to the LastFrame buffer.
               foreach (var kvp in _playbackStreams.ToList()) {
                   if (kvp.Key != playerObject.Name) {
-                      kvp.Value.Stop();
+                      var oldStream = kvp.Value;
                       _playbackStreams.TryRemove(kvp.Key, out _);
+                      try { oldStream.Dispose(); } catch { }
                   }
               }
 

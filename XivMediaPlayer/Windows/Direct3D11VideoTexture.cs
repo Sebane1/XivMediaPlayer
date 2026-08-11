@@ -80,11 +80,11 @@ namespace XivMediaPlayer.Windows {
             
             _srv?.Dispose();
             _texture?.Dispose();
-            _context?.Dispose();
-            
-            _device?.Dispose();
+            if (_context != null) {
+                _context.Dispose();
+                _context = null;
+            }
             _device = null;
-            _context = null;
             _srv = null;
             _texture = null;
         }

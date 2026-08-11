@@ -1700,6 +1700,7 @@ namespace XivMediaPlayer
 
             _mediaManager?.StopStream();
             _ytDlpManager?.ReleaseSabrSessions();
+            MediaPlayerCore.StreamProxy.Instance.ClearSessions();
 
             bool wasPlaying = _streamWasPlaying;
             _streamWasPlaying = false;

@@ -2,6 +2,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Text;
@@ -53,6 +54,7 @@ namespace MediaPlayerCore
         public string RegisterStream(string m3u8Url, Dictionary<string, string> headers, string preFetchedM3u8Content = null)
         {
             Start();
+            ClearSessions();
             string sessionId = Guid.NewGuid().ToString("N");
             
             var handler = new HttpClientHandler();
@@ -100,6 +102,8 @@ namespace MediaPlayerCore
         public string RegisterDirectMediaSession(string mediaUrl, Dictionary<string, string>? headers = null)
         {
             if (string.IsNullOrEmpty(mediaUrl)) return string.Empty;
+            Start();
+            ClearSessions();
             string sessionId = Guid.NewGuid().ToString("N");
             
             var handler = new HttpClientHandler { UseCookies = true, AutomaticDecompression = DecompressionMethods.All };
@@ -330,12 +334,30 @@ namespace MediaPlayerCore
             }
         }
 
+        /// <summary>
+        /// Releases all proxy sessions and their HttpClients.
+        /// </summary>
+        public void ClearSessions()
+        {
+            foreach (string sessionId in _sessions.Keys.ToArray())
+            {
+                RemoveSession(sessionId);
+            }
+        }
+
+        private void RemoveSession(string sessionId)
+        {
+            if (_sessions.TryRemove(sessionId, out var session))
+            {
+                try { session.Client?.Dispose(); } catch { }
+            }
+        }
+
         public void Dispose()
         {
             _cts?.Cancel();
             try { _listener?.Stop(); _listener?.Close(); } catch { }
-            foreach (var session in _sessions.Values) { try { session.Client?.Dispose(); } catch { } }
-            _sessions.Clear();
+            ClearSessions();
         }
     }
 }
