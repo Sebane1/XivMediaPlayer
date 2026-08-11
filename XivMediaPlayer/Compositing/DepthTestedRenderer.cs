@@ -88,6 +88,10 @@ namespace XivMediaPlayer.Compositing {
       public float UVBottomEdge;
       public float UVRightEdge;
       public float EnableTvGlow;
+      public float BufferProgress;
+      public float _cbufferPad0;
+      public float _cbufferPad1;
+      public float _cbufferPad2;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -152,6 +156,10 @@ cbuffer Constants : register(b0) {
   float UVBottomEdge;
   float UVRightEdge;
   float EnableTvGlow;
+  float BufferProgress;
+  float _cbufferPad0;
+  float _cbufferPad1;
+  float _cbufferPad2;
 };
   
   cbuffer UIConsts : register(b1) {
@@ -954,6 +962,7 @@ float4 PS(VS_OUT input) : SV_TARGET {
       if (uv.y > 0.90 && uv.y < 0.92 && uv.x > 0.32 && uv.x < 0.60) {
          float barProgress = (uv.x - 0.32) / 0.28;
          if (barProgress < Progress) color.rgb = float3(0.8, 0.2, 0.2);
+         else if (barProgress < BufferProgress) color.rgb = float3(0.55, 0.42, 0.18);
          else color.rgb = float3(0.3, 0.3, 0.3);
       }
       if (uv.y > 0.95 && uv.y < 0.97 && uv.x > 0.32 && uv.x < 0.60) {
@@ -1252,9 +1261,10 @@ float4 PS(VS_OUT input) : SV_TARGET {
         var psBytecode = Compiler.Compile(ShaderCode, "PS", "", "ps_5_0");
         _pixelShader = _device.CreatePixelShader(psBytecode.Span);
 
-        // Constant buffers
+        // Constant buffers (D3D11 requires constant buffer size be a multiple of 16 bytes)
+        int constantBufferSize = (Marshal.SizeOf<PSConstants>() + 15) & ~15;
         _constantBuffer = _device.CreateBuffer(new BufferDescription {
-          ByteWidth = Marshal.SizeOf<PSConstants>(),
+          ByteWidth = constantBufferSize,
           Usage = ResourceUsage.Default,
           BindFlags = BindFlags.ConstantBuffer,
           CPUAccessFlags = CpuAccessFlags.None,
@@ -1335,7 +1345,7 @@ float4 PS(VS_OUT input) : SV_TARGET {
       float nearPlane, float farPlane,
       int screenWidth, int screenHeight,
       ID3D11ShaderResourceView uiLayerSrv,
-      Vector2? hoverUV, float progress, float playbackState, float lockState,
+      Vector2? hoverUV, float progress, float bufferProgress, float playbackState, float lockState,
       float minDepth, float maxDepth, float volume,
       float renderWidth, float renderHeight,
       List<(int X, int Y, int W, int H, string Name)> uiRects, IntPtr titleSrvPtr = default,
@@ -1378,6 +1388,7 @@ float4 PS(VS_OUT input) : SV_TARGET {
           VideoAspectRatio = videoAspectRatio,
 
           Progress = progress,
+          BufferProgress = bufferProgress,
           PlaybackState = playbackState,
           DynamicMinDepth = minDepth,
           DynamicMaxDepth = maxDepth,

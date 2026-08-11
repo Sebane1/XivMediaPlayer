@@ -51,6 +51,9 @@ namespace MediaPlayerCore.YtDlp
         [JsonProperty("ext")]
         public string? Extension { get; set; }
 
+        /// <summary>Approximate merged file size in bytes (from filesize_approx).</summary>
+        public long? FilesizeApprox { get; set; }
+
         /// <summary>True for active or upcoming broadcasts; false for VOD and finished live replays.</summary>
         public bool IsLiveBroadcast =>
             IsLive == true
@@ -79,6 +82,7 @@ namespace MediaPlayerCore.YtDlp
         private int _proxyPort = 0;
 
         private readonly ConcurrentDictionary<string, SabrSession> _sabrSessions = new();
+        private readonly ConcurrentDictionary<string, long> _expectedFilesizeByUrl = new(StringComparer.OrdinalIgnoreCase);
         private readonly ConcurrentQueue<string> _pendingSabrDirDeletes = new();
         private readonly ConcurrentDictionary<string, (bool? IsLive, DateTime ExpiresUtc)> _youTubeLiveProbeCache = new();
         private readonly List<Process> _runningProcesses = new();
@@ -100,6 +104,8 @@ namespace MediaPlayerCore.YtDlp
             public Process? Process { get; set; }
             public volatile bool Failed;
             public volatile bool DownloadFinished;
+            public volatile float DownloadPercent = -1f;
+            public long EstimatedFinalBytes;
             public string? Error { get; set; }
             public int StreamConsumers;
             public DateTime LastAccessUtc { get; set; } = DateTime.UtcNow;
@@ -154,6 +160,104 @@ namespace MediaPlayerCore.YtDlp
             return false;
         }
 
+        /// <summary>
+        /// Registers expected merged file size from yt-dlp metadata (filesize_approx).
+        /// </summary>
+        public void RegisterExpectedFilesize(string url, long bytes)
+        {
+            if (string.IsNullOrWhiteSpace(url) || bytes <= 0)
+            {
+                return;
+            }
+
+            _expectedFilesizeByUrl[url] = bytes;
+            foreach (SabrSession session in _sabrSessions.Values)
+            {
+                if (string.Equals(session.Url, url, StringComparison.OrdinalIgnoreCase)
+                    && session.EstimatedFinalBytes <= 0)
+                {
+                    session.EstimatedFinalBytes = bytes;
+                }
+            }
+        }
+
+        private SabrSession? FindSabrSessionForPath(string mediaPath)
+        {
+            foreach (SabrSession session in _sabrSessions.Values)
+            {
+                string? output = FindSabrOutputFile(session);
+                if (output != null
+                    && string.Equals(output, mediaPath, StringComparison.OrdinalIgnoreCase))
+                {
+                    return session;
+                }
+            }
+
+            return null;
+        }
+
+        /// <summary>
+        /// True when the local SABR file is complete enough to seek anywhere (not just when yt-dlp exits).
+        /// </summary>
+        public bool IsSabrFileFullyBuffered(string? mediaPath, long fullDurationMs, long muxedDurationMs)
+        {
+            if (string.IsNullOrEmpty(mediaPath) || !IsSabrLocalFile(mediaPath))
+            {
+                return true;
+            }
+
+            SabrSession? session = FindSabrSessionForPath(mediaPath);
+            if (session != null && IsDownloadStillRunning(session))
+            {
+                return false;
+            }
+
+            long fileBytes = TryGetFileLength(mediaPath);
+            const long durationMarginMs = 5000;
+            const double bytesCompleteRatio = 0.99;
+
+            if (session != null)
+            {
+                if (session.Failed && fileBytes < 262144)
+                {
+                    return false;
+                }
+
+                long expectedBytes = session.EstimatedFinalBytes;
+                if (expectedBytes > 0 && fileBytes < (long)(expectedBytes * bytesCompleteRatio))
+                {
+                    return false;
+                }
+
+                if (session.DownloadPercent >= 0f && session.DownloadPercent < 0.98f)
+                {
+                    return false;
+                }
+            }
+
+            if (fullDurationMs > durationMarginMs && muxedDurationMs > 0)
+            {
+                return muxedDurationMs >= fullDurationMs - durationMarginMs;
+            }
+
+            // Mux probe unavailable on a finished download — fall back to byte/percent signals.
+            if (session != null && session.DownloadFinished && !session.Failed)
+            {
+                if (session.DownloadPercent >= 0.99f)
+                {
+                    return true;
+                }
+
+                long expectedBytes = session.EstimatedFinalBytes;
+                if (expectedBytes > 0 && fileBytes >= (long)(expectedBytes * bytesCompleteRatio))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
         public bool IsSabrDownloadActiveForPath(string? mediaPath)
         {
             if (string.IsNullOrEmpty(mediaPath) || !IsSabrLocalFile(mediaPath))
@@ -161,17 +265,8 @@ namespace MediaPlayerCore.YtDlp
                 return false;
             }
 
-            foreach (SabrSession session in _sabrSessions.Values)
-            {
-                string? output = FindSabrOutputFile(session);
-                if (output != null
-                    && string.Equals(output, mediaPath, StringComparison.OrdinalIgnoreCase))
-                {
-                    return IsDownloadStillRunning(session);
-                }
-            }
-
-            return false;
+            SabrSession? session = FindSabrSessionForPath(mediaPath);
+            return session != null && IsDownloadStillRunning(session);
         }
 
         /// <summary>
@@ -572,7 +667,7 @@ namespace MediaPlayerCore.YtDlp
             try
             {
                 string result = await RunYtDlp(
-                    $"--no-download --no-playlist --print title --print duration --print uploader \"{url}\"");
+                    $"--no-download --no-playlist --print title --print duration --print uploader --print filesize_approx \"{url}\"");
                 if (string.IsNullOrWhiteSpace(result)) return null;
 
                 var lines = result.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
@@ -585,11 +680,21 @@ namespace MediaPlayerCore.YtDlp
                     duration = dur;
                 }
 
+                long? filesize = null;
+                if (lines.Length > 3
+                    && long.TryParse(lines[3].Trim(), System.Globalization.NumberStyles.Integer,
+                        System.Globalization.CultureInfo.InvariantCulture, out long fs)
+                    && fs > 0)
+                {
+                    filesize = fs;
+                }
+
                 return new YtDlpMetadata
                 {
                     Title = lines[0].Trim(),
                     Duration = duration,
                     Uploader = lines.Length > 2 ? lines[2].Trim() : null,
+                    FilesizeApprox = filesize,
                 };
             }
             catch (Exception e)
@@ -1474,6 +1579,97 @@ namespace MediaPlayerCore.YtDlp
                 && text.Contains("stream.temp.mkv", StringComparison.OrdinalIgnoreCase);
         }
 
+        private static void TryParseDownloadPercent(string line, SabrSession session)
+        {
+            if (!line.Contains("[download]", StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+
+            int pctIdx = line.IndexOf('%');
+            if (pctIdx > 0)
+            {
+                int start = pctIdx - 1;
+                while (start >= 0 && (char.IsDigit(line[start]) || line[start] == '.'))
+                {
+                    start--;
+                }
+
+                if (start < pctIdx - 1)
+                {
+                    ReadOnlySpan<char> numSpan = line.AsSpan(start + 1, pctIdx - start - 1).Trim();
+                    if (float.TryParse(numSpan, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float pct))
+                    {
+                        session.DownloadPercent = Math.Clamp(pct / 100f, 0f, 1f);
+                    }
+                }
+            }
+
+            int ofIdx = line.IndexOf(" of ", StringComparison.OrdinalIgnoreCase);
+            if (ofIdx < 0)
+            {
+                return;
+            }
+
+            ReadOnlySpan<char> sizeSpan = line.AsSpan(ofIdx + 4).TrimStart();
+            if (sizeSpan.StartsWith("~"))
+            {
+                sizeSpan = sizeSpan.Slice(1).TrimStart();
+            }
+
+            int end = 0;
+            while (end < sizeSpan.Length && !char.IsWhiteSpace(sizeSpan[end]))
+            {
+                end++;
+            }
+
+            if (end > 0 && TryParseByteSize(sizeSpan.Slice(0, end), out long totalBytes))
+            {
+                session.EstimatedFinalBytes = Math.Max(session.EstimatedFinalBytes, totalBytes);
+            }
+        }
+
+        private static bool TryParseByteSize(ReadOnlySpan<char> token, out long bytes)
+        {
+            bytes = 0;
+            if (token.IsEmpty)
+            {
+                return false;
+            }
+
+            int unitStart = token.Length - 1;
+            while (unitStart >= 0 && char.IsLetter(token[unitStart]))
+            {
+                unitStart--;
+            }
+
+            if (unitStart >= token.Length - 1)
+            {
+                return false;
+            }
+
+            ReadOnlySpan<char> numberPart = token.Slice(0, unitStart + 1);
+            ReadOnlySpan<char> unitPart = token.Slice(unitStart + 1);
+
+            if (!double.TryParse(numberPart, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double value))
+            {
+                return false;
+            }
+
+            double multiplier = 1d;
+            if (unitPart.Equals("KiB".AsSpan(), StringComparison.OrdinalIgnoreCase)) multiplier = 1024d;
+            else if (unitPart.Equals("MiB".AsSpan(), StringComparison.OrdinalIgnoreCase)) multiplier = 1024d * 1024d;
+            else if (unitPart.Equals("GiB".AsSpan(), StringComparison.OrdinalIgnoreCase)) multiplier = 1024d * 1024d * 1024d;
+            else if (unitPart.Equals("KB".AsSpan(), StringComparison.OrdinalIgnoreCase)) multiplier = 1000d;
+            else if (unitPart.Equals("MB".AsSpan(), StringComparison.OrdinalIgnoreCase)) multiplier = 1000d * 1000d;
+            else if (unitPart.Equals("GB".AsSpan(), StringComparison.OrdinalIgnoreCase)) multiplier = 1000d * 1000d * 1000d;
+            else if (unitPart.Equals("B".AsSpan(), StringComparison.OrdinalIgnoreCase)) multiplier = 1d;
+            else return false;
+
+            bytes = (long)(value * multiplier);
+            return bytes > 0;
+        }
+
         private static string? FindSabrOutputFile(SabrSession session)
         {
             string merged = GetSabrMergedOutputPath(session);
@@ -1519,6 +1715,11 @@ namespace MediaPlayerCore.YtDlp
                 TempPath = Path.Combine(tempDir, "stream.mkv"),
             };
 
+            if (_expectedFilesizeByUrl.TryGetValue(url, out long expectedBytes) && expectedBytes > 0)
+            {
+                session.EstimatedFinalBytes = expectedBytes;
+            }
+
             string ffmpegPath = Path.Combine(PluginDir, "ffmpeg.exe");
             if (!File.Exists(ffmpegPath))
             {
@@ -1557,6 +1758,7 @@ namespace MediaPlayerCore.YtDlp
                 if (e.Data == null) return;
                 stderr.AppendLine(e.Data);
                 if (IsBenignSabrFinalizeError(e.Data)) return;
+                TryParseDownloadPercent(e.Data, session);
                 if (e.Data.Contains("ERROR:", StringComparison.OrdinalIgnoreCase)
                     || e.Data.Contains("Requested format is not available", StringComparison.OrdinalIgnoreCase))
                 {
@@ -1574,6 +1776,16 @@ namespace MediaPlayerCore.YtDlp
                 {
                     process.WaitForExit();
                     session.DownloadFinished = true;
+                    long finalBytes = GetSabrOutputLength(session);
+                    if (finalBytes > 0)
+                    {
+                        session.EstimatedFinalBytes = Math.Max(session.EstimatedFinalBytes, finalBytes);
+                    }
+
+                    if (session.DownloadPercent < 0f && finalBytes > 0)
+                    {
+                        session.DownloadPercent = 1f;
+                    }
                     if (process.HasExited && process.ExitCode != 0)
                     {
                         string err = stderr.ToString();

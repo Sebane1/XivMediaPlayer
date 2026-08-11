@@ -1041,6 +1041,81 @@ namespace XivMediaPlayer
         private bool _liveProxyFallbackPending = false;
         private bool _lastStreamIsLive = false;
 
+        private string? _sabrSeekCachePath;
+        private long _sabrSeekCacheTick;
+        private long _sabrSeekCacheDurationMs;
+        private long _sabrSeekCacheMaxSeekMs;
+        private const long SabrSeekCacheTtlMs = 500;
+
+        private void InvalidateSabrSeekCache()
+        {
+            _sabrSeekCachePath = null;
+            _sabrSeekCacheTick = 0;
+        }
+
+        private void EnsureSabrSeekCache(string mediaPath, long metadataLength, long vlcLength, long timeMs)
+        {
+            long now = Environment.TickCount64;
+            if (_sabrSeekCachePath != null
+                && string.Equals(_sabrSeekCachePath, mediaPath, StringComparison.OrdinalIgnoreCase)
+                && now - _sabrSeekCacheTick < SabrSeekCacheTtlMs)
+            {
+                return;
+            }
+
+            long muxedMs = MatroskaMuxFrontier.ProbeDurationMs(mediaPath);
+            bool fullyBuffered = _ytDlpManager?.IsSabrFileFullyBuffered(mediaPath, metadataLength, muxedMs) == true;
+
+            long durationMs;
+            if (!fullyBuffered && metadataLength > 0)
+            {
+                durationMs = metadataLength;
+            }
+            else
+            {
+                durationMs = Math.Max(vlcLength, metadataLength);
+                if (durationMs > metadataLength && metadataLength > 0)
+                {
+                    _currentMediaDurationMs = durationMs;
+                }
+            }
+
+            _sabrSeekCachePath = mediaPath;
+            _sabrSeekCacheTick = now;
+            _sabrSeekCacheDurationMs = durationMs;
+            _sabrSeekCacheMaxSeekMs = ComputeSabrMaxSeekMs(durationMs, muxedMs, fullyBuffered, vlcLength, timeMs);
+        }
+
+        private static long ComputeSabrMaxSeekMs(long fullDuration, long muxedMs, bool fullyBuffered, long vlcLength, long timeMs)
+        {
+            const long safetyMs = 3000;
+
+            if (fullyBuffered)
+            {
+                return fullDuration > 0 ? fullDuration : Math.Max(0, vlcLength);
+            }
+
+            if (muxedMs > safetyMs)
+            {
+                long cap = fullDuration > 0 ? fullDuration : muxedMs;
+                return Math.Min(cap, muxedMs - safetyMs);
+            }
+
+            if (fullDuration > 0 && vlcLength >= fullDuration - 2000)
+            {
+                return Math.Min(fullDuration, Math.Max(0, timeMs));
+            }
+
+            if (vlcLength > safetyMs)
+            {
+                long cap = fullDuration > 0 ? fullDuration : vlcLength;
+                return Math.Min(cap, vlcLength - safetyMs);
+            }
+
+            long fallbackCap = fullDuration > 0 ? fullDuration : long.MaxValue;
+            return Math.Min(fallbackCap, Math.Max(0, timeMs));
+        }
+
         private void PlayResolvedLiveStream(
             IMediaGameObject audioGameObject,
             string resolvedStreamUrl,
@@ -1464,7 +1539,10 @@ namespace XivMediaPlayer
                         }
                         else if (youTubeLiveProbe == false && _config.EnableSabrProxy)
                         {
-                            EnqueueFrameworkAction(() => _mediaLoadingMessage = "Buffering video...");
+                            string loadingMsg = startTimeMs > 0
+                                ? "Buffering to resume position..."
+                                : "Buffering video...";
+                            EnqueueFrameworkAction(() => _mediaLoadingMessage = loadingMsg);
                         }
                     }
 
@@ -1484,6 +1562,10 @@ namespace XivMediaPlayer
                         {
                             metadata = await _ytDlpManager.GetLightMetadata(url);
                             if (resolutionId != _currentResolutionId) return;
+                            if (metadata?.FilesizeApprox > 0)
+                            {
+                                _ytDlpManager.RegisterExpectedFilesize(url, metadata.FilesizeApprox.Value);
+                            }
                         }
                         catch (Exception metadataEx)
                         {
@@ -1498,14 +1580,7 @@ namespace XivMediaPlayer
                         }
                         catch (Exception resolveEx)
                         {
-                            _pluginLog.Warning(resolveEx, "[yt-dlp] Failed to resolve stream URL.");
-                            string errorStr = resolveEx.ToString();
-
-                            if (errorStr.Contains("Sign in to confirm", StringComparison.OrdinalIgnoreCase))
-                            {
-                                EnqueueFrameworkAction(() => _chat.PrintError("[Media Player] YouTube blocked the request (bot check). Please configure cookies via VRCVideoCacher or cookies.txt to play YouTube videos!"));
-                                return;
-                            }
+                            if (HandleYtDlpResolveFailure(resolveEx, url)) return;
                         }
                     }
                     else
@@ -1520,29 +1595,7 @@ namespace XivMediaPlayer
                         }
                         catch (Exception resolveEx)
                         {
-                            _pluginLog.Warning(resolveEx, "[yt-dlp] Failed to resolve stream URL.");
-                            string errorStr = resolveEx.ToString();
-                        
-                            if (errorStr.Contains("Sign in to confirm", StringComparison.OrdinalIgnoreCase))
-                            {
-                                EnqueueFrameworkAction(() => _chat.PrintError("[Media Player] YouTube blocked the request (bot check). Please configure cookies via VRCVideoCacher or cookies.txt to play YouTube videos!"));
-                                return;
-                            }
-
-                            if ((url.Contains("youtube.com") || url.Contains("youtu.be"))
-                                && !_config.EnableSabrProxy
-                                && (errorStr.Contains("Requested format is not available", StringComparison.OrdinalIgnoreCase)
-                                    || errorStr.Contains("Only images are available", StringComparison.OrdinalIgnoreCase)
-                                    || errorStr.Contains("SABR", StringComparison.OrdinalIgnoreCase)))
-                            {
-                                EnqueueFrameworkAction(() => _chat.PrintError("[Media Player] YouTube playback failed. Check cookies in settings (VRCVideoCacher), or re-enable \"YouTube SABR mode\" if you turned it off."));
-                                return;
-                            }
-                        
-                            if (errorStr.Contains("Unsupported URL", StringComparison.OrdinalIgnoreCase) || errorStr.Contains("HTTP Error 403", StringComparison.OrdinalIgnoreCase))
-                            {
-                                MediaPlayerCore.YtDlp.YtDlpManager.MarkUrlAsFailed(url);
-                            }
+                            if (HandleYtDlpResolveFailure(resolveEx, url)) return;
                         }
 
                         try
@@ -1552,28 +1605,7 @@ namespace XivMediaPlayer
                         catch (Exception metadataEx)
                         {
                             _pluginLog.Warning(metadataEx, "[yt-dlp] Failed to get metadata.");
-                            string errorStr = metadataEx.ToString();
-                        
-                            if (errorStr.Contains("Sign in to confirm", StringComparison.OrdinalIgnoreCase))
-                            {
-                                EnqueueFrameworkAction(() => _chat.PrintError("[Media Player] YouTube blocked the request (bot check). Please configure cookies via VRCVideoCacher or cookies.txt to play YouTube videos!"));
-                                return;
-                            }
-
-                            if ((url.Contains("youtube.com") || url.Contains("youtu.be"))
-                                && !_config.EnableSabrProxy
-                                && (errorStr.Contains("Requested format is not available", StringComparison.OrdinalIgnoreCase)
-                                    || errorStr.Contains("Only images are available", StringComparison.OrdinalIgnoreCase)
-                                    || errorStr.Contains("SABR", StringComparison.OrdinalIgnoreCase)))
-                            {
-                                EnqueueFrameworkAction(() => _chat.PrintError("[Media Player] YouTube playback failed. Check cookies in settings (VRCVideoCacher), or re-enable \"YouTube SABR mode\" if you turned it off."));
-                                return;
-                            }
-                        
-                            if (errorStr.Contains("Unsupported URL", StringComparison.OrdinalIgnoreCase) || errorStr.Contains("HTTP Error 403", StringComparison.OrdinalIgnoreCase))
-                            {
-                                MediaPlayerCore.YtDlp.YtDlpManager.MarkUrlAsFailed(url);
-                            }
+                            if (HandleYtDlpMetadataFailure(metadataEx, url)) return;
                         }
                     }
 
@@ -1663,7 +1695,7 @@ namespace XivMediaPlayer
                         || (isTwitchLive && metadata?.IsLiveBroadcast != false)
                         || (!isYouTube && !isTwitchLive && metadata != null && metadata.Duration == null);
                     var resolvedStreamUrl = streamUrls[0];
-                    if (isYouTube && YtDlpManager.IsHlsStreamUrl(resolvedStreamUrl))
+                    if (isYouTube && youTubeLiveProbe != false && YtDlpManager.IsHlsStreamUrl(resolvedStreamUrl))
                     {
                         isLive = true;
                     }
@@ -1858,6 +1890,7 @@ namespace XivMediaPlayer
             _potentialStream = "";
             _lastStreamURL = "";
             _currentMediaDurationMs = null;
+            InvalidateSabrSeekCache();
             _currentStreamer = "";
             _currentMediaTitle = "";
             _mediaLoadingMessage = "";
@@ -2845,6 +2878,7 @@ namespace XivMediaPlayer
 
                     System.Numerics.Vector2? hoverUV = null;
                     float progress = 0f;
+                    float bufferProgress = 1f;
                     bool isPlaying = false;
                     float playbackState = 0.0f; // 0 = Stop, 1 = Play, 2 = Paused
 
@@ -2853,7 +2887,9 @@ namespace XivMediaPlayer
                     {
                         long durationMs = GetPlaybackDurationMs();
                         if (durationMs > 0)
-                            progress = Math.Clamp(activeStream.Time / (float)durationMs, 0f, 1f);
+                        {
+                            GetSeekBarProgress(out progress, out bufferProgress);
+                        }
 
                         isPlaying = activeStream.PlaybackState == NAudio.Wave.PlaybackState.Playing;
                         if (isPlaying) playbackState = 1.0f;
@@ -2988,8 +3024,8 @@ namespace XivMediaPlayer
                                 }
                             }
                             
-                            // Seek Bar Drag (0.32 - 0.60)
-                            if (uv.Y > 0.88f && uv.Y < 0.95f && uv.X >= 0.32f && uv.X <= 0.60f)
+                            // Seek Bar Drag (0.32 - 0.60, matches drawn bar at y 0.90-0.92)
+                            if (uv.Y > 0.90f && uv.Y < 0.92f && uv.X >= 0.32f && uv.X <= 0.60f)
                             {
                                 if (activeStream != null)
                                 {
@@ -3297,7 +3333,7 @@ namespace XivMediaPlayer
                     
                     _worldRenderer.Render(videoSrv, videoWidth, videoHeight, videoTrueWidth, videoTrueHeight, _depthCapture, 
                         _prevCameraPos ?? cameraPos, _prevCameraForward ?? cameraForward, _prevCameraRight ?? cameraRight, _prevCameraUp ?? cameraUp, 
-                        fovY, aspectRatio, _uiCapture, nearPlane, farPlane, hoverUV, progress, playbackState, lockState, volume, srvPtr, _config.LoopEnabled, _config.ShuffleEnabled, timeSeconds, showScreensaver, useDifferenceFallback: useDifferenceFallback, 
+                        fovY, aspectRatio, _uiCapture, nearPlane, farPlane, hoverUV, progress, bufferProgress, playbackState, lockState, volume, srvPtr, _config.LoopEnabled, _config.ShuffleEnabled, timeSeconds, showScreensaver, useDifferenceFallback: useDifferenceFallback, 
                         viewProjMatrix: _prevViewProjMatrix ?? viewProjMatrix, viewportPos: mainViewport.Pos, viewportSize: mainViewport.Size, uiBlendThreshold: _config.UIBlendThreshold);
                         
                     _prevCameraPos = cameraPos;
@@ -3759,6 +3795,65 @@ namespace XivMediaPlayer
         }
         #region Playback Controls
 
+        private bool HandleYtDlpResolveFailure(Exception resolveEx, string url)
+        {
+            _pluginLog.Warning(resolveEx, "[yt-dlp] Failed to resolve stream URL.");
+            string errorStr = resolveEx.ToString();
+
+            if (errorStr.Contains("Sign in to confirm", StringComparison.OrdinalIgnoreCase))
+            {
+                EnqueueFrameworkAction(() => _chat.PrintError("[Media Player] YouTube blocked the request (bot check). Please configure cookies via VRCVideoCacher or cookies.txt to play YouTube videos!"));
+                return true;
+            }
+
+            if ((url.Contains("youtube.com") || url.Contains("youtu.be"))
+                && !_config.EnableSabrProxy
+                && (errorStr.Contains("Requested format is not available", StringComparison.OrdinalIgnoreCase)
+                    || errorStr.Contains("Only images are available", StringComparison.OrdinalIgnoreCase)
+                    || errorStr.Contains("SABR", StringComparison.OrdinalIgnoreCase)))
+            {
+                EnqueueFrameworkAction(() => _chat.PrintError("[Media Player] YouTube playback failed. Check cookies in settings (VRCVideoCacher), or re-enable \"YouTube SABR mode\" if you turned it off."));
+                return true;
+            }
+
+            if (errorStr.Contains("Unsupported URL", StringComparison.OrdinalIgnoreCase)
+                || errorStr.Contains("HTTP Error 403", StringComparison.OrdinalIgnoreCase))
+            {
+                YtDlpManager.MarkUrlAsFailed(url);
+            }
+
+            return false;
+        }
+
+        private bool HandleYtDlpMetadataFailure(Exception metadataEx, string url)
+        {
+            string errorStr = metadataEx.ToString();
+
+            if (errorStr.Contains("Sign in to confirm", StringComparison.OrdinalIgnoreCase))
+            {
+                EnqueueFrameworkAction(() => _chat.PrintError("[Media Player] YouTube blocked the request (bot check). Please configure cookies via VRCVideoCacher or cookies.txt to play YouTube videos!"));
+                return true;
+            }
+
+            if ((url.Contains("youtube.com") || url.Contains("youtu.be"))
+                && !_config.EnableSabrProxy
+                && (errorStr.Contains("Requested format is not available", StringComparison.OrdinalIgnoreCase)
+                    || errorStr.Contains("Only images are available", StringComparison.OrdinalIgnoreCase)
+                    || errorStr.Contains("SABR", StringComparison.OrdinalIgnoreCase)))
+            {
+                EnqueueFrameworkAction(() => _chat.PrintError("[Media Player] YouTube playback failed. Check cookies in settings (VRCVideoCacher), or re-enable \"YouTube SABR mode\" if you turned it off."));
+                return true;
+            }
+
+            if (errorStr.Contains("Unsupported URL", StringComparison.OrdinalIgnoreCase)
+                || errorStr.Contains("HTTP Error 403", StringComparison.OrdinalIgnoreCase))
+            {
+                YtDlpManager.MarkUrlAsFailed(url);
+            }
+
+            return false;
+        }
+
         /// <summary>
         /// Seeks the current stream forward or backward by the given number of seconds.
         /// </summary>
@@ -3816,6 +3911,31 @@ namespace XivMediaPlayer
         }
 
         /// <summary>
+        /// Normalized seek bar positions (0-1). Seekable matches GetMaxSeekTimeMs / duration.
+        /// </summary>
+        public void GetSeekBarProgress(out float playbackProgress, out float seekableProgress)
+        {
+            playbackProgress = 0f;
+            seekableProgress = 1f;
+
+            long durationMs = GetPlaybackDurationMs();
+            if (durationMs <= 0)
+            {
+                seekableProgress = 1f;
+                return;
+            }
+
+            var activeStream = _mediaManager?.ActiveStream;
+            long timeMs = activeStream?.Time ?? 0;
+            long seekableMs = GetMaxSeekTimeMs();
+
+            playbackProgress = Math.Clamp(timeMs / (float)durationMs, 0f, 1f);
+            seekableProgress = seekableMs > 0
+                ? Math.Clamp(seekableMs / (float)durationMs, 0f, 1f)
+                : 0f;
+        }
+
+        /// <summary>
         /// Latest time the user can seek to. During SABR download this stays behind the mux frontier.
         /// </summary>
         public long GetMaxSeekTimeMs()
@@ -3831,25 +3951,29 @@ namespace XivMediaPlayer
                 return 0;
             }
 
-            long fullDuration = GetPlaybackDurationMs();
             string? mediaPath = activeStream.SoundPath;
-            bool sabrStillDownloading = mediaPath != null
-                && YtDlpManager.IsSabrLocalFile(mediaPath)
-                && _ytDlpManager?.IsSabrDownloadActiveForPath(mediaPath) == true;
+            bool isSabrLocal = mediaPath != null && YtDlpManager.IsSabrLocalFile(mediaPath);
 
-            if (!sabrStillDownloading)
+            if (!isSabrLocal)
             {
-                return fullDuration;
+                long fullDuration = GetPlaybackDurationMs();
+                return fullDuration > 0 ? fullDuration : Math.Max(0, activeStream.Length);
             }
 
-            const long safetyMs = 5000;
-            long vlcLength = activeStream.Length;
-            if (vlcLength > safetyMs)
-            {
-                return Math.Min(fullDuration, vlcLength - safetyMs);
-            }
+            long metadataLength = _currentMediaDurationMs.HasValue && _currentMediaDurationMs.Value > 0
+                ? (long)_currentMediaDurationMs.Value
+                : 0;
+            EnsureSabrSeekCache(mediaPath!, metadataLength, activeStream.Length, activeStream.Time);
+            return _sabrSeekCacheMaxSeekMs;
+        }
 
-            return Math.Min(fullDuration, Math.Max(0, activeStream.Time));
+        /// <summary>
+        /// Fraction of total duration that can be seeked to (0-1). Matches seek clamping during SABR.
+        /// </summary>
+        public float GetBufferedProgress()
+        {
+            GetSeekBarProgress(out _, out float seekableProgress);
+            return seekableProgress;
         }
 
         /// <summary>
@@ -3870,28 +3994,11 @@ namespace XivMediaPlayer
 
             string? mediaPath = activeStream?.SoundPath;
             bool isSabrLocal = mediaPath != null && YtDlpManager.IsSabrLocalFile(mediaPath);
-            bool sabrStillDownloading = isSabrLocal
-                && _ytDlpManager?.IsSabrDownloadActiveForPath(mediaPath) == true;
 
             if (isSabrLocal)
             {
-                // Growing mkv files often expose only the muxed-so-far duration via VLC.
-                // Use the full yt-dlp duration while downloading; otherwise take the larger value.
-                long duration;
-                if (sabrStillDownloading && metadataLength > 0)
-                {
-                    duration = metadataLength;
-                }
-                else
-                {
-                    duration = Math.Max(vlcLength, metadataLength);
-                    if (duration > metadataLength)
-                    {
-                        _currentMediaDurationMs = duration;
-                    }
-                }
-
-                return duration;
+                EnsureSabrSeekCache(mediaPath!, metadataLength, vlcLength, activeStream?.Time ?? 0);
+                return _sabrSeekCacheDurationMs;
             }
 
             if (vlcLength > 0)

@@ -230,28 +230,52 @@ namespace XivMediaPlayer.Windows {
             if (activeStream != null && durationMs > 0) {
             float progress;
             if (!_isDraggingSeek) {
-                _seekDragProgress = Math.Clamp((float)activeStream.Time / durationMs, 0f, 1f);
+                _plugin.GetSeekBarProgress(out float playbackProgress, out float seekableProgress);
+                _seekDragProgress = playbackProgress;
             }
             progress = _seekDragProgress;
+            _plugin.GetSeekBarProgress(out _, out float bufferProgress);
 
             ImGui.SetNextItemWidth(-1);
-            
-            // Format timecode based on drag progress if dragging, else use actual time
-            long displayTime = _isDraggingSeek ? (long)(progress * durationMs) : activeStream.Time;
-            
-            if (ImGui.SliderFloat("##seek", ref progress, 0f, 1f, 
-                FormatTimeCode(displayTime) + " / " + FormatTimeCode(durationMs))) {
-              _seekDragProgress = progress;
+
+            Vector2 barPos = ImGui.GetCursorScreenPos();
+            float barW = ImGui.GetContentRegionAvail().X;
+            float barH = ImGui.GetFrameHeight() * 0.45f;
+            float barY = barPos.Y + (ImGui.GetFrameHeight() - barH) * 0.5f;
+            Vector2 trackMin = new Vector2(barPos.X, barY);
+            Vector2 trackMax = new Vector2(barPos.X + barW, barY + barH);
+
+            var drawList = ImGui.GetWindowDrawList();
+            uint trackColor = ImGui.ColorConvertFloat4ToU32(new System.Numerics.Vector4(0.3f, 0.3f, 0.3f, 1f));
+            uint bufferColor = ImGui.ColorConvertFloat4ToU32(new System.Numerics.Vector4(0.55f, 0.42f, 0.18f, 1f));
+            uint progressColor = ImGui.ColorConvertFloat4ToU32(new System.Numerics.Vector4(0.8f, 0.2f, 0.2f, 1f));
+
+            drawList.AddRectFilled(trackMin, trackMax, trackColor, 3f);
+            if (bufferProgress > 0f) {
+              drawList.AddRectFilled(trackMin, new Vector2(trackMin.X + barW * bufferProgress, trackMax.Y), bufferColor, 3f);
+            }
+            if (progress > 0f) {
+              drawList.AddRectFilled(trackMin, new Vector2(trackMin.X + barW * progress, trackMax.Y), progressColor, 3f);
             }
 
-            if (ImGui.IsItemActivated()) {
-                _isDraggingSeek = true;
+            ImGui.InvisibleButton("##seek", new Vector2(barW, ImGui.GetFrameHeight()));
+            if (ImGui.IsItemHovered() || ImGui.IsItemActive()) {
+              ImGui.SetMouseCursor(ImGuiMouseCursor.Hand);
             }
-            
-            if (ImGui.IsItemDeactivatedAfterEdit() || (ImGui.IsItemDeactivated() && _isDraggingSeek)) {
+            if (ImGui.IsItemActive()) {
+              _isDraggingSeek = true;
+              float mouseX = ImGui.GetIO().MousePos.X;
+              _seekDragProgress = Math.Clamp((mouseX - trackMin.X) / barW, 0f, bufferProgress);
+              progress = _seekDragProgress;
+            }
+
+            if (ImGui.IsItemDeactivated() && _isDraggingSeek) {
                 _isDraggingSeek = false;
                 _plugin.SeekToMs((long)(_seekDragProgress * durationMs));
             }
+
+            long displayTime = _isDraggingSeek ? (long)(progress * durationMs) : activeStream.Time;
+            ImGui.Text(FormatTimeCode(displayTime) + " / " + FormatTimeCode(durationMs));
           }
         }
 
