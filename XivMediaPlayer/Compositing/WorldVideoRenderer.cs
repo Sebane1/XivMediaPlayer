@@ -91,11 +91,13 @@ namespace XivMediaPlayer.Compositing {
       var drawList = Dalamud.Bindings.ImGui.ImGui.GetBackgroundDrawList(ImGui.GetMainViewport());
       int initialCmdSize = drawList.CmdBuffer.Size;
 
-      float trueVidHeight = textureTrueHeight > 0 ? textureTrueHeight : textureHeight;
-      float trueVidWidth = textureTrueWidth > 0 ? textureTrueWidth : textureWidth;
-      float videoAspect = trueVidHeight > 0 ? trueVidWidth / trueVidHeight : 0;
-      float uvBottom = textureTrueHeight > 0 ? ((float)textureTrueHeight / textureHeight) : 1.0f;
-      float uvRight = textureTrueWidth > 0 ? ((float)textureTrueWidth / textureWidth) : 1.0f;
+      float trueVidHeight = textureTrueHeight > 0 ? textureTrueHeight : 0;
+      float trueVidWidth = textureTrueWidth > 0 ? textureTrueWidth : 0;
+      // Never derive aspect from padded texture dimensions — VLC aligns height to 32px
+      // (e.g. 1080p in a 1088-tall buffer), which falsely triggers letterboxing.
+      float videoAspect = (trueVidWidth > 0 && trueVidHeight > 0) ? trueVidWidth / trueVidHeight : 0f;
+      float uvBottom = (textureTrueHeight > 0 && textureHeight > 0) ? ((float)textureTrueHeight / textureHeight) : 1.0f;
+      float uvRight = (textureTrueWidth > 0 && textureWidth > 0) ? ((float)textureTrueWidth / textureWidth) : 1.0f;
 
       if (cameraPos.HasValue && cameraForward.HasValue) {
         var (tl, tr, br, bl) = _transform.Corners;
@@ -130,7 +132,7 @@ namespace XivMediaPlayer.Compositing {
         RenderWithOcclusion(textureSrv, depthCapture, cameraPos.Value,
           cameraForward.Value, cameraRight.Value, cameraUp.Value, fovY, aspectRatio, uiCapture, nearPlane, farPlane, hoverUV, progress, playbackState, lockState, volume, titleSrvPtr, isLooping, isShuffle, time, showScreensaver, videoAspect, allCornersInFront, useDifferenceFallback, viewProjMatrix, viewportPos, viewportSize, uiBlendThreshold, uvBottom, uvRight);
       } else {
-        RenderScreenSpace(textureSrv, videoAspect, viewProjMatrix, viewportPos, viewportSize, uvBottom);
+        RenderScreenSpace(textureSrv, videoAspect, viewProjMatrix, viewportPos, viewportSize, uvBottom, uvRight);
       }
       
       PushCommandsToFront(drawList, initialCmdSize);
@@ -374,7 +376,7 @@ namespace XivMediaPlayer.Compositing {
         if (!_depthRenderer.IsInitialized) {
           if (!_depthRenderer.Initialize()) {
             DepthRendererError = $"Init failed: {_depthRenderer.InitError}";
-            RenderScreenSpace(textureSrv, videoAspectRatio, viewProjMatrix, viewportPos, viewportSize, uvBottom);
+            RenderScreenSpace(textureSrv, videoAspectRatio, viewProjMatrix, viewportPos, viewportSize, uvBottom, uvRight);
             return;
           }
         }
@@ -390,7 +392,7 @@ namespace XivMediaPlayer.Compositing {
       try {
         if (depthCapture.CapturedSRV == null) {
           DepthRendererError = "Depth SRV not available";
-          RenderScreenSpace(textureSrv, videoAspectRatio, viewProjMatrix, viewportPos, viewportSize, uvBottom);
+          RenderScreenSpace(textureSrv, videoAspectRatio, viewProjMatrix, viewportPos, viewportSize, uvBottom, uvRight);
           return;
         }
 
@@ -445,12 +447,12 @@ namespace XivMediaPlayer.Compositing {
           DepthRendererError = null;
         } else {
           if (uiCapture == null || !uiCapture.IsInitialized) {
-            RenderScreenSpace(textureSrv, videoAspectRatio, viewProjMatrix, viewportPos, viewportSize, uvBottom);
+            RenderScreenSpace(textureSrv, videoAspectRatio, viewProjMatrix, viewportPos, viewportSize, uvBottom, uvRight);
           }
         }
       } catch (Exception ex) {
         // Fallback to screen space if custom shader fails
-        RenderScreenSpace(textureSrv, videoAspectRatio, viewProjMatrix, viewportPos, viewportSize, uvBottom);
+        RenderScreenSpace(textureSrv, videoAspectRatio, viewProjMatrix, viewportPos, viewportSize, uvBottom, uvRight);
       }
     }
 
@@ -496,7 +498,7 @@ namespace XivMediaPlayer.Compositing {
     /// <summary>
     /// Renders using ImGui screen-space projection (no occlusion).
     /// </summary>
-    private void RenderScreenSpace(IntPtr textureSrv, float videoAspect, Matrix4x4? viewProjMatrix, Vector2? viewportPos, Vector2? viewportSize, float uvBottom = 1.0f) {
+    private void RenderScreenSpace(IntPtr textureSrv, float videoAspect, Matrix4x4? viewProjMatrix, Vector2? viewportPos, Vector2? viewportSize, float uvBottom = 1.0f, float uvRight = 1.0f) {
       var (tl, tr, br, bl) = _transform.Corners;
 
       WorldToScreenClamped(tl, out var sTL, out _, viewProjMatrix, viewportPos, viewportSize);
@@ -516,23 +518,24 @@ namespace XivMediaPlayer.Compositing {
       // Build the TV texture coordinates based on aspect ratio
       var texId = textureSrv;
       var uvTL = new Vector2(0, 0);
-        var uvTR = new Vector2(1, 0);
-        var uvBR = new Vector2(1, uvBottom);
+        var uvTR = new Vector2(uvRight, 0);
+        var uvBR = new Vector2(uvRight, uvBottom);
         var uvBL = new Vector2(0, uvBottom);
 
       if (videoAspect > 0) {
         float quadW = Vector3.Distance(tl, tr);
         float quadH = Vector3.Distance(tl, bl);
         float quadAspect = quadH > 0 ? quadW / quadH : 1.0f;
+        float aspectDiff = MathF.Abs(quadAspect - videoAspect) / MathF.Max(quadAspect, videoAspect);
         
-          if (videoAspect > quadAspect) {
+          if (aspectDiff > 0.005f && videoAspect > quadAspect) {
               float scale = quadAspect / videoAspect;
               float offset = (1.0f - scale) * 0.5f;
-              uvTL.X = offset;
-              uvBL.X = offset;
-              uvTR.X = 1.0f - offset;
-              uvBR.X = 1.0f - offset;
-            } else if (videoAspect < quadAspect) {
+              uvTL.X = offset * uvRight;
+              uvBL.X = offset * uvRight;
+              uvTR.X = uvRight * (1.0f - offset);
+              uvBR.X = uvRight * (1.0f - offset);
+            } else if (aspectDiff > 0.005f && videoAspect < quadAspect) {
               float scale = videoAspect / quadAspect;
               float offset = (1.0f - scale) * 0.5f;
               Vector2 origTL = sTL;

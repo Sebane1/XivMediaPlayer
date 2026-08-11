@@ -300,8 +300,18 @@ float4 PS(VS_OUT input) : SV_TARGET {
       sampleUV = uv;
       if (VideoAspectRatio > 0) {
             float tvAspect = length(tvRight) / length(tvDown);
-            float scale = tvAspect / VideoAspectRatio;
-            sampleUV.x = (sampleUV.x - 0.5) * scale + 0.5;
+            float aspectDiff = abs(tvAspect - VideoAspectRatio) / max(tvAspect, VideoAspectRatio);
+            if (aspectDiff > 0.005) {
+                if (VideoAspectRatio > tvAspect) {
+                    // Video is wider than the TV — pillarbox (side bars)
+                    float scale = tvAspect / VideoAspectRatio;
+                    sampleUV.x = (sampleUV.x - 0.5) * scale + 0.5;
+                } else {
+                    // Video is taller than the TV — letterbox (top/bottom bars)
+                    float scale = VideoAspectRatio / tvAspect;
+                    sampleUV.y = (sampleUV.y - 0.5) * scale + 0.5;
+                }
+            }
         }
         sampleUV.y = sampleUV.y * UVBottomEdge;
           sampleUV.x = sampleUV.x * UVRightEdge;

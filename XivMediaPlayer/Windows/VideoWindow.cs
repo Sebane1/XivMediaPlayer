@@ -124,9 +124,16 @@ namespace XivMediaPlayer.Windows {
                 _videoTexture = new Direct3D11VideoTexture(frameWidth, frameHeight);
               }
               _videoTexture.Update(_localFrameBuffer, frameWidth, frameHeight);
-              _videoTexture.TrueWidth = trueWidth;
-              _videoTexture.TrueHeight = trueHeight;
               _lastLoadedFrameCount = frameCount;
+            }
+        }
+
+        // Keep true dimensions in sync even between GPU uploads (needed for aspect ratio).
+        if (_videoTexture != null && (trueWidth > 0 || trueHeight > 0)) {
+            lock (_textureLock) {
+              if (_disposed || _videoTexture == null) return;
+              if (trueWidth > 0) _videoTexture.TrueWidth = trueWidth;
+              if (trueHeight > 0) _videoTexture.TrueHeight = trueHeight;
             }
         }
       } catch (Exception e) {
@@ -168,11 +175,11 @@ namespace XivMediaPlayer.Windows {
           float maxVidWidth = avail.X;
           float maxVidHeight = Math.Max(10f, avail.Y - uiHeight);
 
-          float trueVidHeight = trueTexH > 0 ? trueTexH : texH;
+          float trueVidHeight = trueTexH > 0 ? trueTexH : 0;
             float trueVidWidth = trueTexW > 0 ? trueTexW : texW;
-            float uvBottom = trueTexH > 0 ? (float)trueTexH / texH : 1.0f;
-            float uvRight = trueTexW > 0 ? (float)trueTexW / texW : 1.0f;
-            float aspect = trueVidHeight > 0 ? trueVidWidth / trueVidHeight : 1.7777f;
+            float uvBottom = (trueTexH > 0 && texH > 0) ? (float)trueTexH / texH : 1.0f;
+            float uvRight = (trueTexW > 0 && texW > 0) ? (float)trueTexW / texW : 1.0f;
+            float aspect = (trueVidHeight > 0 && trueVidWidth > 0) ? trueVidWidth / trueVidHeight : 1.7777f;
             float inverseAspect = 1.0f / aspect;
             
             float targetWidth = maxVidWidth;
@@ -473,6 +480,14 @@ namespace XivMediaPlayer.Windows {
             width = 16;
             height = 9;
         }
+      }
+
+      // Prefer live frame metadata over cached texture fields.
+      if (_mediaManager != null && (trueWidth <= 0 || trueHeight <= 0)) {
+          lock (_mediaManager.FrameLock) {
+              if (_mediaManager.LastFrameTrueWidth > 0) trueWidth = _mediaManager.LastFrameTrueWidth;
+              if (_mediaManager.LastFrameTrueHeight > 0) trueHeight = _mediaManager.LastFrameTrueHeight;
+          }
       }
     }
 
