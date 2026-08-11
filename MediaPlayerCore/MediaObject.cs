@@ -77,6 +77,9 @@ namespace MediaPlayerCore {
     private readonly object _disposeLock = new object();
 
     private bool _audioOnly;
+    private long _pendingResumeSeekMs;
+
+    public bool IsPendingResumeSeek => _pendingResumeSeekMs > 0;
 
     public MediaObject(MediaManager parent, IMediaGameObject playerObject, IMediaGameObject camera,
       SoundType soundType, string soundPath, string libVLCPath, bool spatialAllowed, bool audioOnly = false) {
@@ -167,10 +170,70 @@ namespace MediaPlayerCore {
 
     public bool IsLiveStream => _isLiveStream;
 
+    private int PrepareSabrResumeSeek(string mediaPath, int startTimeMs)
+    {
+      if (startTimeMs > 0 && YtDlpManager.IsSabrLocalFile(mediaPath))
+      {
+        _pendingResumeSeekMs = startTimeMs;
+        return 0;
+      }
+
+      _pendingResumeSeekMs = 0;
+      return startTimeMs;
+    }
+
+    private void TryApplyPendingSabrResumeSeek()
+    {
+      if (_pendingResumeSeekMs <= 0 || _vlcPlayer == null || _disposed || _isLiveStream)
+      {
+        return;
+      }
+
+      long targetMs = _pendingResumeSeekMs;
+      long availableMs = Length;
+      const long safetyMs = 3000;
+
+      bool stillDownloading = YtDlpManager.IsSabrLocalFile(_soundPath)
+        && (_parent.IsSabrDownloadActive?.Invoke(_soundPath) ?? false);
+
+      if (stillDownloading && availableMs > 0 && availableMs < targetMs - safetyMs)
+      {
+        return;
+      }
+
+      long seekMs = targetMs;
+      if (_parent.SeekTimeClamper != null)
+      {
+        seekMs = _parent.SeekTimeClamper(seekMs);
+      }
+      else if (availableMs > safetyMs)
+      {
+        seekMs = Math.Min(seekMs, availableMs - safetyMs);
+      }
+
+      _pendingResumeSeekMs = 0;
+
+      try
+      {
+        _vlcPlayer.Time = seekMs;
+        _bufferedWaveProvider?.ClearBuffer();
+        if (_vlcPlayer.State == LibVLCSharp.Shared.VLCState.Paused)
+        {
+          _vlcPlayer.SetPause(false);
+        }
+      }
+      catch (Exception ex)
+      {
+        Debug.WriteLine($"[MediaObject] Pending SABR resume seek failed: {ex}");
+      }
+    }
+
     private static bool IsBenignVlcLogMessage(string message)
       => message.Contains("DEMUX_GET_TIME", StringComparison.OrdinalIgnoreCase)
         || message.Contains("DEMUX_GET_LENGTH", StringComparison.OrdinalIgnoreCase)
-        || message.Contains("DEMUX_GET_PTS", StringComparison.OrdinalIgnoreCase);
+        || message.Contains("DEMUX_GET_PTS", StringComparison.OrdinalIgnoreCase)
+        || message.Contains("dav1d", StringComparison.OrdinalIgnoreCase)
+        || message.Contains("Decoder feed error", StringComparison.OrdinalIgnoreCase);
 
     public long Time {
       get {
@@ -189,6 +252,11 @@ namespace MediaPlayerCore {
         }
       }
       set {
+        if (_parent?.SeekTimeClamper != null)
+        {
+          value = _parent.SeekTimeClamper(value);
+        }
+
         if (_vlcPlayer != null) {
           try {
             if (_isLiveStream || (!_vlcPlayer.IsSeekable && _vlcPlayer.State == LibVLCSharp.Shared.VLCState.Playing))
@@ -349,6 +417,8 @@ namespace MediaPlayerCore {
               if (_isLiveStream) {
                 startTimeMs = 0;
                 slaveAudioPath = null;
+              } else {
+                startTimeMs = PrepareSabrResumeSeek(mediaPath, startTimeMs);
               }
               lock (_parent.FrameLock) {
                 _parent.LastFrame = Array.Empty<byte>();
@@ -514,6 +584,8 @@ namespace MediaPlayerCore {
 
               if (!playResult) {
                 OnErrorReceived?.Invoke(this, new MediaError() { Exception = new Exception("VLC Play() returned false — playback failed to start.") });
+              } else if (_pendingResumeSeekMs > 0) {
+                try { _vlcPlayer.SetPause(true); } catch { }
               }
             } catch (Exception e) {
               Debug.WriteLine($"[MediaObject] Play exception: {e}");
@@ -540,6 +612,8 @@ namespace MediaPlayerCore {
             if (_isLiveStream) {
               startTimeMs = 0;
               slaveAudioPath = null;
+            } else {
+              startTimeMs = PrepareSabrResumeSeek(soundPath, startTimeMs);
             }
             var media = new Media(libVLC, soundPath, IsNetworkMediaPath(soundPath)
                      ? FromType.FromLocation : FromType.FromPath);
@@ -641,6 +715,8 @@ namespace MediaPlayerCore {
             }
             if (!playResult) {
               OnErrorReceived?.Invoke(this, new MediaError() { Exception = new Exception("VLC Play() returned false after stream change.") });
+            } else if (_pendingResumeSeekMs > 0) {
+              try { _vlcPlayer.SetPause(true); } catch { }
             }
           }
         } catch (Exception e) { OnErrorReceived?.Invoke(this, new MediaError() { Exception = e }); }
@@ -731,6 +807,8 @@ namespace MediaPlayerCore {
                 _parent.LastFrameTrueHeight = (int)_height;
                 _parent.LastFrameCount++;
               }
+
+              TryApplyPendingSabrResumeSeek();
             } catch (Exception ex) {
                 Debug.WriteLine($"[MediaObject] Display error: {ex}");
             }
@@ -799,6 +877,7 @@ namespace MediaPlayerCore {
       lock (_disposeLock) {
           if (_disposed) return;
           _disposed = true;
+          _pendingResumeSeekMs = 0;
           _parent.OnCleanupTime -= _parent_OnCleanupTime;
           
           _vlcPlayer = null;

@@ -679,6 +679,8 @@ namespace XivMediaPlayer
             _camera = CameraManager.Instance()->GetActiveCamera();
             _playerCamera = new MediaCameraObject(_camera);
             _mediaManager = new MediaManager(_playerObject, _playerCamera, _dependencyManager.DependenciesDir);
+            _mediaManager.SeekTimeClamper = ClampSeekTimeMs;
+            _mediaManager.IsSabrDownloadActive = path => _ytDlpManager?.IsSabrDownloadActiveForPath(path) == true;
             _mediaManager.OnErrorReceived += OnMediaError;
             _mediaManager.OnNewMediaTriggered += _mediaManager_OnNewMediaTriggered;
             _mediaManager.OnPlaybackFinished += _mediaManager_OnPlaybackFinished;
@@ -1122,6 +1124,11 @@ namespace XivMediaPlayer
                 return true;
             }
 
+            if (_mediaManager?.ActiveStream?.IsPendingResumeSeek == true)
+            {
+                return true;
+            }
+
             if (_mediaManager == null)
             {
                 return false;
@@ -1169,6 +1176,11 @@ namespace XivMediaPlayer
 
         private string GetMediaLoadingMessage()
         {
+            if (_mediaManager?.ActiveStream?.IsPendingResumeSeek == true)
+            {
+                return "Buffering to resume position...";
+            }
+
             if (!string.IsNullOrWhiteSpace(_mediaLoadingMessage))
             {
                 return _mediaLoadingMessage;
@@ -2404,7 +2416,7 @@ namespace XivMediaPlayer
                     else
                     {
                         _pluginLog.Information($"[Social] Adjusting timecode to sync with server. Local Time: {activeStream.Time}ms | Target Time: {targetTimeMs}ms");
-                        activeStream.Time = (long)targetTimeMs;
+                        activeStream.Time = ClampSeekTimeMs((long)targetTimeMs);
                     }
                 }
 
@@ -2571,7 +2583,9 @@ namespace XivMediaPlayer
             // Harmless on live/HLS demuxers. Querying playback time is unsupported.
             if (errorMsg.Contains("DEMUX_GET_TIME", StringComparison.OrdinalIgnoreCase)
                 || errorMsg.Contains("DEMUX_GET_LENGTH", StringComparison.OrdinalIgnoreCase)
-                || errorMsg.Contains("Failed to create demuxer", StringComparison.OrdinalIgnoreCase))
+                || errorMsg.Contains("Failed to create demuxer", StringComparison.OrdinalIgnoreCase)
+                || errorMsg.Contains("dav1d", StringComparison.OrdinalIgnoreCase)
+                || errorMsg.Contains("Decoder feed error", StringComparison.OrdinalIgnoreCase))
             {
                 return;
             }
@@ -2839,7 +2853,7 @@ namespace XivMediaPlayer
                     {
                         long durationMs = GetPlaybackDurationMs();
                         if (durationMs > 0)
-                            progress = activeStream.Time / (float)durationMs;
+                            progress = Math.Clamp(activeStream.Time / (float)durationMs, 0f, 1f);
 
                         isPlaying = activeStream.PlaybackState == NAudio.Wave.PlaybackState.Playing;
                         if (isPlaying) playbackState = 1.0f;
@@ -2983,10 +2997,8 @@ namespace XivMediaPlayer
                                     long durationMs = GetPlaybackDurationMs();
                                     if (durationMs > 0)
                                     {
-                                        long newTime = (long)(seekProgress * durationMs);
-                                        activeStream.Time = newTime;
+                                        SeekToMs((long)(seekProgress * durationMs));
                                         _isLocalDj = true;
-                                        _ = PushMediaToServerAsync(isBackgroundSync: false, overrideTimeMs: newTime);
                                     }
                                 }
                             }
@@ -3753,17 +3765,91 @@ namespace XivMediaPlayer
         public void SeekRelative(int seconds)
         {
             var activeStream = _mediaManager?.ActiveStream;
-            long length = GetPlaybackDurationMs();
-            if (activeStream == null || length <= 0) return;
+            if (activeStream == null) return;
 
-            long newTime = activeStream.Time + (seconds * 1000L);
-            newTime = Math.Clamp(newTime, 0, length);
-            activeStream.Time = newTime;
+            SeekToMs(activeStream.Time + (seconds * 1000L));
+        }
 
-            if (_isLocalDj)
+        /// <summary>
+        /// Clamps a seek target to what is currently safe to decode (SABR buffer frontier).
+        /// </summary>
+        public long ClampSeekTimeMs(long targetMs)
+        {
+            if (_lastStreamIsLive)
             {
-                _ = PushMediaToServerAsync(isBackgroundSync: false, overrideTimeMs: newTime);
+                return 0;
             }
+
+            var activeStream = _mediaManager?.ActiveStream;
+            if (activeStream == null)
+            {
+                return Math.Max(0, targetMs);
+            }
+
+            long maxSeek = GetMaxSeekTimeMs();
+            if (maxSeek <= 0)
+            {
+                return Math.Max(0, targetMs);
+            }
+
+            return Math.Clamp(targetMs, 0, maxSeek);
+        }
+
+        /// <summary>
+        /// Seeks to the given time, clamped to the buffered portion for in-progress SABR downloads.
+        /// </summary>
+        public void SeekToMs(long targetMs, bool syncToServer = true)
+        {
+            var activeStream = _mediaManager?.ActiveStream;
+            if (activeStream == null)
+            {
+                return;
+            }
+
+            long clamped = ClampSeekTimeMs(targetMs);
+            activeStream.Time = clamped;
+
+            if (syncToServer && _isLocalDj)
+            {
+                _ = PushMediaToServerAsync(isBackgroundSync: false, overrideTimeMs: clamped);
+            }
+        }
+
+        /// <summary>
+        /// Latest time the user can seek to. During SABR download this stays behind the mux frontier.
+        /// </summary>
+        public long GetMaxSeekTimeMs()
+        {
+            if (_lastStreamIsLive)
+            {
+                return 0;
+            }
+
+            var activeStream = _mediaManager?.ActiveStream;
+            if (activeStream == null)
+            {
+                return 0;
+            }
+
+            long fullDuration = GetPlaybackDurationMs();
+            string? mediaPath = activeStream.SoundPath;
+            bool sabrStillDownloading = mediaPath != null
+                && YtDlpManager.IsSabrLocalFile(mediaPath)
+                && _ytDlpManager?.IsSabrDownloadActiveForPath(mediaPath) == true;
+
+            if (!sabrStillDownloading)
+            {
+                return fullDuration;
+            }
+
+            const long safetyMs = 5000;
+            long vlcLength = activeStream.Length;
+            if (vlcLength > safetyMs)
+            {
+                return Math.Min(fullDuration, vlcLength - safetyMs);
+            }
+
+            return Math.Min(fullDuration, Math.Max(0, activeStream.Time));
         }
 
         /// <summary>
@@ -3777,17 +3863,43 @@ namespace XivMediaPlayer
             }
 
             var activeStream = _mediaManager?.ActiveStream;
-            if (activeStream != null && activeStream.Length > 0)
+            long vlcLength = activeStream?.Length ?? 0;
+            long metadataLength = _currentMediaDurationMs.HasValue && _currentMediaDurationMs.Value > 0
+                ? (long)_currentMediaDurationMs.Value
+                : 0;
+
+            string? mediaPath = activeStream?.SoundPath;
+            bool isSabrLocal = mediaPath != null && YtDlpManager.IsSabrLocalFile(mediaPath);
+            bool sabrStillDownloading = isSabrLocal
+                && _ytDlpManager?.IsSabrDownloadActiveForPath(mediaPath) == true;
+
+            if (isSabrLocal)
             {
-                return activeStream.Length;
+                // Growing mkv files often expose only the muxed-so-far duration via VLC.
+                // Use the full yt-dlp duration while downloading; otherwise take the larger value.
+                long duration;
+                if (sabrStillDownloading && metadataLength > 0)
+                {
+                    duration = metadataLength;
+                }
+                else
+                {
+                    duration = Math.Max(vlcLength, metadataLength);
+                    if (duration > metadataLength)
+                    {
+                        _currentMediaDurationMs = duration;
+                    }
+                }
+
+                return duration;
             }
 
-            if (_currentMediaDurationMs.HasValue && _currentMediaDurationMs.Value > 0)
+            if (vlcLength > 0)
             {
-                return (long)_currentMediaDurationMs.Value;
+                return vlcLength;
             }
 
-            return 0;
+            return metadataLength;
         }
 
         /// <summary>

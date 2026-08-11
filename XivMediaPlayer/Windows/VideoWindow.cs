@@ -227,10 +227,10 @@ namespace XivMediaPlayer.Windows {
         if (_mediaManager != null && _plugin != null) {
           var activeStream = _mediaManager.ActiveStream;
           long durationMs = _plugin.GetPlaybackDurationMs();
-          if (activeStream != null && durationMs > 0) {
+            if (activeStream != null && durationMs > 0) {
             float progress;
             if (!_isDraggingSeek) {
-                _seekDragProgress = (float)activeStream.Time / durationMs;
+                _seekDragProgress = Math.Clamp((float)activeStream.Time / durationMs, 0f, 1f);
             }
             progress = _seekDragProgress;
 
@@ -250,7 +250,7 @@ namespace XivMediaPlayer.Windows {
             
             if (ImGui.IsItemDeactivatedAfterEdit() || (ImGui.IsItemDeactivated() && _isDraggingSeek)) {
                 _isDraggingSeek = false;
-                activeStream.Time = (long)(_seekDragProgress * durationMs);
+                _plugin.SeekToMs((long)(_seekDragProgress * durationMs));
             }
           }
         }

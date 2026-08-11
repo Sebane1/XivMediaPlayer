@@ -32,6 +32,12 @@ namespace MediaPlayerCore {
     public int LastFrameTrueWidth { get; set; } = 0;
     public int LastFrameTrueHeight { get; set; } = 0;
     public bool Invalidated { get => _invalidated; set => _invalidated = value; }
+
+    /// <summary>Optional clamp for seek targets (e.g. SABR buffer frontier).</summary>
+    public Func<long, long>? SeekTimeClamper { get; set; }
+
+    /// <summary>Returns true while a SABR local file is still downloading.</summary>
+    public Func<string, bool>? IsSabrDownloadActive { get; set; }
     
     public MediaObject? ActiveStream {
       get {
