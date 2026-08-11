@@ -22,3 +22,5 @@ Repo Link
 ```
 https://raw.githubusercontent.com/Sebane1/XivMediaPlayer/refs/heads/main/repo.json
 ```
+Support discord:
+https://discord.gg/rtGXwMn7pX
