@@ -2,6 +2,7 @@ using Dalamud.Interface.Windowing;
 using Dalamud.Bindings.ImGui;
 using System;
 using System.Numerics;
+using System.Threading.Tasks;
 
 namespace XivMediaPlayer.Windows {
   internal class SettingsWindow : Window {
@@ -283,11 +284,16 @@ namespace XivMediaPlayer.Windows {
       bool sabrProxy = _plugin.Config.EnableSabrProxy;
       if (ImGui.Checkbox("Enable SABR Proxy (Fixes YouTube playback errors)", ref sabrProxy)) {
         _plugin.Config.EnableSabrProxy = sabrProxy;
-        if (_plugin.YtDlpManager != null) _plugin.YtDlpManager.EnableSabrProxy = sabrProxy;
+        if (_plugin.YtDlpManager != null) {
+          _plugin.YtDlpManager.EnableSabrProxy = sabrProxy;
+          if (sabrProxy) {
+            _ = Task.Run(async () => await _plugin.YtDlpManager.EnsureAvailableAsync());
+          }
+        }
         _plugin.Config.Save();
       }
       ImGui.TextColored(new Vector4(0.5f, 0.5f, 0.5f, 1f),
-        "Pipes the stream through a local server to bypass YouTube's new protocol. Note: Seeking/Scrubbing is currently unsupported in this mode.");
+        "Pipes YouTube through a local yt-dlp SABR proxy. Requires cookies for most videos. Seeking/scrubbing is unsupported in this mode.");
 
       ImGui.Spacing();
 
