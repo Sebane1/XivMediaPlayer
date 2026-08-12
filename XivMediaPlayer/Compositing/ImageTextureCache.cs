@@ -1,10 +1,10 @@
 using Dalamud.Interface.Textures.TextureWraps;
 using Dalamud.Plugin.Services;
+using SixLabors.ImageSharp;
+using SixLabors.ImageSharp.PixelFormats;
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
-using System.Drawing;
-using System.Drawing.Imaging;
 using System.IO;
 using System.Net.Http;
 using System.Runtime.InteropServices;
@@ -14,16 +14,18 @@ namespace XivMediaPlayer.Compositing
 {
     /// <summary>
     /// Downloads image URLs and uploads them as GPU textures for banners and idle branding.
+    /// Format detection uses response Content-Type and file signatures, not URL extensions.
     /// Animated GIFs are decoded and advanced on the framework thread.
     /// </summary>
     internal sealed class ImageTextureCache : IDisposable
     {
-        private const int PropertyTagFrameDelay = 0x5100;
+        private static readonly TimeSpan FailedRetryDelay = TimeSpan.FromSeconds(30);
 
         private readonly ITextureProvider _textureProvider;
         private readonly IPluginLog _log;
-        private readonly HttpClient _httpClient = new();
+        private readonly HttpClient _httpClient;
         private readonly ConcurrentDictionary<string, CachedImage> _cache = new(StringComparer.OrdinalIgnoreCase);
+        private readonly ConcurrentDictionary<string, DateTime> _retryAfterUtc = new(StringComparer.OrdinalIgnoreCase);
         private readonly HashSet<string> _loading = new(StringComparer.OrdinalIgnoreCase);
         private readonly object _loadingLock = new();
         private DateTime _lastAnimationTickUtc = DateTime.UtcNow;
@@ -32,9 +34,9 @@ namespace XivMediaPlayer.Compositing
         private sealed class CachedImage
         {
             public IDalamudTextureWrap? Wrap;
+            public IDalamudTextureWrap[]? FrameWraps;
             public int Width;
             public int Height;
-            public byte[][]? Frames;
             public int[]? FrameDelaysMs;
             public int CurrentFrameIndex;
             public double AccumulatedMs;
@@ -45,13 +47,25 @@ namespace XivMediaPlayer.Compositing
         {
             _textureProvider = textureProvider;
             _log = log;
+            _httpClient = new HttpClient
+            {
+                Timeout = TimeSpan.FromSeconds(30)
+            };
+            _httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("XivMediaPlayer/1.0");
+            _httpClient.DefaultRequestHeaders.Accept.ParseAdd("image/*,*/*;q=0.8");
         }
 
         public void RequestLoad(string? url)
         {
-            if (_disposed || string.IsNullOrWhiteSpace(url)) return;
+            url = ImageUrlUtility.Normalize(url);
+            if (_disposed || url == null) return;
 
             if (_cache.ContainsKey(url)) return;
+
+            if (_retryAfterUtc.TryGetValue(url, out var retryAfter) && DateTime.UtcNow < retryAfter)
+            {
+                return;
+            }
 
             lock (_loadingLock)
             {
@@ -81,7 +95,8 @@ namespace XivMediaPlayer.Compositing
             width = 0;
             height = 0;
 
-            if (string.IsNullOrWhiteSpace(url)) return false;
+            url = ImageUrlUtility.Normalize(url);
+            if (url == null) return false;
             if (!_cache.TryGetValue(url, out var cached) || cached.Wrap == null) return false;
 
             lock (cached.Sync)
@@ -98,14 +113,13 @@ namespace XivMediaPlayer.Compositing
 
         public void Invalidate(string? url)
         {
-            if (string.IsNullOrWhiteSpace(url)) return;
+            url = ImageUrlUtility.Normalize(url);
+            if (url == null) return;
+
+            _retryAfterUtc.TryRemove(url, out _);
             if (_cache.TryRemove(url, out var cached))
             {
-                lock (cached.Sync)
-                {
-                    cached.Wrap?.Dispose();
-                    cached.Wrap = null;
-                }
+                ReleaseGpuResources(cached);
             }
         }
 
@@ -127,12 +141,13 @@ namespace XivMediaPlayer.Compositing
 
         private void AdvanceAnimation(CachedImage cached, double deltaMs)
         {
-            byte[][]? frames = cached.Frames;
+            IDalamudTextureWrap[]? frameWraps = cached.FrameWraps;
             int[]? delays = cached.FrameDelaysMs;
-            if (frames == null || delays == null || frames.Length <= 1) return;
+            if (frameWraps == null || delays == null || frameWraps.Length <= 1) return;
 
             lock (cached.Sync)
             {
+                int indexBefore = cached.CurrentFrameIndex;
                 cached.AccumulatedMs += deltaMs;
                 int delayMs = delays[cached.CurrentFrameIndex];
                 if (cached.AccumulatedMs < delayMs) return;
@@ -140,11 +155,14 @@ namespace XivMediaPlayer.Compositing
                 do
                 {
                     cached.AccumulatedMs -= delayMs;
-                    cached.CurrentFrameIndex = (cached.CurrentFrameIndex + 1) % frames.Length;
+                    cached.CurrentFrameIndex = (cached.CurrentFrameIndex + 1) % frameWraps.Length;
                     delayMs = delays[cached.CurrentFrameIndex];
-                } while (cached.AccumulatedMs >= delayMs && frames.Length > 1);
+                } while (cached.AccumulatedMs >= delayMs && frameWraps.Length > 1);
 
-                SetCurrentFrameTexture(cached, frames[cached.CurrentFrameIndex]);
+                if (cached.CurrentFrameIndex != indexBefore)
+                {
+                    cached.Wrap = frameWraps[cached.CurrentFrameIndex];
+                }
             }
         }
 
@@ -152,151 +170,234 @@ namespace XivMediaPlayer.Compositing
         {
             try
             {
-                using var response = await _httpClient.GetAsync(url, HttpCompletionOption.ResponseHeadersRead);
+                using var request = new HttpRequestMessage(HttpMethod.Get, url);
+                using var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
                 response.EnsureSuccessStatusCode();
 
-                await using var stream = await response.Content.ReadAsStreamAsync();
-                using var ms = new MemoryStream();
-                await stream.CopyToAsync(ms);
-                ms.Position = 0;
-
-                if (TryLoadAnimatedGif(ms, out byte[][] frames, out int[] delaysMs, out int width, out int height))
+                var contentType = response.Content.Headers.ContentType?.MediaType;
+                var data = await response.Content.ReadAsByteArrayAsync();
+                if (data.Length == 0)
                 {
-                    var wrap = CreateTextureFromRaw(frames[0], width, height);
-                    if (wrap == null) return;
-
-                    var cached = new CachedImage
-                    {
-                        Wrap = wrap,
-                        Width = width,
-                        Height = height,
-                        Frames = frames,
-                        FrameDelaysMs = delaysMs,
-                        CurrentFrameIndex = 0,
-                        AccumulatedMs = 0
-                    };
-
-                    if (_cache.TryGetValue(url, out var existing))
-                    {
-                        lock (existing.Sync)
-                        {
-                            existing.Wrap?.Dispose();
-                        }
-                    }
-
-                    _cache[url] = cached;
+                    MarkLoadFailed(url, "Image URL returned an empty response.");
                     return;
                 }
 
-                ms.Position = 0;
-                using var bitmap = new Bitmap(ms);
-                width = bitmap.Width;
-                height = bitmap.Height;
-                if (width <= 0 || height <= 0) return;
-
-                var staticWrap = CreateTextureFromBitmap(bitmap, width, height);
-                if (staticWrap == null) return;
-
-                if (_cache.TryGetValue(url, out var existingStatic))
+                if (!IsLikelyImagePayload(data, contentType))
                 {
-                    lock (existingStatic.Sync)
-                    {
-                        existingStatic.Wrap?.Dispose();
-                    }
+                    MarkLoadFailed(url, $"URL did not return an image (Content-Type: {contentType ?? "unknown"}). Use a direct image link.");
+                    return;
                 }
 
-                _cache[url] = new CachedImage
+                if (!TryDecodeImage(data, out var cached) || cached == null)
                 {
-                    Wrap = staticWrap,
-                    Width = width,
-                    Height = height
-                };
+                    MarkLoadFailed(url, "Download succeeded but the image could not be decoded.");
+                    return;
+                }
+
+                _retryAfterUtc.TryRemove(url, out _);
+
+                if (_cache.TryGetValue(url, out var existing))
+                {
+                    ReleaseGpuResources(existing);
+                }
+
+                _cache[url] = cached;
             }
             catch (Exception ex)
             {
-                _log.Warning(ex, $"Failed to load image texture: {url}");
+                MarkLoadFailed(url, ex.Message, ex);
             }
         }
 
-        private static bool TryLoadAnimatedGif(
-            MemoryStream ms,
-            out byte[][] frames,
-            out int[] delaysMs,
-            out int width,
-            out int height)
+        private void MarkLoadFailed(string url, string message, Exception? ex = null)
         {
-            frames = Array.Empty<byte[]>();
-            delaysMs = Array.Empty<int>();
-            width = 0;
-            height = 0;
+            _retryAfterUtc[url] = DateTime.UtcNow.Add(FailedRetryDelay);
+            if (ex != null)
+            {
+                _log.Warning(ex, $"Failed to load image texture: {url} ({message})");
+            }
+            else
+            {
+                _log.Warning($"Failed to load image texture: {url} ({message})");
+            }
+        }
 
-            ms.Position = 0;
-            using var image = Image.FromStream(ms, useEmbeddedColorManagement: false, validateImageData: false);
-            width = image.Width;
-            height = image.Height;
-            if (width <= 0 || height <= 0) return false;
+        private static bool IsLikelyImagePayload(byte[] data, string? contentType)
+        {
+            if (HasKnownImageSignature(data)) return true;
 
-            int frameCount;
+            if (!string.IsNullOrWhiteSpace(contentType)
+                && contentType.StartsWith("image/", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            if (!string.IsNullOrWhiteSpace(contentType)
+                && (contentType.Contains("octet-stream", StringComparison.OrdinalIgnoreCase)
+                    || contentType.Contains("binary", StringComparison.OrdinalIgnoreCase)))
+            {
+                return HasKnownImageSignature(data);
+            }
+
+            return false;
+        }
+
+        private static bool HasKnownImageSignature(byte[] data)
+        {
+            if (data.Length >= 3 && data[0] == 0xFF && data[1] == 0xD8 && data[2] == 0xFF) return true;
+            if (data.Length >= 4 && data[0] == 0x89 && data[1] == 0x50 && data[2] == 0x4E && data[3] == 0x47) return true;
+            if (data.Length >= 3 && data[0] == (byte)'G' && data[1] == (byte)'I' && data[2] == (byte)'F') return true;
+            if (data.Length >= 12
+                && data[0] == (byte)'R' && data[1] == (byte)'I' && data[2] == (byte)'F' && data[3] == (byte)'F'
+                && data[8] == (byte)'W' && data[9] == (byte)'E' && data[10] == (byte)'B' && data[11] == (byte)'P')
+            {
+                return true;
+            }
+
+            return false;
+        }
+
+        private bool TryDecodeImage(byte[] data, out CachedImage? cached)
+        {
+            cached = null;
+
             try
             {
-                frameCount = image.GetFrameCount(FrameDimension.Time);
-            }
-            catch (ArgumentException)
-            {
-                return false;
-            }
+                using var ms = new MemoryStream(data);
+                using var image = Image.Load<Rgba32>(ms);
+                if (image.Width <= 0 || image.Height <= 0) return false;
 
-            if (frameCount <= 1) return false;
-
-            delaysMs = ReadGifFrameDelays(image, frameCount);
-            frames = new byte[frameCount][];
-
-            for (int i = 0; i < frameCount; i++)
-            {
-                image.SelectActiveFrame(FrameDimension.Time, i);
-                using var frameBitmap = new Bitmap(width, height, PixelFormat.Format32bppArgb);
-                using (var graphics = Graphics.FromImage(frameBitmap))
+                if (image.Frames.Count > 1)
                 {
-                    graphics.Clear(Color.Transparent);
-                    graphics.DrawImage(image, new Rectangle(0, 0, width, height));
+                    return TryDecodeAnimatedImage(image, out cached);
                 }
 
-                frames[i] = ExtractBgraFromBitmap(frameBitmap, width, height);
+                var frameData = ExtractBgra32(image);
+                var wrap = CreateTextureFromRaw(frameData, image.Width, image.Height);
+                if (wrap == null) return false;
+
+                cached = new CachedImage
+                {
+                    Wrap = wrap,
+                    Width = image.Width,
+                    Height = image.Height
+                };
+                return true;
+            }
+            catch (Exception ex)
+            {
+                _log.Debug(ex, "Image decode failed.");
+                return false;
+            }
+        }
+
+        private bool TryDecodeAnimatedImage(Image<Rgba32> image, out CachedImage? cached)
+        {
+            cached = null;
+            int frameCount = image.Frames.Count;
+            if (frameCount <= 1) return false;
+
+            int width = image.Width;
+            int height = image.Height;
+            var frameWraps = new IDalamudTextureWrap[frameCount];
+            var delaysMs = new int[frameCount];
+
+            try
+            {
+                for (int i = 0; i < frameCount; i++)
+                {
+                    using var frame = image.Frames.CloneFrame(i);
+                    var frameData = ExtractBgra32(frame);
+                    var wrap = CreateTextureFromRaw(frameData, width, height);
+                    if (wrap == null)
+                    {
+                        ReleaseFrameWraps(frameWraps, i);
+                        return false;
+                    }
+
+                    frameWraps[i] = wrap;
+                    var gifMetadata = image.Frames[i].Metadata.GetGifMetadata();
+                    int centiseconds = gifMetadata?.FrameDelay ?? 10;
+                    delaysMs[i] = Math.Max(centiseconds * 10, 20);
+                }
+            }
+            catch
+            {
+                ReleaseFrameWraps(frameWraps, frameWraps.Length);
+                throw;
             }
 
+            cached = new CachedImage
+            {
+                Wrap = frameWraps[0],
+                FrameWraps = frameWraps,
+                Width = width,
+                Height = height,
+                FrameDelaysMs = delaysMs,
+                CurrentFrameIndex = 0,
+                AccumulatedMs = 0
+            };
             return true;
         }
 
-        private static int[] ReadGifFrameDelays(Image image, int frameCount)
+        private static void ReleaseFrameWraps(IDalamudTextureWrap?[] frameWraps, int uploadedCount)
         {
-            var delays = new int[frameCount];
-            for (int i = 0; i < frameCount; i++)
+            for (int i = 0; i < uploadedCount; i++)
             {
-                delays[i] = 100;
+                frameWraps[i]?.Dispose();
+                frameWraps[i] = null;
             }
-
-            try
-            {
-                var delayItem = image.GetPropertyItem(PropertyTagFrameDelay);
-                for (int i = 0; i < frameCount; i++)
-                {
-                    int centiseconds = delayItem.Value.Length >= (i + 1) * 2
-                        ? BitConverter.ToUInt16(delayItem.Value, i * 2)
-                        : 1;
-                    delays[i] = Math.Max(centiseconds * 10, 20);
-                }
-            }
-            catch (ArgumentException)
-            {
-            }
-
-            return delays;
         }
 
-        private void SetCurrentFrameTexture(CachedImage cached, byte[] frameData)
+        private static void ReleaseGpuResources(CachedImage cached)
         {
-            cached.Wrap?.Dispose();
-            cached.Wrap = CreateTextureFromRaw(frameData, cached.Width, cached.Height);
+            lock (cached.Sync)
+            {
+                if (cached.FrameWraps != null)
+                {
+                    foreach (var wrap in cached.FrameWraps)
+                    {
+                        wrap?.Dispose();
+                    }
+
+                    cached.FrameWraps = null;
+                    cached.Wrap = null;
+                }
+                else
+                {
+                    cached.Wrap?.Dispose();
+                    cached.Wrap = null;
+                }
+
+                cached.FrameDelaysMs = null;
+            }
+        }
+
+        private static byte[] ExtractBgra32(Image<Rgba32> image)
+        {
+            int width = image.Width;
+            int height = image.Height;
+            var data = new byte[width * height * 4];
+
+            image.ProcessPixelRows(accessor =>
+            {
+                for (int y = 0; y < accessor.Height; y++)
+                {
+                    var row = accessor.GetRowSpan(y);
+                    int rowOffset = y * width * 4;
+                    for (int x = 0; x < row.Length; x++)
+                    {
+                        ref Rgba32 pixel = ref row[x];
+                        int offset = rowOffset + (x * 4);
+                        data[offset] = pixel.B;
+                        data[offset + 1] = pixel.G;
+                        data[offset + 2] = pixel.R;
+                        data[offset + 3] = pixel.A;
+                    }
+                }
+            });
+
+            return data;
         }
 
         private IDalamudTextureWrap? CreateTextureFromRaw(byte[] rawData, int width, int height)
@@ -314,30 +415,6 @@ namespace XivMediaPlayer.Compositing
             }
         }
 
-        private IDalamudTextureWrap? CreateTextureFromBitmap(Bitmap bmp, int width, int height)
-        {
-            return CreateTextureFromRaw(ExtractBgraFromBitmap(bmp, width, height), width, height);
-        }
-
-        private static byte[] ExtractBgraFromBitmap(Bitmap bmp, int width, int height)
-        {
-            var bmpData = bmp.LockBits(
-                new Rectangle(0, 0, width, height),
-                ImageLockMode.ReadOnly,
-                PixelFormat.Format32bppArgb);
-            try
-            {
-                int bytes = Math.Abs(bmpData.Stride) * bmp.Height;
-                var rawData = new byte[bytes];
-                Marshal.Copy(bmpData.Scan0, rawData, 0, bytes);
-                return rawData;
-            }
-            finally
-            {
-                bmp.UnlockBits(bmpData);
-            }
-        }
-
         public void Dispose()
         {
             if (_disposed) return;
@@ -345,10 +422,7 @@ namespace XivMediaPlayer.Compositing
 
             foreach (var entry in _cache.Values)
             {
-                lock (entry.Sync)
-                {
-                    entry.Wrap?.Dispose();
-                }
+                ReleaseGpuResources(entry);
             }
 
             _cache.Clear();

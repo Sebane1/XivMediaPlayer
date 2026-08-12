@@ -2655,6 +2655,10 @@ namespace XivMediaPlayer
         private void ApplyTvPlacementToRenderer(TvPlacement tv)
         {
             ApplyTransformToRenderer(_worldRenderer, TvPlacementToTransform(tv));
+            if (tv.ScreensaverStyle == ScreensaverStyleCustomImage && !string.IsNullOrWhiteSpace(tv.IdleBrandingUrl))
+            {
+                _imageTextureCache.RequestLoad(tv.IdleBrandingUrl);
+            }
         }
 
         private MediaPlayerCore.Compositing.WorldScreenTransform BannerPlacementToTransform(BannerPlacement banner)
@@ -2670,13 +2674,25 @@ namespace XivMediaPlayer
             };
         }
 
-        internal bool TryResolveTvBrandingTexture(TvPlacement tv, out IntPtr srv, out float aspect)
+        internal bool IsImageTextureReady(string? url)
+        {
+            if (string.IsNullOrWhiteSpace(url)) return false;
+            return _imageTextureCache.TryGetTexture(url.Trim(), out _, out int width, out int height)
+                && width > 0 && height > 0;
+        }
+
+        internal bool TryResolveTvBrandingTexture(TvPlacement tv, WorldScreenTransform renderTransform, out IntPtr srv, out float aspect)
         {
             srv = IntPtr.Zero;
             aspect = 1f;
-            if (tv.ScreensaverStyle != ScreensaverStyleCustomImage) return false;
+            if (renderTransform.ScreensaverStyle != ScreensaverStyleCustomImage) return false;
 
-            string? url = tv.IdleBrandingUrl;
+            string? url = renderTransform.IdleBrandingUrl;
+            if (string.IsNullOrWhiteSpace(url))
+            {
+                url = tv.IdleBrandingUrl;
+            }
+
             if (string.IsNullOrWhiteSpace(url))
             {
                 url = _roomVenueSettings?.IdleBrandingUrl;
@@ -2692,6 +2708,89 @@ namespace XivMediaPlayer
 
             aspect = width / (float)height;
             return true;
+        }
+
+        internal void ApplyIdleBrandingUrl(string? imageUrl)
+        {
+            if (_worldRenderer?.Transform == null || IsBannerEditActive()) return;
+
+            string trimmed = imageUrl?.Trim() ?? string.Empty;
+            var transform = _worldRenderer.Transform;
+            string previous = transform.IdleBrandingUrl ?? string.Empty;
+            if (string.Equals(previous, trimmed, StringComparison.OrdinalIgnoreCase)
+                && transform.ScreensaverStyle == ScreensaverStyleCustomImage)
+            {
+                return;
+            }
+
+            transform.IdleBrandingUrl = trimmed;
+            if (!string.IsNullOrWhiteSpace(trimmed))
+            {
+                transform.ScreensaverStyle = ScreensaverStyleCustomImage;
+            }
+
+            if (!string.IsNullOrWhiteSpace(previous)
+                && !string.Equals(previous, trimmed, StringComparison.OrdinalIgnoreCase))
+            {
+                _imageTextureCache.Invalidate(previous);
+            }
+
+            if (!string.IsNullOrWhiteSpace(trimmed))
+            {
+                _imageTextureCache.RequestLoad(trimmed);
+            }
+
+            if (CurrentTvPlacement != null)
+            {
+                CopyTransformToTv(CurrentTvPlacement, transform);
+                UpsertRoomTv(CurrentTvPlacement);
+            }
+
+            SchedulePlacementServerSync();
+        }
+
+        private void PreloadTvIdleBrandingTextures(IEnumerable<TvPlacement> tvs)
+        {
+            foreach (var tv in tvs)
+            {
+                if (tv == null || tv.ScreensaverStyle != ScreensaverStyleCustomImage) continue;
+                if (!string.IsNullOrWhiteSpace(tv.IdleBrandingUrl))
+                {
+                    _imageTextureCache.RequestLoad(tv.IdleBrandingUrl);
+                }
+            }
+        }
+
+        private bool ShouldPreviewTvScreensaver(
+            TvPlacement tv,
+            WorldScreenTransform renderTransform,
+            float baseShowScreensaver,
+            bool isPlaying)
+        {
+            if (baseShowScreensaver > 0.5f) return true;
+            if (isPlaying || _isResolvingMedia || IsMediaLoading) return false;
+            if (_screenSettingsWindow?.IsOpen != true || CurrentTvPlacement == null) return false;
+            if (!string.Equals(tv.Id, CurrentTvPlacement.Id, StringComparison.Ordinal)) return false;
+            if (renderTransform.ScreensaverStyle != ScreensaverStyleCustomImage) return false;
+            return !string.IsNullOrWhiteSpace(renderTransform.IdleBrandingUrl);
+        }
+
+        private void ApplyRoomTvsPreferringLocal(string primaryKey, IEnumerable<TvPlacement> serverTvs)
+        {
+            var localById = _roomTvPlacements
+                .Where(t => t != null && t.LocationKey == primaryKey)
+                .ToDictionary(t => t.Id, StringComparer.Ordinal);
+
+            foreach (var serverTv in serverTvs)
+            {
+                if (!localById.ContainsKey(serverTv.Id))
+                {
+                    localById[serverTv.Id] = serverTv;
+                }
+            }
+
+            _roomTvPlacements.RemoveAll(t => t != null && t.LocationKey == primaryKey);
+            _roomTvPlacements.AddRange(localById.Values.Where(IsValidTvPlacement));
         }
 
         internal bool TryGetBannerImageAspect(BannerPlacement? banner, out float widthOverHeight)
@@ -3705,20 +3804,33 @@ namespace XivMediaPlayer
             {
                 _nearbyTvs = nearbyCopy;
 
-                var mergedRoomTvs = new List<TvPlacement>(roomTvsSnapshot);
-                var serverTvIds = new HashSet<string>(mergedRoomTvs.Select(t => t.Id));
-                foreach (var localTv in _roomTvPlacements.Where(t => t != null && t.LocationKey == primaryKey && !serverTvIds.Contains(t.Id)))
+                bool preferLocalPlacements = ShouldPreferLocalPlacementEdits();
+                if (preferLocalPlacements)
                 {
-                    mergedRoomTvs.Add(CopyTvPlacementForSync(localTv));
+                    ApplyRoomTvsPreferringLocal(primaryKey, roomTvsSnapshot);
+                }
+                else
+                {
+                    var mergedRoomTvs = new List<TvPlacement>(roomTvsSnapshot);
+                    var serverTvIds = new HashSet<string>(mergedRoomTvs.Select(t => t.Id));
+                    foreach (var localTv in _roomTvPlacements.Where(t => t != null && t.LocationKey == primaryKey && !serverTvIds.Contains(t.Id)))
+                    {
+                        mergedRoomTvs.Add(CopyTvPlacementForSync(localTv));
+                    }
+
+                    _roomTvPlacements.Clear();
+                    _roomTvPlacements.AddRange(mergedRoomTvs.Where(IsValidTvPlacement));
                 }
 
-                _roomTvPlacements.Clear();
-                _roomTvPlacements.AddRange(mergedRoomTvs.Where(IsValidTvPlacement));
                 _roomTvPlacements.RemoveAll(t => t == null);
 
-                if (mergedRoomTvs.Count > 0)
+                var mergedRoomTvsForSelection = _roomTvPlacements
+                    .Where(t => t != null && t.LocationKey == primaryKey)
+                    .ToList();
+
+                if (mergedRoomTvsForSelection.Count > 0)
                 {
-                    var preferredTv = SelectPreferredTv(mergedRoomTvs) ?? mergedRoomTvs[0];
+                    var preferredTv = SelectPreferredTv(mergedRoomTvsForSelection) ?? mergedRoomTvsForSelection[0];
                     if (!IsBannerEditActive())
                     {
                         CurrentTvPlacement = preferredTv;
@@ -3729,12 +3841,12 @@ namespace XivMediaPlayer
                         }
                     }
 
-                    foreach (var tv in mergedRoomTvs)
+                    foreach (var tv in mergedRoomTvsForSelection)
                     {
                         PersistTvPlacementLocally(tv);
                     }
 
-                    _pluginLog.Info($"[Social] Loaded {mergedRoomTvs.Count} TV placement(s) for room {preferredTv.LocationKey}.");
+                    _pluginLog.Info($"[Social] Loaded {mergedRoomTvsForSelection.Count} TV placement(s) for room {preferredTv.LocationKey}.");
                 }
                 else
                 {
@@ -3755,7 +3867,8 @@ namespace XivMediaPlayer
                     _imageTextureCache.RequestLoad(_roomVenueSettings.IdleBrandingUrl);
                 }
 
-                bool preferLocalPlacements = ShouldPreferLocalPlacementEdits();
+                PreloadTvIdleBrandingTextures(_roomTvPlacements.Where(t => t != null && t.LocationKey == primaryKey));
+
                 if (preferLocalPlacements)
                 {
                     ApplyRoomBannersPreferringLocal(primaryKey, serverBannersSnapshot);
@@ -5197,11 +5310,14 @@ namespace XivMediaPlayer
 
                                     bool isolateComposite = multiQuad && pass != Compositing.WorldTvRenderPass.GlowOnly;
 
-                                    TryResolveTvBrandingTexture(tv, out IntPtr tvBrandingSrv, out float tvBrandingAspect);
+                                    TryResolveTvBrandingTexture(tv, tvTransform, out IntPtr tvBrandingSrv, out float tvBrandingAspect);
+                                    float tvShowScreensaver = ShouldPreviewTvScreensaver(tv, tvTransform, showScreensaver, isPlaying)
+                                        ? 1.0f
+                                        : showScreensaver;
 
                                     _worldRenderer.Render(videoSrv, videoWidth, videoHeight, videoTrueWidth, videoTrueHeight, _depthCapture,
                                         _prevCameraPos ?? cameraPos, _prevCameraForward ?? cameraForward, _prevCameraRight ?? cameraRight, _prevCameraUp ?? cameraUp,
-                                        fovY, aspectRatio, _uiCapture, nearPlane, farPlane, screenHover, progress, bufferProgress, playbackState, lockState, volume, screenOverlay, _config.LoopEnabled, _config.ShuffleEnabled, timeSeconds, showScreensaver, useDifferenceFallback: useDifferenceFallback,
+                                        fovY, aspectRatio, _uiCapture, nearPlane, farPlane, screenHover, progress, bufferProgress, playbackState, lockState, volume, screenOverlay, _config.LoopEnabled, _config.ShuffleEnabled, timeSeconds, tvShowScreensaver, useDifferenceFallback: useDifferenceFallback,
                                         viewProjMatrix: _prevViewProjMatrix ?? viewProjMatrix, viewportPos: mainViewport.Pos, viewportSize: mainViewport.Size, uiBlendThreshold: _config.UIBlendThreshold,
                                         loadingPulse: IsMediaLoading ? MediaLoadingPulse : 0f, isLoadingOverlay: IsMediaLoading,
                                         idleBrandingSrvPtr: tvBrandingSrv, idleBrandingAspect: tvBrandingAspect,

@@ -467,6 +467,19 @@ namespace XivMediaPlayer.Windows {
         string.Format(Localize("Screen: {0:F1}m x {1:F1}m at ({2:F1}, {3:F1}, {4:F1})"), _scale.X, _scale.Y, _position.X, _position.Y, _position.Z));
     }
 
+    private void DrawIdleBrandingUrlField(bool applyLive) {
+      bool urlChanged = ImGui.InputText(Localize("Screensaver Image URL"), ref _idleBrandingUrl, 512);
+      if (applyLive && (urlChanged || ImGui.IsItemDeactivatedAfterEdit()))
+      {
+        if (!string.IsNullOrWhiteSpace(_idleBrandingUrl))
+        {
+          _screensaverStyle = 6;
+          _transform.ScreensaverStyle = 6;
+        }
+        _plugin.ApplyIdleBrandingUrl(_idleBrandingUrl);
+      }
+    }
+
     private void DrawBannerImageUrlField(bool applyLive) {
       bool urlChanged = ImGui.InputText(Localize("Banner Image URL"), ref _bannerImageUrl, 512);
       if (applyLive && (urlChanged || ImGui.IsItemDeactivatedAfterEdit())) {
@@ -565,8 +578,19 @@ namespace XivMediaPlayer.Windows {
       appearanceChanged |= ImGui.Combo(Localize("Screensaver Style"), ref _screensaverStyle, screensaverStyles, screensaverStyles.Length);
 
       if (_screensaverStyle == 6) {
-        appearanceChanged |= ImGui.InputText(Localize("Screensaver Image URL"), ref _idleBrandingUrl, 512);
-        ImGui.TextWrapped(Localize("Shown when the TV is idle (after ~5 seconds with nothing playing). Sync the TV on the Sync tab to share with visitors."));
+        DrawIdleBrandingUrlField(applyLive: true);
+        if (_plugin.IsImageTextureReady(_idleBrandingUrl))
+        {
+          ImGui.TextDisabled(Localize("Image loaded. Preview shows on the TV while this window is open and nothing is playing."));
+        }
+        else if (!string.IsNullOrWhiteSpace(_idleBrandingUrl))
+        {
+          ImGui.TextDisabled(Localize("Downloading image... It appears once loaded, or after ~5 seconds idle with nothing playing."));
+        }
+        else
+        {
+          ImGui.TextWrapped(Localize("Paste any direct HTTPS image link — file extensions are optional. Stop playback to preview idle screensaver images."));
+        }
       }
 
       bool saveAppearance = ImGui.IsItemDeactivatedAfterEdit() || ImGui.IsItemDeactivated();
@@ -577,6 +601,10 @@ namespace XivMediaPlayer.Windows {
         _transform.ScreensaverColor = _screensaverColor;
         _transform.ScreensaverStyle = _screensaverStyle;
         _transform.IdleBrandingUrl = _idleBrandingUrl?.Trim() ?? string.Empty;
+        if (_screensaverStyle == 6 && !string.IsNullOrWhiteSpace(_idleBrandingUrl))
+        {
+          _plugin.ApplyIdleBrandingUrl(_idleBrandingUrl);
+        }
       }
       if (saveAppearance || appearanceChanged) {
         _onSave?.Invoke();

@@ -1454,6 +1454,7 @@ float4 PS(VS_OUT input) : SV_TARGET {
       var savedRTVs = new ID3D11RenderTargetView[1];
       ID3D11DepthStencilView savedDSV;
       _context.OMGetRenderTargets(1, savedRTVs, out savedDSV);
+      ID3D11ShaderResourceView[]? ownedSrvs = null;
 
       try {
         _context.ClearRenderTargetView(_renderTargetView, new Vortice.Mathematics.Color4(0, 0, 0, 0));
@@ -1548,6 +1549,7 @@ float4 PS(VS_OUT input) : SV_TARGET {
         _context.PSSetConstantBuffer(0, _constantBuffer);
         _context.PSSetConstantBuffer(1, _uiRectBuffer);
         var srvs = new ID3D11ShaderResourceView[9];
+        ownedSrvs = srvs;
         if (videoSrvPtr != IntPtr.Zero) System.Runtime.InteropServices.Marshal.AddRef(videoSrvPtr);
         srvs[0] = videoSrvPtr != IntPtr.Zero ? new ID3D11ShaderResourceView(videoSrvPtr) : null;
         srvs[1] = depthSrv;
@@ -1590,6 +1592,16 @@ float4 PS(VS_OUT input) : SV_TARGET {
         
         savedRTVs[0]?.Dispose();
         savedDSV?.Dispose();
+        if (ownedSrvs != null)
+        {
+          ownedSrvs[0]?.Dispose();
+          ownedSrvs[3]?.Dispose();
+          ownedSrvs[4]?.Dispose();
+          ownedSrvs[5]?.Dispose();
+          ownedSrvs[6]?.Dispose();
+          ownedSrvs[7]?.Dispose();
+          ownedSrvs[8]?.Dispose();
+        }
       }
     }
 
