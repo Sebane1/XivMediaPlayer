@@ -272,7 +272,17 @@ namespace MediaPlayerCore
                     }
 
                     using var response = await session.Client.SendAsync(requestMessage, HttpCompletionOption.ResponseHeadersRead);
-                    
+
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        res.StatusCode = (int)response.StatusCode;
+                        res.StatusDescription = response.ReasonPhrase;
+                        System.Diagnostics.Debug.WriteLine(
+                            $"[StreamProxy] Upstream media request failed ({(int)response.StatusCode}) for {targetUrl[..Math.Min(targetUrl.Length, 120)]}...");
+                        res.Close();
+                        return;
+                    }
+
                     res.ContentType = response.Content.Headers.ContentType?.ToString() ?? "application/octet-stream";
 
                     using var stream = await response.Content.ReadAsStreamAsync();

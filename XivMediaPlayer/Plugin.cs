@@ -1509,6 +1509,9 @@ namespace XivMediaPlayer
         }
         private bool _isIntentionallyPaused = false;
         private DateTime _lastUrlLoadTime = DateTime.MinValue;
+        private DateTime _localPlaybackSyncProtectionUntil = DateTime.MinValue;
+        private string? _protectedLocalStreamUrl;
+        private const int LocalPlaybackSyncProtectionSeconds = 30;
 
         /// <summary>
         /// True while yt-dlp is resolving or VLC has not produced the first video frame yet.
@@ -2370,6 +2373,7 @@ namespace XivMediaPlayer
             _streamSetCooldown.Reset();
             _mediaErrorCount = 0; // Reset error count when stream stops
             _isLocalDj = false;
+            ClearLocalPlaybackSyncProtection();
 
             if (wasPlaying)
             {
@@ -2736,6 +2740,7 @@ namespace XivMediaPlayer
                         _isLocalDj = true;
                         _currentMediaOwnerId = _config.OwnerId;
                     }
+                    ClearLocalPlaybackSyncProtection();
                     _pluginLog.Information($"[Sync] Payload successfully pushed to server.");
                 }
                 catch (InvalidOperationException)
@@ -2750,12 +2755,14 @@ namespace XivMediaPlayer
                     _isLocalDj = false;
                     _currentMediaOwnerId = "";
                     PrintErrorChat("[Media Player] Cannot share media: The TV in this room is locked by its owner.");
+                    MarkLocalPlaybackSyncProtected(lastUrl);
                     await FetchMediaFromServerAsync();
                 }
                 catch (ArgumentException ex)
                 {
                     _isLocalDj = false; // Strip DJ status so background sync stops spamming the server
                     _currentMediaOwnerId = "";
+                    MarkLocalPlaybackSyncProtected(lastUrl);
 
                     if (IsPlayerAlone())
                     {
@@ -2877,28 +2884,39 @@ namespace XivMediaPlayer
 
             if (isDifferentUrl)
             {
-                _pluginLog.Information($"[Social] Syncing NEW media from server: {sync.CurrentUrl} at {targetTimeMs}ms (Playing: {sync.IsPlaying})");
-                EnqueueFrameworkAction(() =>
+                if (IsLocalPlaybackSyncProtected() && localIsPlaying)
                 {
-                    PrintChat("[Media Player] Server Sync: Now playing media loaded by the room owner.");
-
-                    _mediaQueue.Clear();
-                    foreach (var url in state.Playlist) _mediaQueue.Enqueue(url);
-
-                    if (_playerObject != null)
+                    _pluginLog.Information("[Social] Ignoring server media change because local playback is sync-protected (room share failed).");
+                }
+                else
+                {
+                    _pluginLog.Information($"[Social] Syncing NEW media from server: {sync.CurrentUrl} at {targetTimeMs}ms (Playing: {sync.IsPlaying})");
+                    EnqueueFrameworkAction(() =>
                     {
-                        // Starts the stream. If sync.IsPlaying is false, we should pause it immediately after it loads...
-                        // But yt-dlp might take a while, so we just let it start and the next poll will poll it.
-                        PlayRouted(state.CurrentUrl, CurrentAudioSource, (int)targetTimeMs, isAutoSync: true);
-                    }
-                });
+                        PrintChat("[Media Player] Server Sync: Now playing media loaded by the room owner.");
+
+                        _mediaQueue.Clear();
+                        foreach (var url in state.Playlist) _mediaQueue.Enqueue(url);
+
+                        if (_playerObject != null)
+                        {
+                            // Starts the stream. If sync.IsPlaying is false, we should pause it immediately after it loads...
+                            // But yt-dlp might take a while, so we just let it start and the next poll will poll it.
+                            PlayRouted(state.CurrentUrl, CurrentAudioSource, (int)targetTimeMs, isAutoSync: true);
+                        }
+                    });
+                }
             }
             else if (activeStream != null)
             {
                 if (isOutofSync)
                 {
+                    if (IsLocalPlaybackSyncProtected())
+                    {
+                        _pluginLog.Information("[Social] Ignoring timecode sync because local playback is sync-protected (room share failed).");
+                    }
                     // If the server is paused, and the data is old, ignore timecode sync!
-                    if (!sync.IsPlaying && sync.DataAgeMs >= 15000 && localIsPlaying)
+                    else if (!sync.IsPlaying && sync.DataAgeMs >= 15000 && localIsPlaying)
                     {
                         _pluginLog.Information("[Social] Ignoring timecode sync because server is paused and data is stale.");
                     }
@@ -2923,8 +2941,15 @@ namespace XivMediaPlayer
                         // Check sync staleness or new stream status
                         if (sync.DataAgeMs < 15000 || isNewlyLoaded)
                         {
-                            _pluginLog.Information($"[Social] Server says paused (NewlyLoaded: {isNewlyLoaded}). Pausing.");
-                            activeStream.Pause();
+                            if (IsLocalPlaybackSyncProtected())
+                            {
+                                _pluginLog.Information($"[Social] Ignoring server pause because local playback is sync-protected (NewlyLoaded: {isNewlyLoaded}).");
+                            }
+                            else
+                            {
+                                _pluginLog.Information($"[Social] Server says paused (NewlyLoaded: {isNewlyLoaded}). Pausing.");
+                                activeStream.Pause();
+                            }
                         }
                         else
                         {
@@ -4003,6 +4028,29 @@ namespace XivMediaPlayer
         #region Utilities
 
         private static bool IsHlsStreamUrl(string url) => YtDlpManager.IsHlsStreamUrl(url);
+
+        private void MarkLocalPlaybackSyncProtected(string? url)
+        {
+            if (string.IsNullOrEmpty(url) || _mediaManager?.ActiveStream == null) return;
+
+            _protectedLocalStreamUrl = CleanUrl(url);
+            _localPlaybackSyncProtectionUntil = DateTime.UtcNow.AddSeconds(LocalPlaybackSyncProtectionSeconds);
+            _pluginLog.Information($"[Social] Local playback sync protection active for {LocalPlaybackSyncProtectionSeconds}s ({_protectedLocalStreamUrl}).");
+        }
+
+        private bool IsLocalPlaybackSyncProtected()
+        {
+            if (DateTime.UtcNow >= _localPlaybackSyncProtectionUntil) return false;
+            if (string.IsNullOrEmpty(_protectedLocalStreamUrl)) return false;
+            if (string.IsNullOrEmpty(_lastStreamURL)) return false;
+            return CleanUrl(_lastStreamURL) == _protectedLocalStreamUrl;
+        }
+
+        private void ClearLocalPlaybackSyncProtection()
+        {
+            _localPlaybackSyncProtectionUntil = DateTime.MinValue;
+            _protectedLocalStreamUrl = null;
+        }
 
         private static string CleanUrl(string url)
         {

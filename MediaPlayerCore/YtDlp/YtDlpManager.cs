@@ -985,8 +985,7 @@ namespace MediaPlayerCore.YtDlp
                       : "bv+ba/b";
                 }
 
-                string result = await RunYtDlp($"--no-playlist --get-url -f \"{formatArg}\" \"{url}\"", isLiveYouTube: youTubeLive == true);
-                string[]? streamUrls = ParseStreamUrls(result);
+                string[]? streamUrls = await ResolveDirectStreamUrlsAsync(url, formatArg, youTubeLive == true);
 
                 if (streamUrls != null && streamUrls.Length > 0)
                 {
@@ -1532,12 +1531,16 @@ namespace MediaPlayerCore.YtDlp
             return null;
         }
 
-        private async Task<string> RunYtDlp(string arguments, bool withCommonArgs = true, bool isLiveYouTube = false)
+        private async Task<string> RunYtDlp(
+            string arguments,
+            bool withCommonArgs = true,
+            bool isLiveYouTube = false,
+            string? forceYouTubeClient = null)
         {
             return await Task.Run(() =>
             {
                 // Inject cookies if available (e.g. from VRCVideoCacher browser extension)
-                string fullArgs = (withCommonArgs ? BuildCommonArgs(isLiveYouTube) : "") + arguments;
+                string fullArgs = (withCommonArgs ? BuildCommonArgs(isLiveYouTube, forceYouTubeClient) : "") + arguments;
                 var psi = new ProcessStartInfo
                 {
                     FileName = _ytDlpPath,
@@ -1678,12 +1681,92 @@ namespace MediaPlayerCore.YtDlp
         /// </summary>
         public string? CookieBrowser { get; set; }
 
+        private async Task<string[]?> ResolveDirectStreamUrlsAsync(string url, string formatArg, bool isLiveYouTube)
+        {
+            string[]? streamUrls = await TryGetStreamUrlsAsync(url, formatArg, isLiveYouTube, forceYouTubeClient: null);
+            if (streamUrls != null && streamUrls.Length > 0)
+            {
+                return streamUrls;
+            }
+
+            if (!IsYouTubeUrl(url) || isLiveYouTube)
+            {
+                return null;
+            }
+
+            OnStatusUpdate?.Invoke(this, "Retrying stream resolution with YouTube tv client...");
+            return await TryGetStreamUrlsAsync(url, formatArg, isLiveYouTube: false, forceYouTubeClient: "tv");
+        }
+
+        private async Task<string[]?> TryGetStreamUrlsAsync(
+            string url,
+            string formatArg,
+            bool isLiveYouTube,
+            string? forceYouTubeClient)
+        {
+            try
+            {
+                string result = await RunYtDlp(
+                    $"--no-playlist --get-url -f \"{formatArg}\" \"{url}\"",
+                    isLiveYouTube: isLiveYouTube,
+                    forceYouTubeClient: forceYouTubeClient);
+                string[]? streamUrls = ParseStreamUrls(result);
+                if (streamUrls == null || streamUrls.Length == 0)
+                {
+                    return null;
+                }
+
+                await TryCaptureFormatHttpHeadersAsync(url, formatArg, isLiveYouTube, forceYouTubeClient);
+                return streamUrls;
+            }
+            catch (Exception e)
+            {
+                OnError?.Invoke(this, e);
+                return null;
+            }
+        }
+
+        private async Task TryCaptureFormatHttpHeadersAsync(
+            string url,
+            string formatArg,
+            bool isLiveYouTube,
+            string? forceYouTubeClient)
+        {
+            try
+            {
+                string result = await RunYtDlp(
+                    $"--no-playlist -j -f \"{formatArg}\" \"{url}\"",
+                    isLiveYouTube: isLiveYouTube,
+                    forceYouTubeClient: forceYouTubeClient);
+                YtDlpMetadata? info = TryParseYtDlpJson(result);
+                if (info?.HttpHeaders != null && info.HttpHeaders.Count > 0)
+                {
+                    LastResolvedHttpHeaders = info.HttpHeaders;
+                }
+            }
+            catch
+            {
+                // Non-fatal; BuildPlaybackHeaders still adds cookies and YouTube defaults.
+            }
+        }
+
+        private string BuildPotProviderExtractorArgs()
+        {
+            if (!_bgutilServerReady)
+            {
+                return string.Empty;
+            }
+
+            return "--extractor-args \"youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416\" ";
+        }
+
         /// <summary>
         /// Builds the common argument prefix (cookies, etc.) for all yt-dlp calls.
         /// </summary>
-        private string BuildCommonArgs(bool isLiveYouTube = false)
+        private string BuildCommonArgs(bool isLiveYouTube = false, string? forceYouTubeClient = null)
         {
-            string args = $"--extractor-args \"{BuildYouTubeExtractorArgs(isLive: isLiveYouTube, includeSabrFormats: false)}\" --extractor-args \"youtubetab:skip=authcheck\" ";
+            string args = $"--extractor-args \"{BuildYouTubeExtractorArgs(isLive: isLiveYouTube, includeSabrFormats: false, forceClient: forceYouTubeClient)}\" --extractor-args \"youtubetab:skip=authcheck\" ";
+            args += BuildPotProviderExtractorArgs();
 
             if (File.Exists(DenoExecutablePath))
             {
@@ -1715,17 +1798,17 @@ namespace MediaPlayerCore.YtDlp
 
         private bool HasYouTubeAuth => HasCookies || !string.IsNullOrEmpty(CookieBrowser);
 
-        private string BuildYouTubeExtractorArgs(bool isLive, bool includeSabrFormats)
+        private string BuildYouTubeExtractorArgs(bool isLive, bool includeSabrFormats, string? forceClient = null)
         {
             // web/mweb need PO tokens from bgutil; tv works with cookies without tokens.
             // android often exposes m3u8_native for YouTube live streams.
-            string clients = isLive && !includeSabrFormats
+            string clients = forceClient ?? (isLive && !includeSabrFormats
                 ? (HasYouTubeAuth
                     ? (_bgutilServerReady ? "android,web,tv" : "android,tv")
                     : "android,tv,web_embedded")
                 : (HasYouTubeAuth
                     ? (_bgutilServerReady ? "web,mweb,tv" : "tv")
-                    : (_bgutilServerReady ? "tv,mweb,web_embedded" : "tv,web_embedded"));
+                    : (_bgutilServerReady ? "tv,mweb,web_embedded" : "tv,web_embedded")));
 
             var parts = new List<string>
             {
@@ -1881,6 +1964,12 @@ namespace MediaPlayerCore.YtDlp
         {
             string args = "--extractor-args \"youtubetab:skip=authcheck\" ";
             args += $"--extractor-args \"{BuildSabrYouTubeExtractorArgs(isLive)}\" ";
+            args += BuildPotProviderExtractorArgs();
+
+            if (Directory.Exists(PluginsDir))
+            {
+                args += $"--plugin-dirs {QuotedYtDlpPath(PluginsDir)} ";
+            }
 
             if (File.Exists(DenoExecutablePath))
             {
