@@ -8,8 +8,8 @@
       "Texturing"
     ],
     "InternalName": "XivMediaPlayer",
-    "AssemblyVersion": "0.1.4.0",
-    "TestingAssemblyVersion": "0.1.4.0",
+    "AssemblyVersion": "0.1.4.1",
+    "TestingAssemblyVersion": "0.1.4.1",
     "RepoUrl": "https://github.com/Sebane1/XivMediaPlayer",
     "ApplicableVersion": "any",
     "DalamudApiLevel": 15,
@@ -17,9 +17,9 @@
     "IsTestingExclusive": "False",
     "DownloadCount": 0,
     "LastUpdate": 0,
-    "DownloadLinkInstall": "https://github.com/Sebane1/XivMediaPlayer/releases/download/0.1.4.0/XivMediaPlayer.zip",
-    "DownloadLinkTesting": "https://github.com/Sebane1/XivMediaPlayer/releases/download/0.1.4.0/XivMediaPlayer.zip",
-    "DownloadLinkUpdate": "https://github.com/Sebane1/XivMediaPlayer/releases/download/0.1.4.0/XivMediaPlayer.zip",
+    "DownloadLinkInstall": "https://github.com/Sebane1/XivMediaPlayer/releases/download/0.1.4.1/XivMediaPlayer.zip",
+    "DownloadLinkTesting": "https://github.com/Sebane1/XivMediaPlayer/releases/download/0.1.4.1/XivMediaPlayer.zip",
+    "DownloadLinkUpdate": "https://github.com/Sebane1/XivMediaPlayer/releases/download/0.1.4.1/XivMediaPlayer.zip",
     "IconUrl": ""
   }
 ]
