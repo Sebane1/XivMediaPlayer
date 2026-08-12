@@ -920,37 +920,56 @@ namespace MediaPlayerCore.YtDlp
                         if (_proxyPort == 0) StartProxyListener();
                         if (_proxyPort != 0)
                         {
-                            await EnsureBgutilServerAsync();
-                            bool isLive = false;
-
-                            SabrSession? existing = _sabrSessions.Values.FirstOrDefault(
-                                s => s.Url == url && !s.Failed && !s.IsLive);
-                            if (existing != null)
+                            for (int sabrAttempt = 0; sabrAttempt < 2; sabrAttempt++)
                             {
-                                existing.LastAccessUtc = DateTime.UtcNow;
-                                string[]? localPaths = await TryResolveSabrLocalPlayUrl(existing);
-                                if (localPaths != null)
+                                await EnsureBgutilServerAsync();
+                                bool isLive = false;
+
+                                SabrSession? existing = _sabrSessions.Values.FirstOrDefault(
+                                    s => s.Url == url && !s.Failed && !s.IsLive);
+                                if (existing != null)
                                 {
-                                    OnStatusUpdate?.Invoke(this, "SABR reusing active download.");
-                                    return localPaths;
+                                    existing.LastAccessUtc = DateTime.UtcNow;
+                                    string[]? localPaths = await TryResolveSabrLocalPlayUrl(existing);
+                                    if (localPaths != null)
+                                    {
+                                        OnStatusUpdate?.Invoke(this, "SABR reusing active download.");
+                                        return localPaths;
+                                    }
                                 }
-                            }
 
-                            ReleaseSabrSessions();
-                            SabrSession session = StartSabrSession(url, isLive);
-                            if (session.Failed)
-                            {
-                                OnStatusUpdate?.Invoke(this, "SABR Proxy failed to start. Falling back to direct yt-dlp resolution.");
-                            }
-                            else
-                            {
-                                string[]? localPaths = await TryResolveSabrLocalPlayUrl(session);
-                                if (localPaths != null)
+                                ReleaseSabrSessions();
+                                SabrSession session = StartSabrSession(url, isLive);
+                                if (session.Failed)
                                 {
-                                    return localPaths;
+                                    if (sabrAttempt == 0 && IsPoTokenProviderFailure(session.Error))
+                                    {
+                                        OnStatusUpdate?.Invoke(this, "PO Token server unreachable; restarting YouTube helper...");
+                                        _bgutilServerReady = false;
+                                        StopBgutilServerProcess();
+                                        continue;
+                                    }
+
+                                    OnStatusUpdate?.Invoke(this, "SABR Proxy failed to start. Falling back to direct yt-dlp resolution.");
+                                    break;
+                                }
+
+                                string[]? resolvedPaths = await TryResolveSabrLocalPlayUrl(session);
+                                if (resolvedPaths != null)
+                                {
+                                    return resolvedPaths;
+                                }
+
+                                if (sabrAttempt == 0 && IsPoTokenProviderFailure(session.Error))
+                                {
+                                    OnStatusUpdate?.Invoke(this, "PO Token server unreachable; restarting YouTube helper...");
+                                    _bgutilServerReady = false;
+                                    StopBgutilServerProcess();
+                                    continue;
                                 }
 
                                 OnStatusUpdate?.Invoke(this, "SABR Proxy failed to buffer. Falling back to direct yt-dlp resolution.");
+                                break;
                             }
                         }
                     }
@@ -2869,15 +2888,34 @@ namespace MediaPlayerCore.YtDlp
 
         private const string BgutilReleaseZipUrl = "https://github.com/Brainicism/bgutil-ytdlp-pot-provider/archive/refs/tags/1.3.1.zip";
 
+        private static bool IsPoTokenProviderFailure(string? text)
+        {
+            if (string.IsNullOrWhiteSpace(text)) return false;
+
+            return text.Contains("127.0.0.1:4416", StringComparison.OrdinalIgnoreCase)
+                || text.Contains("pot:bgutil:http", StringComparison.OrdinalIgnoreCase)
+                || text.Contains("GVS PO Token", StringComparison.OrdinalIgnoreCase)
+                || text.Contains("requires a GVS PO Token", StringComparison.OrdinalIgnoreCase);
+        }
+
         private async Task EnsureBgutilServerAsync()
         {
             if (!EnableSabrProxy) return;
-            if (_bgutilServerReady) return;
 
             await _bgutilServerGate.WaitAsync();
             try
             {
-                if (_bgutilServerReady) return;
+                if (_bgutilServerReady)
+                {
+                    if (await IsBgutilServerRespondingAsync() && !TryGetBgutilProcessExitReason(out _))
+                    {
+                        return;
+                    }
+
+                    _bgutilServerReady = false;
+                    StopBgutilServerProcess();
+                    OnStatusUpdate?.Invoke(this, "PO Token server was offline; restarting...");
+                }
 
                 await CleanupStaleBgutilInstallDirsAsync().ConfigureAwait(false);
 
