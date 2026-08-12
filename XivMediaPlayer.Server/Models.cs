@@ -14,6 +14,7 @@ namespace XivMediaPlayer.Server.Models
         public float RotationZ { get; set; }
         public float ScaleX { get; set; }
         public float ScaleY { get; set; }
+        public int ScaleAspectMode { get; set; } = 0;
         public string OwnerId { get; set; } = string.Empty;
         public bool IsLocked { get; set; } = false;
 

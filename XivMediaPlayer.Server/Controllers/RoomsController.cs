@@ -120,6 +120,7 @@ namespace XivMediaPlayer.Server.Controllers
             target.RotationZ = source.RotationZ;
             target.ScaleX = source.ScaleX;
             target.ScaleY = source.ScaleY;
+            target.ScaleAspectMode = source.ScaleAspectMode;
             target.Opacity = source.Opacity;
             target.IsProjectorMode = source.IsProjectorMode;
             target.ScreensaverColorR = source.ScreensaverColorR;

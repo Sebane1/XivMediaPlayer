@@ -131,6 +131,9 @@ namespace XivMediaPlayer.Server.Migrations
                     b.Property<float>("ScaleY")
                         .HasColumnType("REAL");
 
+                    b.Property<int>("ScaleAspectMode")
+                        .HasColumnType("INTEGER");
+
                     b.Property<float>("ScreensaverColorB")
                         .HasColumnType("REAL");
 

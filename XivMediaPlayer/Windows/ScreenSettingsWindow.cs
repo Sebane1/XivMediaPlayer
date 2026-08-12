@@ -71,6 +71,7 @@ namespace XivMediaPlayer.Windows {
       _position = _transform.Position;
       _rotation = new Vector2(_transform.RotationDegrees.Y, _transform.RotationDegrees.X); // yaw, pitch
       _scale = _transform.Scale;
+      _aspectRatio = ResolveAspectMode(_scale, _transform.ScaleAspectMode);
       _enabled = _transform.Enabled;
       _opacity = _transform.Opacity;
       _isProjectorMode = _transform.IsProjectorMode;
@@ -78,15 +79,28 @@ namespace XivMediaPlayer.Windows {
       _screensaverStyle = _transform.ScreensaverStyle;
     }
 
+    private static int ResolveAspectMode(Vector2 scale, int storedMode) {
+      if (storedMode == 2) return 2;
+      if (scale.X > 0.001f) {
+        float ratio = scale.Y / scale.X;
+        if (MathF.Abs(ratio - (9f / 16f)) < 0.05f) return 0;
+        if (MathF.Abs(ratio - (3f / 4f)) < 0.05f) return 1;
+      }
+
+      return storedMode is 0 or 1 ? storedMode : 2;
+    }
+
     private void SyncToTransform() {
       _transform.Position = _position;
       _transform.RotationDegrees = new Vector3(_rotation.Y, _rotation.X, 0); // pitch, yaw, roll
       _transform.Scale = _scale;
+      _transform.ScaleAspectMode = _aspectRatio;
       _transform.Enabled = _enabled;
       _transform.Opacity = _opacity;
       _transform.IsProjectorMode = _isProjectorMode;
       _transform.ScreensaverColor = _screensaverColor;
       _transform.ScreensaverStyle = _screensaverStyle;
+      _plugin.SyncPlacementManipulatorFromWorkingTransform();
     }
 
     private string Localize(string text) => _plugin.Translate(text);
@@ -775,6 +789,7 @@ namespace XivMediaPlayer.Windows {
         RotationZ = _transform.RotationDegrees.Z,
         ScaleX = _scale.X,
         ScaleY = _scale.Y,
+        ScaleAspectMode = _aspectRatio,
         Opacity = _opacity,
         IsProjectorMode = _isProjectorMode,
         ScreensaverColorR = _screensaverColor.X,
@@ -804,34 +819,56 @@ namespace XivMediaPlayer.Windows {
       _statusColor = new Vector4(1, 1, 1, 1);
 
       try {
-        var firstTv = _plugin.EnsureCurrentTvMaterialized(locationKey);
-        var syncedFirst = await _plugin.ServerClient.RegisterTvAsync(locationKey, firstTv, create: false);
-        if (syncedFirst == null) {
-          syncedFirst = await _plugin.ServerClient.RegisterTvAsync(locationKey, firstTv, create: true);
-        }
-        if (syncedFirst != null) {
-          _plugin.UpsertRoomTv(syncedFirst);
+        var existingTvs = _plugin.RoomTvPlacements
+            .Where(t => t != null && t.LocationKey == locationKey)
+            .ToList();
+
+        TvPlacement anchorTv;
+        TvPlacement? syncedAnchor = null;
+        if (existingTvs.Count > 0) {
+          anchorTv = _plugin.CurrentTvPlacement ?? existingTvs[0];
+        } else {
+          anchorTv = _plugin.MaterializeTvFromWorkingTransform(locationKey);
+          anchorTv.BypassLock = _plugin.IsHousingMenuOpen || locationKey.StartsWith("zone_") || locationKey.StartsWith("island_");
+          syncedAnchor = await _plugin.ServerClient.RegisterTvAsync(locationKey, Plugin.CopyTvPlacementForSync(anchorTv), create: false);
+          if (syncedAnchor == null) {
+            syncedAnchor = await _plugin.ServerClient.RegisterTvAsync(locationKey, Plugin.CopyTvPlacementForSync(anchorTv), create: true);
+          }
         }
 
-        var placement = BuildPlacementFromTransform(locationKey, createNewId: true);
-        placement.PositionX += 2.0f;
+        var anchorForDuplicate = syncedAnchor ?? anchorTv;
+        var placement = Plugin.CloneTvPlacement(anchorForDuplicate, locationKey);
+        placement.OwnerId = _plugin.Config.OwnerId;
+        placement.IsLocked = anchorForDuplicate.IsLocked;
+        placement.BypassLock = _plugin.IsHousingMenuOpen || locationKey.StartsWith("zone_") || locationKey.StartsWith("island_");
+        Plugin.OffsetDuplicateScreenPlacement(placement, anchorForDuplicate);
 
         var result = await _plugin.ServerClient.RegisterTvAsync(locationKey, placement, create: true);
-        if (result != null) {
-          _plugin.UpsertRoomTv(result);
-          _plugin.SelectTvForEditing(result);
-          SyncFromTransform();
-          _statusMessage = "Added another screen for all visitors!";
-          _statusColor = new Vector4(0.3f, 1f, 0.3f, 1);
-          PrintStatus("Added another screen for all visitors!");
-        } else {
-          _plugin.UpsertRoomTv(placement);
-          _plugin.SelectTvForEditing(placement);
-          SyncFromTransform();
-          _statusMessage = "Added screen locally, but the sync server rejected it. Is the server updated for multi-TV?";
-          _statusColor = new Vector4(1, 0.6f, 0.2f, 1);
-          PrintStatusError("Added screen locally, but the sync server rejected it. Is the server updated for multi-TV?");
-        }
+        var syncedAnchorFinal = syncedAnchor;
+        var localPlacement = placement;
+
+        _plugin.RunOnFrameworkThread(() =>
+        {
+          if (syncedAnchorFinal != null) {
+            _plugin.UpsertRoomTv(syncedAnchorFinal);
+          }
+
+          if (result != null) {
+            _plugin.UpsertRoomTv(result);
+            _plugin.SelectTvForEditing(result);
+            SyncFromTransform();
+            _statusMessage = "Added another screen for all visitors!";
+            _statusColor = new Vector4(0.3f, 1f, 0.3f, 1);
+            PrintStatus("Added another screen for all visitors!");
+          } else {
+            _plugin.UpsertRoomTv(localPlacement);
+            _plugin.SelectTvForEditing(localPlacement);
+            SyncFromTransform();
+            _statusMessage = "Added screen locally, but the sync server rejected it. Is the server updated for multi-TV?";
+            _statusColor = new Vector4(1, 0.6f, 0.2f, 1);
+            PrintStatusError("Added screen locally, but the sync server rejected it. Is the server updated for multi-TV?");
+          }
+        });
       } catch (UnauthorizedAccessException) {
         _statusMessage = "Cannot add screen: the current TV is locked by its owner.";
         _statusColor = new Vector4(1, 0.3f, 0.3f, 1);
@@ -865,17 +902,20 @@ namespace XivMediaPlayer.Windows {
       try 
       {
         var result = await _plugin.ServerClient.RegisterTvAsync(locationKey, placement, create: false);
-        if (result != null) {
-          _plugin.UpsertRoomTv(result);
-          _plugin.SelectTvForEditing(result);
-          _statusMessage = "Successfully registered TV for all visitors!";
-          _statusColor = new Vector4(0.3f, 1f, 0.3f, 1);
-          PrintStatus("Successfully registered TV for all visitors!");
-        } else {
-          _statusMessage = "Saved locally, but failed to reach the sync server.";
-          _statusColor = new Vector4(1, 0.6f, 0.2f, 1);
-          PrintStatusError("Saved locally, but failed to reach the sync server.");
-        }
+        _plugin.RunOnFrameworkThread(() =>
+        {
+          if (result != null) {
+            _plugin.UpsertRoomTv(result);
+            _plugin.SelectTvForEditing(result);
+            _statusMessage = "Successfully registered TV for all visitors!";
+            _statusColor = new Vector4(0.3f, 1f, 0.3f, 1);
+            PrintStatus("Successfully registered TV for all visitors!");
+          } else {
+            _statusMessage = "Saved locally, but failed to reach the sync server.";
+            _statusColor = new Vector4(1, 0.6f, 0.2f, 1);
+            PrintStatusError("Saved locally, but failed to reach the sync server.");
+          }
+        });
       } 
       catch (UnauthorizedAccessException) 
       {

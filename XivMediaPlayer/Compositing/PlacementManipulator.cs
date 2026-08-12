@@ -64,12 +64,22 @@ namespace XivMediaPlayer.Compositing
             _dragMode = DragMode.None;
         }
 
-        public void SetSelection(TargetType type, string id, WorldScreenTransform transform)
+        public void SetSelection(TargetType type, string id, WorldScreenTransform transform, bool notify = true)
         {
             _selectedType = type;
             _selectedId = id;
             CopyTransform(_workingTransform, transform);
-            _onSelectionChanged?.Invoke(type, id, _workingTransform);
+            if (notify)
+            {
+                _onSelectionChanged?.Invoke(type, id, _workingTransform);
+            }
+        }
+
+        /// <summary>Keep the in-world gizmo aligned with the Screen Settings working transform.</summary>
+        public void SyncWorkingTransform(WorldScreenTransform source)
+        {
+            if (!HasSelection || source == null) return;
+            CopyTransform(_workingTransform, source);
         }
 
         /// <summary>
@@ -246,6 +256,7 @@ namespace XivMediaPlayer.Compositing
             target.IsProjectorMode = source.IsProjectorMode;
             target.ScreensaverColor = source.ScreensaverColor;
             target.ScreensaverStyle = source.ScreensaverStyle;
+            target.ScaleAspectMode = source.ScaleAspectMode;
         }
 
         private static Vector3 GetRotateHandleWorld(WorldScreenTransform transform)

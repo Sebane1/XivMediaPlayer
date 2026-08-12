@@ -32,6 +32,11 @@ namespace XivMediaPlayer.Compositing {
     private ID3D11ShaderResourceView _renderTargetSRV;
     private int _rtWidth, _rtHeight;
 
+    // Per-frame copies of the composite RT so multiple TVs can each keep their own ImGui texture.
+    private readonly List<ID3D11Texture2D> _outputCopyTextures = new();
+    private readonly List<ID3D11ShaderResourceView> _outputCopySrvs = new();
+    private int _outputCopyIndex;
+
     private bool _initialized;
     private bool _disposed;
     private string _initError;
@@ -93,6 +98,7 @@ namespace XivMediaPlayer.Compositing {
       public float IsLoadingOverlay;
       public float HasIdleBranding;
       public float IdleBrandingAspect;
+      public float SurfaceOnly;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -162,6 +168,7 @@ cbuffer Constants : register(b0) {
   float IsLoadingOverlay;
   float HasIdleBranding;
   float IdleBrandingAspect;
+  float SurfaceOnly;
 };
   
   cbuffer UIConsts : register(b1) {
@@ -833,7 +840,7 @@ float4 PS(VS_OUT input) : SV_TARGET {
       if (HasBackBuffer > 0.5) {
           color = float4(BackBufferTexture.Sample(VideoSampler, screenUV).rgb, 1.0);
       }
-  } else if (!isInside) {
+  } else if (!isInside && SurfaceOnly < 0.5) {
       // Ambient glow on surrounding walls/geometry only, not on the TV surface or through occluders.
       float depthMask = 1.0;
       if (gameDepth < 0.0001) depthMask = 0; // Ignore skybox
@@ -1284,6 +1291,46 @@ float4 PS(VS_OUT input) : SV_TARGET {
     public string InitError => _initError;
     public ID3D11ShaderResourceView OutputSRV => _renderTargetSRV;
 
+    /// <summary>Reset the per-frame output snapshot pool before rendering multiple TVs.</summary>
+    public void BeginMultiOutputFrame() {
+      _outputCopyIndex = 0;
+    }
+
+    /// <summary>
+    /// Copy the current composite render target so ImGui can retain a stable texture per TV draw.
+    /// The shared OutputSRV is overwritten on every Render call.
+    /// </summary>
+    public ID3D11ShaderResourceView? AcquireOutputSnapshot() {
+      if (!_initialized || _disposed || _renderTarget == null || _renderTargetSRV == null) return null;
+
+      int index = _outputCopyIndex++;
+      while (_outputCopyTextures.Count <= index) {
+        _outputCopyTextures.Add(null!);
+        _outputCopySrvs.Add(null!);
+      }
+
+      var desc = _renderTarget.Description;
+      if (_outputCopyTextures[index] == null
+          || _outputCopyTextures[index].Description.Width != desc.Width
+          || _outputCopyTextures[index].Description.Height != desc.Height
+          || _outputCopyTextures[index].Description.Format != desc.Format) {
+        _outputCopySrvs[index]?.Dispose();
+        _outputCopyTextures[index]?.Dispose();
+
+        var copyDesc = desc;
+        copyDesc.BindFlags = BindFlags.ShaderResource;
+        copyDesc.Usage = ResourceUsage.Default;
+        copyDesc.CPUAccessFlags = CpuAccessFlags.None;
+        copyDesc.MiscFlags = ResourceOptionFlags.None;
+
+        _outputCopyTextures[index] = _device.CreateTexture2D(copyDesc);
+        _outputCopySrvs[index] = _device.CreateShaderResourceView(_outputCopyTextures[index]);
+      }
+
+      _context.CopyResource(_outputCopyTextures[index], _renderTarget);
+      return _outputCopySrvs[index];
+    }
+
     public bool Initialize() {
       if (_initialized || _disposed) return _initialized;
 
@@ -1395,7 +1442,7 @@ float4 PS(VS_OUT input) : SV_TARGET {
       float renderWidth, float renderHeight,
       List<(int X, int Y, int W, int H, string Name)> uiRects, IntPtr titleSrvPtr = default,
       bool isLooping = false, bool isShuffle = false, float time = 0, float showScreensaver = 0,
-      float videoAspectRatio = 0, IntPtr gbuffer2SrvPtr = default, IntPtr gbuffer3SrvPtr = default, IntPtr transparentUiSrvPtr = default, IntPtr vignetteExtrapolatedSrvPtr = default, bool useDifferenceFallback = false, float opacity = 1.0f, bool isProjectorMode = false, Vector3? screensaverColor = null, int screensaverStyle = 0, float uiBlendThreshold = 0.0f, float uvBottom = 1.0f, float uvRight = 1.0f, bool enableTvGlow = true, float loadingPulse = 0f, bool isLoadingOverlay = false, IntPtr idleBrandingSrvPtr = default, float idleBrandingAspect = 1.0f) {
+      float videoAspectRatio = 0, IntPtr gbuffer2SrvPtr = default, IntPtr gbuffer3SrvPtr = default, IntPtr transparentUiSrvPtr = default, IntPtr vignetteExtrapolatedSrvPtr = default, bool useDifferenceFallback = false, float opacity = 1.0f, bool isProjectorMode = false, Vector3? screensaverColor = null, int screensaverStyle = 0, float uiBlendThreshold = 0.0f, float uvBottom = 1.0f, float uvRight = 1.0f, bool enableTvGlow = true, float loadingPulse = 0f, bool isLoadingOverlay = false, IntPtr idleBrandingSrvPtr = default, float idleBrandingAspect = 1.0f, bool surfaceOnly = false) {
 
       if (!_initialized || _disposed || videoSrvPtr == IntPtr.Zero || depthSrv == null) return false;
 
@@ -1460,6 +1507,7 @@ float4 PS(VS_OUT input) : SV_TARGET {
           IsLoadingOverlay = isLoadingOverlay ? 1.0f : 0.0f,
           HasIdleBranding = idleBrandingSrvPtr != IntPtr.Zero ? 1.0f : 0.0f,
           IdleBrandingAspect = idleBrandingAspect,
+          SurfaceOnly = surfaceOnly ? 1.0f : 0.0f,
         };
           _context.UpdateSubresource(constants, _constantBuffer);
 
@@ -1549,6 +1597,10 @@ float4 PS(VS_OUT input) : SV_TARGET {
       _renderTargetView?.Dispose();
       _renderTargetSRV?.Dispose();
       _renderTarget?.Dispose();
+      foreach (var srv in _outputCopySrvs) srv?.Dispose();
+      foreach (var tex in _outputCopyTextures) tex?.Dispose();
+      _outputCopySrvs.Clear();
+      _outputCopyTextures.Clear();
       _depthSampler?.Dispose();
       _videoSampler?.Dispose();
       _blendState?.Dispose();

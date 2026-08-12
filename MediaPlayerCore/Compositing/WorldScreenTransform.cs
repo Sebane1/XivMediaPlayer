@@ -29,6 +29,10 @@ namespace MediaPlayerCore.Compositing {
     [JsonProperty("scale")]
     public Vector2 Scale { get; set; } = new Vector2(3.0f, 1.6875f);
 
+    /// <summary>0 = 16:9 locked, 1 = 4:3 locked, 2 = custom width/height.</summary>
+    [JsonProperty("scaleAspectMode")]
+    public int ScaleAspectMode { get; set; } = 0;
+
     /// <summary>
     /// Whether world rendering is currently active.
     /// </summary>
@@ -112,6 +116,7 @@ namespace MediaPlayerCore.Compositing {
         Position = Position,
         RotationDegrees = RotationDegrees,
         Scale = Scale,
+        ScaleAspectMode = ScaleAspectMode,
         Enabled = Enabled,
         Opacity = Opacity,
         IsProjectorMode = IsProjectorMode,

@@ -14,6 +14,8 @@ namespace XivMediaPlayer.Networking.Models
         public float RotationZ { get; set; }
         public float ScaleX { get; set; }
         public float ScaleY { get; set; }
+        /// <summary>0 = 16:9, 1 = 4:3, 2 = custom/free aspect.</summary>
+        public int ScaleAspectMode { get; set; } = 0;
         public string OwnerId { get; set; } = string.Empty;
         public bool IsLocked { get; set; } = false;
         public bool BypassLock { get; set; } = false;
