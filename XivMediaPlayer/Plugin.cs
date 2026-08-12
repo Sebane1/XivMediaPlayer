@@ -939,15 +939,23 @@ namespace XivMediaPlayer
             }
         }
 
+        private bool _localPlayerNullLogged;
+
         private unsafe void InitializeMediaManager()
         {
             var localPlayer = GetLocalPlayer();
             if (localPlayer == null)
             {
-                _pluginLog.Warning("[Media Player] LocalPlayer is null, cannot initialize media manager.");
+                if (!_localPlayerNullLogged)
+                {
+                    _localPlayerNullLogged = true;
+                    _pluginLog.Debug("[Media Player] LocalPlayer not ready yet; media manager init deferred.");
+                }
                 _hasBeenInitialized = false; // Allow retry next frame
                 return;
             }
+
+            _localPlayerNullLogged = false;
 
             _pluginLog.Info("[Media Player] Initializing media manager...");
             _playerObject = new MediaGameObject(localPlayer.Name.TextValue, localPlayer.Position);

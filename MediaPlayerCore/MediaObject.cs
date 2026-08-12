@@ -525,8 +525,7 @@ namespace MediaPlayerCore {
                     _volumeProvider = new VolumeSampleProvider(_panningProvider);
                     _volumeProvider.Volume = (_baseVolume / 100f) * 2.0f; // Scale 0-100 to 0-1, boosted for spatial compensation
                     
-                    _waveOut = new WasapiOut(AudioClientShareMode.Shared, 150);
-                    _waveOut.Init(_volumeProvider);
+                    TryInitSpatialAudioOutput(_volumeProvider, latencyMs: 150);
                 }
 
                 _vlcPlayer.Stopped += delegate {
@@ -899,6 +898,23 @@ namespace MediaPlayerCore {
               _waveOut = null;
           }
       }
+    }
+
+    private void TryInitSpatialAudioOutput(ISampleProvider sampleProvider, int latencyMs)
+    {
+        try
+        {
+            var wasapi = new WasapiOut(AudioClientShareMode.Shared, latencyMs);
+            wasapi.Init(sampleProvider);
+            _waveOut = wasapi;
+        }
+        catch (Exception ex) when (ex is InvalidCastException or System.Runtime.InteropServices.COMException)
+        {
+            Debug.WriteLine($"[MediaObject] WasapiOut unavailable ({ex.GetType().Name}), using WaveOutEvent.");
+            var waveOut = new WaveOutEvent();
+            waveOut.Init(sampleProvider);
+            _waveOut = waveOut;
+        }
     }
   }
 }

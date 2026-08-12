@@ -227,6 +227,11 @@ namespace XivMediaPlayer.Diagnostics
                 return false;
             }
 
+            if (IsDiagnosticNoise(entry))
+            {
+                return false;
+            }
+
             return entry.Contains("| WRN |", StringComparison.OrdinalIgnoreCase)
                 || entry.Contains("| ERR |", StringComparison.OrdinalIgnoreCase)
                 || entry.Contains("[WRN]", StringComparison.OrdinalIgnoreCase)
@@ -234,6 +239,14 @@ namespace XivMediaPlayer.Diagnostics
                 || entry.Contains("Exception", StringComparison.OrdinalIgnoreCase)
                 || entry.Contains("failed", StringComparison.OrdinalIgnoreCase)
                 || entry.Contains("error", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool IsDiagnosticNoise(string entry)
+        {
+            return entry.Contains("LocalPlayer is null", StringComparison.OrdinalIgnoreCase)
+                || entry.Contains("LocalPlayer not ready yet", StringComparison.OrdinalIgnoreCase)
+                || entry.Contains("Long UiBuilder(XivMediaPlayer)", StringComparison.OrdinalIgnoreCase)
+                || entry.Contains("[HITCH]", StringComparison.OrdinalIgnoreCase);
         }
 
         private static string RedactSensitive(string entry)

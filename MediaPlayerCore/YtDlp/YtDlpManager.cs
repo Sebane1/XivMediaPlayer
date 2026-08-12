@@ -2640,7 +2640,7 @@ namespace MediaPlayerCore.YtDlp
             OnStatusUpdate?.Invoke(this, "Setting up PO Token provider (first run may take 1-2 minutes)...");
             var (ok, output) = await RunProcessAsync(
                 DenoExecutablePath,
-                "install --allow-net --allow-read --allow-write --allow-scripts --frozen",
+                "install --allow-scripts --frozen",
                 BgutilServerWorkDir,
                 TimeSpan.FromMinutes(10));
 

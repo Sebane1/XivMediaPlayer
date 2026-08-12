@@ -145,8 +145,7 @@ namespace MediaPlayerCore
                         _volumeProvider = new VolumeSampleProvider(_panningProvider);
                         _volumeProvider.Volume = 1.0f;
 
-                        _waveOut = new WasapiOut(AudioClientShareMode.Shared, 50);
-                        _waveOut.Init(_volumeProvider);
+                        TryInitSpatialAudioOutput(_volumeProvider, latencyMs: 50);
 
                         _ffmpegProcess.Start();
                         try { _ffmpegProcess.PriorityClass = ProcessPriorityClass.High; } catch { }
@@ -300,6 +299,23 @@ namespace MediaPlayerCore
             _parent.OnCleanupTime -= _parent_OnCleanupTime;
             Stop();
             _ffmpegProcess?.Dispose();
+        }
+
+        private void TryInitSpatialAudioOutput(ISampleProvider sampleProvider, int latencyMs)
+        {
+            try
+            {
+                var wasapi = new WasapiOut(AudioClientShareMode.Shared, latencyMs);
+                wasapi.Init(sampleProvider);
+                _waveOut = wasapi;
+            }
+            catch (Exception ex) when (ex is InvalidCastException or System.Runtime.InteropServices.COMException)
+            {
+                Debug.WriteLine($"[FFmpegMediaObject] WasapiOut unavailable ({ex.GetType().Name}), using WaveOutEvent.");
+                var waveOut = new WaveOutEvent();
+                waveOut.Init(sampleProvider);
+                _waveOut = waveOut;
+            }
         }
     }
 }
