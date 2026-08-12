@@ -31,6 +31,7 @@ namespace XivMediaPlayer {
     private bool _enableOutdoorPublicScreens = false; // Opt-in
     private bool _onlySafeDomainsPublicScreens = true;
     private bool _spatialAudioEnabled = true;
+    private bool _desktopAudioVisualsEnabled = true;
 
     int IPluginConfiguration.Version { get; set; }
 
@@ -44,6 +45,7 @@ namespace XivMediaPlayer {
     public bool EnableOutdoorPublicScreens { get => _enableOutdoorPublicScreens; set => _enableOutdoorPublicScreens = value; }
     public bool OnlySafeDomainsPublicScreens { get => _onlySafeDomainsPublicScreens; set => _onlySafeDomainsPublicScreens = value; }
     public bool SpatialAudioEnabled { get => _spatialAudioEnabled; set => _spatialAudioEnabled = value; }
+    public bool DesktopAudioVisualsEnabled { get => _desktopAudioVisualsEnabled; set => _desktopAudioVisualsEnabled = value; }
     public bool ShowOutdoorGridDebug { get; set; } = false;
     public bool HasAutoDetectedAMD_v2 { get; set; } = false;
     public bool DepthOcclusionEnabled { get; set; } = true;

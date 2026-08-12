@@ -2,7 +2,7 @@ using System;
 
 namespace MediaPlayerCore.Compositing
 {
-    /// <summary>Smoothed audio levels fed to world-screen visual effects (updated from VLC PCM).</summary>
+    /// <summary>Smoothed audio levels fed to world-screen visual effects (desktop loopback or VLC PCM).</summary>
     public sealed class AudioVisualState
     {
         public float Rms { get; private set; }

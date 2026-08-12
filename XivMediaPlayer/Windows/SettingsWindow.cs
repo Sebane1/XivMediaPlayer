@@ -148,6 +148,16 @@ namespace XivMediaPlayer.Windows {
         ImGui.SetTooltip(Localize("Dynamically pans audio to simulate physical TV locations. If you experience A/V sync issues, disable this."));
       }
 
+      bool desktopAudioVisuals = _plugin.Config.DesktopAudioVisualsEnabled;
+      if (ImGui.Checkbox(Localize("Desktop audio for visual effects"), ref desktopAudioVisuals)) {
+        _plugin.Config.DesktopAudioVisualsEnabled = desktopAudioVisuals;
+        _plugin.Config.Save();
+        _plugin.MediaManager?.SetDesktopAudioVisualsEnabled(desktopAudioVisuals);
+      }
+      if (ImGui.IsItemHovered()) {
+        ImGui.SetTooltip(Localize("Listen to your default Windows playback device so Audio Pulse/Spectrum effects react to whatever is playing on your PC, even when spatial audio is off."));
+      }
+
       ImGui.Spacing();
       ImGui.TextColored(new Vector4(0.7f, 0.9f, 1.0f, 1.0f), Localize("Twitch"));
       ImGui.Separator();

@@ -635,7 +635,7 @@ namespace XivMediaPlayer.Windows {
       ImGui.TextColored(new Vector4(0.7f, 0.9f, 1f, 1f), Localize("Visual Effects (Experimental)"));
       ImGui.TextWrapped(editingBanner
         ? Localize("Shader post-effects on the banner image.")
-        : Localize("Shader post-effects on the TV/banner image. Audio modes react to playback when spatial audio is active."));
+        : Localize("Shader post-effects on the TV/banner image. Audio modes react to desktop playback (Settings → Audio) or spatial audio when that option is off."));
 
       string[] visualEffects = new string[] {
         Localize("None"),

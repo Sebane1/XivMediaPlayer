@@ -45,6 +45,9 @@ namespace MediaPlayerCore {
 
     public AudioVisualState AudioVisuals { get; } = new();
 
+    private DesktopAudioListener? _desktopAudioListener;
+    public bool DesktopAudioVisualsEnabled { get; private set; }
+
     public string ResolvePlaybackPath(string mediaPath)
     {
       string? resolved = ResolveSabrPlayPath?.Invoke(mediaPath);
@@ -69,7 +72,37 @@ namespace MediaPlayerCore {
 
     public void UpdateAudioVisuals(ReadOnlySpan<byte> pcmBytes)
     {
+      if (DesktopAudioVisualsEnabled)
+      {
+        return;
+      }
+
       AudioVisuals.UpdateFromPcm16Mono(pcmBytes);
+    }
+
+    internal void UpdateAudioVisualsFromDesktop(ReadOnlySpan<byte> pcmBytes)
+    {
+      AudioVisuals.UpdateFromPcm16Mono(pcmBytes);
+    }
+
+    public void SetDesktopAudioVisualsEnabled(bool enabled)
+    {
+      if (DesktopAudioVisualsEnabled == enabled)
+      {
+        return;
+      }
+
+      DesktopAudioVisualsEnabled = enabled;
+      if (enabled)
+      {
+        _desktopAudioListener ??= new DesktopAudioListener(this);
+        _desktopAudioListener.Start();
+      }
+      else
+      {
+        _desktopAudioListener?.Stop();
+        ResetAudioVisuals();
+      }
     }
 
     public void ResetAudioVisuals()
@@ -164,7 +197,9 @@ namespace MediaPlayerCore {
     }
 
     public void StopStream() {
-      ResetAudioVisuals();
+      if (!DesktopAudioVisualsEnabled) {
+        ResetAudioVisuals();
+      }
       // Copy references before clearing to avoid collection modification issues
       MediaObject[] streams;
       lock (_playbackStreams) {
@@ -361,6 +396,11 @@ namespace MediaPlayerCore {
       OnErrorReceived?.Invoke(this, new MediaError() { Exception = e.Exception });
     }
 
+    internal void RaiseError(Exception exception)
+    {
+      OnErrorReceived?.Invoke(this, new MediaError { Exception = exception });
+    }
+
     public void CleanSounds() {
       try {
         MediaObject[] allStreamsToDispose;
@@ -397,6 +437,8 @@ namespace MediaPlayerCore {
 
     public void Dispose() {
       notDisposed = false;
+      _desktopAudioListener?.Dispose();
+      _desktopAudioListener = null;
       CleanSounds();
       try {
         _updateLoop?.Wait(TimeSpan.FromSeconds(2));

@@ -1116,6 +1116,7 @@ namespace XivMediaPlayer
             _mediaManager.OnNewMediaTriggered += _mediaManager_OnNewMediaTriggered;
             _mediaManager.OnPlaybackFinished += _mediaManager_OnPlaybackFinished;
             _mediaManager.LiveStreamVolume = _config.LivestreamVolume;
+            _mediaManager.SetDesktopAudioVisualsEnabled(_config.DesktopAudioVisualsEnabled);
             _videoWindow.MediaManager = _mediaManager;
             _pluginLog.Info("[Media Player] Media manager initialized successfully.");
         }
