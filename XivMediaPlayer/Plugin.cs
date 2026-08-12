@@ -4079,10 +4079,10 @@ namespace XivMediaPlayer
                         }
                     }
 
-                    if (videoSrv != IntPtr.Zero)
-                    {
                     var mainViewport = ImGui.GetMainViewport();
 
+                    if (videoSrv != IntPtr.Zero)
+                    {
                     if (_titleTextureManager != null)
                     {
                         if (IsMediaLoading)
@@ -4154,7 +4154,6 @@ namespace XivMediaPlayer
                     }
                     }
 
-                    var mainViewport = ImGui.GetMainViewport();
                     _worldRenderer.EnableGlow = _config.DepthOcclusionEnabled && _config.TvGlowEnabled;
                     foreach (var banner in roomBannersToRender)
                     {
