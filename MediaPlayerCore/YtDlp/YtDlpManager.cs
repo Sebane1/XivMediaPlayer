@@ -1769,9 +1769,14 @@ namespace MediaPlayerCore.YtDlp
             }
         }
 
+        private string PotProviderPluginPath =>
+            Path.Combine(PluginsDir, "yt_dlp_plugins", "extractor", "getpot_bgutil_http.py");
+
+        private bool IsPotProviderPluginInstalled() => File.Exists(PotProviderPluginPath);
+
         private string BuildPotProviderExtractorArgs()
         {
-            if (!_bgutilServerReady)
+            if (!_bgutilServerReady || !IsPotProviderPluginInstalled())
             {
                 return string.Empty;
             }
@@ -1975,6 +1980,12 @@ namespace MediaPlayerCore.YtDlp
         private string BuildSabrFormatSelector()
         {
             string heightFilter = _preferredMaxHeight > 0 ? $"[height<={_preferredMaxHeight}]" : "";
+            if (!_bgutilServerReady)
+            {
+                // Without PO tokens, SABR/web formats fail — use DASH merge via tv client only.
+                return $"bv{heightFilter}+ba/b";
+            }
+
             // Prefer standard DASH merge (works with PO tokens), then SABR merge, then single-file fallback.
             return $"bv{heightFilter}+ba/ba[protocol=sabr]+bv[protocol=sabr]{heightFilter}/b";
         }
@@ -2866,7 +2877,15 @@ namespace MediaPlayerCore.YtDlp
         {
             Directory.CreateDirectory(PluginsDir);
             string marker = Path.Combine(PluginsDir, ".bgutil-plugin-installed");
-            if (File.Exists(marker)) return;
+            if (File.Exists(marker) && IsPotProviderPluginInstalled())
+            {
+                return;
+            }
+
+            if (File.Exists(marker))
+            {
+                try { File.Delete(marker); } catch { }
+            }
 
             string potProviderZipPath = Path.Combine(PluginsDir, "bgutil-ytdlp-pot-provider.zip");
             if (!File.Exists(potProviderZipPath))
@@ -2918,12 +2937,7 @@ namespace MediaPlayerCore.YtDlp
                 }
 
                 await CleanupStaleBgutilInstallDirsAsync().ConfigureAwait(false);
-
-                if (await IsBgutilServerRespondingAsync())
-                {
-                    _bgutilServerReady = true;
-                    return;
-                }
+                await EnsurePotProvider().ConfigureAwait(false);
 
                 if (!File.Exists(DenoExecutablePath))
                 {
@@ -2931,19 +2945,23 @@ namespace MediaPlayerCore.YtDlp
                     return;
                 }
 
+                if (!IsPotProviderPluginInstalled())
+                {
+                    OnStatusUpdate?.Invoke(this, "PO Token provider plugin unavailable; using tv client without PO tokens.");
+                    return;
+                }
+
                 await DownloadBgutilServerIfNeededAsync();
+                EnsureBgutilServerBindPatch();
                 if (!await SetupBgutilServerDepsAsync())
                 {
                     OnStatusUpdate?.Invoke(this, "PO Token provider unavailable; using tv client without PO tokens.");
                     return;
                 }
 
-                if (await IsBgutilServerRespondingAsync())
-                {
-                    _bgutilServerReady = true;
-                    OnStatusUpdate?.Invoke(this, "PO Token provider server already running on port 4416.");
-                    return;
-                }
+                KillPluginDenoProcesses();
+                KillListenersOnPort(4416);
+                await Task.Delay(500).ConfigureAwait(false);
 
                 StartBgutilServerProcess();
                 if (await WaitForBgutilServerReadyAsync())
@@ -2989,6 +3007,35 @@ namespace MediaPlayerCore.YtDlp
             Directory.Move(sourceDir, BgutilServerDir);
             Directory.Delete(extractDir, true);
             if (File.Exists(zipPath)) File.Delete(zipPath);
+
+            EnsureBgutilServerBindPatch();
+        }
+
+        /// <summary>
+        /// bgutil defaults to [::] which on Windows often does not accept 127.0.0.1 connections.
+        /// yt-dlp's PO provider plugin hardcodes http://127.0.0.1:4416 — bind there instead.
+        /// </summary>
+        private void EnsureBgutilServerBindPatch()
+        {
+            string mainTs = Path.Combine(BgutilServerWorkDir, "src", "main.ts");
+            if (!File.Exists(mainTs))
+            {
+                return;
+            }
+
+            string content = File.ReadAllText(mainTs);
+            if (!content.Contains("host: \"::\"", StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            content = content.Replace("host: \"::\"", "host: \"127.0.0.1\"");
+            content = content.Replace("host: \"0.0.0.0\"", "host: \"127.0.0.1\"");
+            content = content.Replace("on on address [::]:", "on address 127.0.0.1:");
+            content = content.Replace("on address [::]:", "on address 127.0.0.1:");
+            content = content.Replace("on address 0.0.0.0:", "on address 127.0.0.1:");
+            content = content.Replace("Could not listen on [::]:", "Could not listen on 127.0.0.1:");
+            File.WriteAllText(mainTs, content);
         }
 
         private async Task<bool> SetupBgutilServerDepsAsync()
@@ -3156,32 +3203,90 @@ namespace MediaPlayerCore.YtDlp
             return false;
         }
 
-        private static readonly string[] BgutilPingUrls =
-        {
-            "http://127.0.0.1:4416/ping",
-            "http://localhost:4416/ping",
-            "http://[::1]:4416/ping",
-        };
+        private const string BgutilPingUrl = "http://127.0.0.1:4416/ping";
 
+        /// <summary>
+        /// yt-dlp hardcodes 127.0.0.1 for the bgutil HTTP provider — do not use localhost/[::1] here.
+        /// </summary>
         private static async Task<bool> IsBgutilServerRespondingAsync()
         {
             using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(2) };
-            foreach (string url in BgutilPingUrls)
+            try
             {
-                try
-                {
-                    using var response = await client.GetAsync(url);
-                    if (response.IsSuccessStatusCode)
-                    {
-                        return true;
-                    }
-                }
-                catch
-                {
-                }
+                using var response = await client.GetAsync(BgutilPingUrl);
+                return response.IsSuccessStatusCode;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static void KillListenersOnPort(int port)
+        {
+            if (!OperatingSystem.IsWindows())
+            {
+                return;
             }
 
-            return false;
+            try
+            {
+                var psi = new ProcessStartInfo
+                {
+                    FileName = "netstat",
+                    Arguments = "-ano",
+                    RedirectStandardOutput = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                };
+
+                using var netstat = Process.Start(psi);
+                if (netstat == null)
+                {
+                    return;
+                }
+
+                string output = netstat.StandardOutput.ReadToEnd();
+                netstat.WaitForExit(5000);
+
+                string portToken = $":{port}";
+                var pids = new HashSet<int>();
+                foreach (string line in output.Split('\n'))
+                {
+                    if (!line.Contains("LISTENING", StringComparison.OrdinalIgnoreCase)
+                        || !line.Contains(portToken, StringComparison.Ordinal))
+                    {
+                        continue;
+                    }
+
+                    string[] parts = line.Trim().Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+                    if (parts.Length >= 5 && int.TryParse(parts[^1], out int pid) && pid > 0)
+                    {
+                        pids.Add(pid);
+                    }
+                }
+
+                foreach (int pid in pids)
+                {
+                    try
+                    {
+                        using Process process = Process.GetProcessById(pid);
+                        if (process.HasExited)
+                        {
+                            continue;
+                        }
+
+                        process.Kill(true);
+                        process.WaitForExit(3000);
+                    }
+                    catch
+                    {
+                    }
+                }
+            }
+            catch
+            {
+            }
         }
 
         private async Task<bool> WaitForBgutilServerReadyAsync()
