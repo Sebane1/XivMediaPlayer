@@ -72,24 +72,80 @@ namespace XivMediaPlayer.Server.Models
         public DateTime PlayedAtUtc { get; set; } = DateTime.UtcNow;
     }
 
+    /// <summary>Room-level venue settings (idle branding, etc.).</summary>
+    public class RoomVenueSettings
+    {
+        public string LocationKey { get; set; } = string.Empty;
+        public string IdleBrandingUrl { get; set; } = string.Empty;
+        public string OwnerId { get; set; } = string.Empty;
+        public DateTime LastUpdated { get; set; } = DateTime.UtcNow;
+
+        [NotMapped]
+        public bool BypassLock { get; set; } = false;
+    }
+
+    /// <summary>Static image banner prop — not a TV; no playback.</summary>
+    public class BannerPlacement
+    {
+        public string Id { get; set; } = Guid.NewGuid().ToString();
+        public string LocationKey { get; set; } = string.Empty;
+        public float PositionX { get; set; }
+        public float PositionY { get; set; }
+        public float PositionZ { get; set; }
+        public float RotationX { get; set; }
+        public float RotationY { get; set; }
+        public float RotationZ { get; set; }
+        public float ScaleX { get; set; }
+        public float ScaleY { get; set; }
+        public string ImageUrl { get; set; } = string.Empty;
+        public float Opacity { get; set; } = 1.0f;
+        public string OwnerId { get; set; } = string.Empty;
+        public DateTime LastUpdated { get; set; } = DateTime.UtcNow;
+
+        [NotMapped]
+        public bool BypassLock { get; set; } = false;
+    }
+
     public class AppDbContext : Microsoft.EntityFrameworkCore.DbContext
     {
         public Microsoft.EntityFrameworkCore.DbSet<TvPlacement> TvPlacements { get; set; } = null!;
         public Microsoft.EntityFrameworkCore.DbSet<RoomMediaStateSync> RoomMediaStates { get; set; } = null!;
         public Microsoft.EntityFrameworkCore.DbSet<MediaTrackRecord> MediaTrackRecords { get; set; } = null!;
+        public Microsoft.EntityFrameworkCore.DbSet<RoomVenueSettings> RoomVenueSettings { get; set; } = null!;
+        public Microsoft.EntityFrameworkCore.DbSet<BannerPlacement> BannerPlacements { get; set; } = null!;
 
         public AppDbContext(Microsoft.EntityFrameworkCore.DbContextOptions<AppDbContext> options) : base(options) { }
 
         protected override void OnModelCreating(Microsoft.EntityFrameworkCore.ModelBuilder modelBuilder)
         {
             modelBuilder.Entity<TvPlacement>()
-                .HasKey(t => t.LocationKey); // We only allow one TV per room right now
+                .HasKey(t => t.Id);
+
+            modelBuilder.Entity<TvPlacement>()
+                .HasIndex(t => t.LocationKey);
+
+            modelBuilder.Entity<TvPlacement>()
+                .Property(t => t.Id)
+                .IsRequired();
+
+            modelBuilder.Entity<TvPlacement>()
+                .Property(t => t.LocationKey)
+                .IsRequired();
 
             modelBuilder.Entity<RoomMediaStateSync>()
                 .HasKey(m => m.LocationKey);
 
             modelBuilder.Entity<MediaTrackRecord>()
                 .HasKey(r => r.Id);
+
+            modelBuilder.Entity<RoomVenueSettings>()
+                .HasKey(v => v.LocationKey);
+
+            modelBuilder.Entity<BannerPlacement>()
+                .HasKey(b => b.Id);
+
+            modelBuilder.Entity<BannerPlacement>()
+                .HasIndex(b => b.LocationKey);
         }
     }
 }

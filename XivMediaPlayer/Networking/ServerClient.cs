@@ -57,11 +57,17 @@ namespace XivMediaPlayer.Networking
             return new List<TvPlacement>();
         }
 
-        public async Task<TvPlacement> RegisterTvAsync(string locationKey, TvPlacement placement)
+        public async Task<TvPlacement> RegisterTvAsync(string locationKey, TvPlacement placement, bool create = false)
         {
             try
             {
-                var response = await _httpClient.PostAsJsonAsync($"{_baseUrl}/api/rooms/{Uri.EscapeDataString(locationKey)}/tvs", placement);
+                string url = $"{_baseUrl}/api/rooms/{Uri.EscapeDataString(locationKey)}/tvs";
+                if (create)
+                {
+                    url += "?create=true";
+                }
+
+                var response = await _httpClient.PostAsJsonAsync(url, placement);
                 if (response.StatusCode == System.Net.HttpStatusCode.Forbidden)
                 {
                     throw new UnauthorizedAccessException("This TV is locked by its owner and cannot be moved.");
@@ -185,6 +191,120 @@ namespace XivMediaPlayer.Networking
                 _log.Error(ex, "Failed to get media states in batch");
             }
             return new List<RoomMediaStateSync>();
+        }
+
+        public async Task<RoomVenueSettings?> GetVenueSettingsAsync(string locationKey)
+        {
+            try
+            {
+                var response = await _httpClient.GetAsync($"{_baseUrl}/api/rooms/{Uri.EscapeDataString(locationKey)}/venue");
+                if (response.IsSuccessStatusCode)
+                {
+                    return await response.Content.ReadFromJsonAsync<RoomVenueSettings>();
+                }
+            }
+            catch (Exception ex)
+            {
+                _log.Error(ex, $"Failed to get venue settings for room {locationKey}");
+            }
+
+            return null;
+        }
+
+        public async Task<RoomVenueSettings?> UpdateVenueSettingsAsync(string locationKey, RoomVenueSettings settings)
+        {
+            try
+            {
+                var response = await _httpClient.PostAsJsonAsync(
+                    $"{_baseUrl}/api/rooms/{Uri.EscapeDataString(locationKey)}/venue", settings);
+                if (response.StatusCode == System.Net.HttpStatusCode.Forbidden)
+                {
+                    throw new UnauthorizedAccessException("The TV in this room is locked by its owner.");
+                }
+
+                if (response.IsSuccessStatusCode)
+                {
+                    return await response.Content.ReadFromJsonAsync<RoomVenueSettings>();
+                }
+            }
+            catch (UnauthorizedAccessException) { throw; }
+            catch (Exception ex)
+            {
+                _log.Error(ex, $"Failed to update venue settings for room {locationKey}");
+                throw;
+            }
+
+            return null;
+        }
+
+        public async Task<List<BannerPlacement>> GetBannersForRoomAsync(string locationKey)
+        {
+            try
+            {
+                var response = await _httpClient.GetAsync($"{_baseUrl}/api/rooms/{Uri.EscapeDataString(locationKey)}/banners");
+                if (response.IsSuccessStatusCode)
+                {
+                    var banners = await response.Content.ReadFromJsonAsync<List<BannerPlacement>>();
+                    return banners ?? new List<BannerPlacement>();
+                }
+            }
+            catch (Exception ex)
+            {
+                _log.Error(ex, $"Failed to get banners for room {locationKey}");
+            }
+
+            return new List<BannerPlacement>();
+        }
+
+        public async Task<BannerPlacement?> RegisterBannerAsync(string locationKey, BannerPlacement placement, bool create = false)
+        {
+            try
+            {
+                string url = $"{_baseUrl}/api/rooms/{Uri.EscapeDataString(locationKey)}/banners";
+                if (create)
+                {
+                    url += "?create=true";
+                }
+
+                var response = await _httpClient.PostAsJsonAsync(url, placement);
+                if (response.StatusCode == System.Net.HttpStatusCode.Forbidden)
+                {
+                    throw new UnauthorizedAccessException("This room is locked by its owner.");
+                }
+
+                if (response.IsSuccessStatusCode)
+                {
+                    return await response.Content.ReadFromJsonAsync<BannerPlacement>();
+                }
+            }
+            catch (UnauthorizedAccessException) { throw; }
+            catch (Exception ex)
+            {
+                _log.Error(ex, $"Failed to register banner for room {locationKey}");
+                throw;
+            }
+
+            return null;
+        }
+
+        public async Task<bool> DeleteBannerAsync(string locationKey, string bannerId, string ownerId, bool bypassLock)
+        {
+            try
+            {
+                var response = await _httpClient.DeleteAsync(
+                    $"{_baseUrl}/api/rooms/{Uri.EscapeDataString(locationKey)}/banners/{Uri.EscapeDataString(bannerId)}?ownerId={Uri.EscapeDataString(ownerId)}&bypassLock={bypassLock}");
+                if (response.StatusCode == System.Net.HttpStatusCode.Forbidden)
+                {
+                    throw new UnauthorizedAccessException("Cannot delete banner: It is locked by its owner.");
+                }
+
+                return response.IsSuccessStatusCode;
+            }
+            catch (Exception ex)
+            {
+                _log.Error(ex, $"Failed to delete banner for room {locationKey}");
+                throw;
+            }
         }
 
         public async Task<DiagnosticLogSubmitResult?> SubmitDiagnosticLogsAsync(DiagnosticLogReport report)

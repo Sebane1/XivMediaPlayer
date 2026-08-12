@@ -47,4 +47,32 @@ namespace XivMediaPlayer.Networking.Models
         public double? DurationMs { get; set; } = null;
         public double IdleTimeMs { get; set; } = 0;
     }
+
+    public class RoomVenueSettings
+    {
+        public string LocationKey { get; set; } = string.Empty;
+        public string IdleBrandingUrl { get; set; } = string.Empty;
+        public string OwnerId { get; set; } = string.Empty;
+        public DateTime LastUpdated { get; set; } = DateTime.UtcNow;
+        public bool BypassLock { get; set; } = false;
+    }
+
+    public class BannerPlacement
+    {
+        public string Id { get; set; } = Guid.NewGuid().ToString();
+        public string LocationKey { get; set; } = string.Empty;
+        public float PositionX { get; set; }
+        public float PositionY { get; set; }
+        public float PositionZ { get; set; }
+        public float RotationX { get; set; }
+        public float RotationY { get; set; }
+        public float RotationZ { get; set; }
+        public float ScaleX { get; set; }
+        public float ScaleY { get; set; }
+        public string ImageUrl { get; set; } = string.Empty;
+        public float Opacity { get; set; } = 1.0f;
+        public string OwnerId { get; set; } = string.Empty;
+        public DateTime LastUpdated { get; set; } = DateTime.UtcNow;
+        public bool BypassLock { get; set; } = false;
+    }
 }

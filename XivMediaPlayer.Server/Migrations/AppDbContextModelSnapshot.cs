@@ -83,10 +83,8 @@ namespace XivMediaPlayer.Server.Migrations
 
             modelBuilder.Entity("XivMediaPlayer.Server.Models.TvPlacement", b =>
                 {
-                    b.Property<string>("LocationKey")
-                        .HasColumnType("TEXT");
-
                     b.Property<string>("Id")
+                        .IsRequired()
                         .HasColumnType("TEXT");
 
                     b.Property<bool>("IsLocked")
@@ -96,6 +94,10 @@ namespace XivMediaPlayer.Server.Migrations
                         .HasColumnType("INTEGER");
 
                     b.Property<DateTime>("LastUpdated")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("LocationKey")
+                        .IsRequired()
                         .HasColumnType("TEXT");
 
                     b.Property<float>("Opacity")
@@ -141,9 +143,86 @@ namespace XivMediaPlayer.Server.Migrations
                     b.Property<int>("ScreensaverStyle")
                         .HasColumnType("INTEGER");
 
-                    b.HasKey("LocationKey");
+                    b.HasKey("Id");
+
+                    b.HasIndex("LocationKey");
 
                     b.ToTable("TvPlacements");
+                });
+
+            modelBuilder.Entity("XivMediaPlayer.Server.Models.RoomVenueSettings", b =>
+                {
+                    b.Property<string>("LocationKey")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("IdleBrandingUrl")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("LastUpdated")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("OwnerId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("LocationKey");
+
+                    b.ToTable("RoomVenueSettings");
+                });
+
+            modelBuilder.Entity("XivMediaPlayer.Server.Models.BannerPlacement", b =>
+                {
+                    b.Property<string>("Id")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ImageUrl")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("LastUpdated")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("LocationKey")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<float>("Opacity")
+                        .HasColumnType("REAL");
+
+                    b.Property<string>("OwnerId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<float>("PositionX")
+                        .HasColumnType("REAL");
+
+                    b.Property<float>("PositionY")
+                        .HasColumnType("REAL");
+
+                    b.Property<float>("PositionZ")
+                        .HasColumnType("REAL");
+
+                    b.Property<float>("RotationX")
+                        .HasColumnType("REAL");
+
+                    b.Property<float>("RotationY")
+                        .HasColumnType("REAL");
+
+                    b.Property<float>("RotationZ")
+                        .HasColumnType("REAL");
+
+                    b.Property<float>("ScaleX")
+                        .HasColumnType("REAL");
+
+                    b.Property<float>("ScaleY")
+                        .HasColumnType("REAL");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("LocationKey");
+
+                    b.ToTable("BannerPlacements");
                 });
 #pragma warning restore 612, 618
         }

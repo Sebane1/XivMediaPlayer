@@ -65,7 +65,7 @@ namespace XivMediaPlayer {
     /// <summary>Show a chat hint when new plugin warnings/errors are detected in dalamud.log.</summary>
     public bool NotifyOnDiagnosticLogs { get; set; } = true;
 
-    public const int CurrentConfigVersion = 6;
+    public const int CurrentConfigVersion = 7;
 
     public const string DefaultTranslationServerUrl = "http://ai.hubujubu.com:5681";
 
@@ -93,6 +93,10 @@ namespace XivMediaPlayer {
 
     // Per-location screen placements: key = location string, value = transform
     public Dictionary<string, MediaPlayerCore.Compositing.WorldScreenTransform> ScreenPlacements { get; set; }
+      = new Dictionary<string, MediaPlayerCore.Compositing.WorldScreenTransform>();
+
+    // Per-TV screen placements: key = "{locationKey}#{tvId}"
+    public Dictionary<string, MediaPlayerCore.Compositing.WorldScreenTransform> ScreenPlacementsByTvId { get; set; }
       = new Dictionary<string, MediaPlayerCore.Compositing.WorldScreenTransform>();
 
     public Dictionary<string, RoomMediaState> RoomMediaStates { get; set; } = new Dictionary<string, RoomMediaState>();
