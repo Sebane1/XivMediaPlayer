@@ -77,6 +77,8 @@ namespace XivMediaPlayer
         private Compositing.QueueMenuTextureManager _queueMenuTextureManager;
         private bool _isQueueMenuOpen = false;
         private Compositing.ImageTextureCache _imageTextureCache;
+        private readonly Compositing.PlacementManipulator _placementManipulator = new();
+        private readonly List<Compositing.PlacementManipulator.Pickable> _placementPickables = new();
 
         private MediaManager _mediaManager;
         public MediaManager MediaManager => _mediaManager;
@@ -635,6 +637,10 @@ namespace XivMediaPlayer
             _historyMenuTextureManager = new Compositing.HistoryMenuTextureManager(_textureProvider);
             _queueMenuTextureManager = new Compositing.QueueMenuTextureManager(_textureProvider);
             _imageTextureCache = new Compositing.ImageTextureCache(_textureProvider, _pluginLog);
+            _placementManipulator.Configure(
+                OnPlacementSelectionChanged,
+                OnPlacementTransformPreview,
+                () => _ = CommitManipulatorPlacementAsync());
 
             // Create windows
             _windowSystem = new WindowSystem("XivMediaPlayer");
@@ -647,6 +653,7 @@ namespace XivMediaPlayer
               _worldRenderer,
               onSave: () =>
               {
+                  ApplyWorkingTransformToCurrentSelection();
                   _config.Save();
                   SaveScreenForCurrentLocation();
               },
@@ -880,6 +887,8 @@ namespace XivMediaPlayer
                 {
                     _wasHousingMenuOpen = isHousingMenuOpen;
                     _screenSettingsWindow.IsOpen = false;
+                    _ = CommitManipulatorPlacementAsync();
+                    _placementManipulator.ClearSelection();
 
                     // Auto-save and register TV when closing the menu
                     if (!string.IsNullOrEmpty(LocationKey) && LocationKey.StartsWith("house_"))
@@ -2596,6 +2605,30 @@ namespace XivMediaPlayer
                 .ToList();
         }
 
+        internal void ApplyWorkingTransformToCurrentSelection()
+        {
+            if (_worldRenderer?.Transform == null) return;
+
+            var transform = _worldRenderer.Transform;
+            if (CurrentTvPlacement != null)
+            {
+                CopyTransformToTv(CurrentTvPlacement, transform);
+                UpsertRoomTv(CurrentTvPlacement);
+            }
+            else if (CurrentBannerPlacement != null)
+            {
+                CopyTransformToBanner(CurrentBannerPlacement, transform);
+                UpsertRoomBanner(CurrentBannerPlacement);
+            }
+        }
+
+        private bool IsLiveEditingTv(TvPlacement tv)
+        {
+            return CurrentTvPlacement != null
+                && tv.Id == CurrentTvPlacement.Id
+                && (_screenSettingsWindow?.IsOpen == true || IsHousingMenuOpen || _placementManipulator.HasSelection);
+        }
+
         private void PersistTvPlacementLocally(TvPlacement tv)
         {
             var transform = TvPlacementToTransform(tv);
@@ -2632,9 +2665,159 @@ namespace XivMediaPlayer
 
         internal void SelectTvForEditing(TvPlacement tv)
         {
+            ApplyWorkingTransformToCurrentSelection();
             CurrentTvPlacement = tv;
+            CurrentBannerPlacement = null;
             ApplyTvPlacementToRenderer(tv);
             _screenSettingsWindow?.SyncFromTransform();
+            _placementManipulator.SetSelection(Compositing.PlacementManipulator.TargetType.Tv, tv.Id, TvPlacementToTransform(tv));
+        }
+
+        internal void SelectBannerForEditing(BannerPlacement banner)
+        {
+            ApplyWorkingTransformToCurrentSelection();
+            CurrentBannerPlacement = banner;
+            ApplyBannerPlacementToRenderer(banner);
+            _screenSettingsWindow?.SyncFromTransform();
+            _placementManipulator.SetSelection(Compositing.PlacementManipulator.TargetType.Banner, banner.Id, BannerPlacementToTransform(banner));
+        }
+
+        private static void CopyTransformToTv(TvPlacement tv, WorldScreenTransform transform)
+        {
+            tv.PositionX = transform.Position.X;
+            tv.PositionY = transform.Position.Y;
+            tv.PositionZ = transform.Position.Z;
+            tv.RotationX = transform.RotationDegrees.X;
+            tv.RotationY = transform.RotationDegrees.Y;
+            tv.RotationZ = transform.RotationDegrees.Z;
+            tv.ScaleX = transform.Scale.X;
+            tv.ScaleY = transform.Scale.Y;
+            tv.Opacity = transform.Opacity;
+            tv.IsProjectorMode = transform.IsProjectorMode;
+            tv.ScreensaverColorR = transform.ScreensaverColor.X;
+            tv.ScreensaverColorG = transform.ScreensaverColor.Y;
+            tv.ScreensaverColorB = transform.ScreensaverColor.Z;
+            tv.ScreensaverStyle = transform.ScreensaverStyle;
+        }
+
+        private static void CopyTransformToBanner(BannerPlacement banner, WorldScreenTransform transform)
+        {
+            banner.PositionX = transform.Position.X;
+            banner.PositionY = transform.Position.Y;
+            banner.PositionZ = transform.Position.Z;
+            banner.RotationX = transform.RotationDegrees.X;
+            banner.RotationY = transform.RotationDegrees.Y;
+            banner.RotationZ = transform.RotationDegrees.Z;
+            banner.ScaleX = transform.Scale.X;
+            banner.ScaleY = transform.Scale.Y;
+            banner.Opacity = transform.Opacity;
+        }
+
+        private void BuildPlacementPickables(IReadOnlyList<TvPlacement> tvs, IReadOnlyList<BannerPlacement> banners)
+        {
+            _placementPickables.Clear();
+            foreach (var tv in tvs)
+            {
+                _placementPickables.Add(new Compositing.PlacementManipulator.Pickable(
+                    Compositing.PlacementManipulator.TargetType.Tv, tv.Id, TvPlacementToTransform(tv)));
+            }
+
+            foreach (var banner in banners)
+            {
+                _placementPickables.Add(new Compositing.PlacementManipulator.Pickable(
+                    Compositing.PlacementManipulator.TargetType.Banner, banner.Id, BannerPlacementToTransform(banner)));
+            }
+        }
+
+        private void OnPlacementSelectionChanged(Compositing.PlacementManipulator.TargetType type, string id, WorldScreenTransform transform)
+        {
+            if (type == Compositing.PlacementManipulator.TargetType.Tv)
+            {
+                var tv = _roomTvPlacements.FirstOrDefault(t => t.Id == id);
+                if (tv != null)
+                {
+                    CurrentTvPlacement = tv;
+                    CurrentBannerPlacement = null;
+                }
+            }
+            else if (type == Compositing.PlacementManipulator.TargetType.Banner)
+            {
+                var banner = _roomBannerPlacements.FirstOrDefault(b => b.Id == id);
+                if (banner != null)
+                {
+                    CurrentBannerPlacement = banner;
+                }
+            }
+
+            ApplyTransformToRenderer(_worldRenderer, transform);
+            _screenSettingsWindow?.SyncFromTransform();
+        }
+
+        private void OnPlacementTransformPreview(Compositing.PlacementManipulator.TargetType type, string id, WorldScreenTransform transform)
+        {
+            if (type == Compositing.PlacementManipulator.TargetType.Tv)
+            {
+                var tv = _roomTvPlacements.FirstOrDefault(t => t.Id == id) ?? CurrentTvPlacement;
+                if (tv != null)
+                {
+                    CopyTransformToTv(tv, transform);
+                    ApplyTvPlacementToRenderer(tv);
+                }
+            }
+            else if (type == Compositing.PlacementManipulator.TargetType.Banner)
+            {
+                var banner = _roomBannerPlacements.FirstOrDefault(b => b.Id == id) ?? CurrentBannerPlacement;
+                if (banner != null)
+                {
+                    CopyTransformToBanner(banner, transform);
+                    ApplyBannerPlacementToRenderer(banner);
+                }
+            }
+
+            _screenSettingsWindow?.SyncFromTransform();
+        }
+
+        private async Task CommitManipulatorPlacementAsync()
+        {
+            if (!_placementManipulator.HasSelection) return;
+
+            var transform = _placementManipulator.WorkingTransform;
+            string locationKey = GetLocationKey();
+            if (string.IsNullOrEmpty(locationKey)) return;
+
+            bool isOutdoors = locationKey.StartsWith("zone_");
+            bool isIsland = locationKey.StartsWith("island_");
+            bool bypassLock = IsHousingMenuOpen || isOutdoors || isIsland;
+
+            try
+            {
+                if (_placementManipulator.SelectedType == Compositing.PlacementManipulator.TargetType.Tv)
+                {
+                    var tv = _roomTvPlacements.FirstOrDefault(t => t.Id == _placementManipulator.SelectedId) ?? CurrentTvPlacement;
+                    if (tv == null) return;
+
+                    CopyTransformToTv(tv, transform);
+                    tv.BypassLock = bypassLock;
+                    UpsertRoomTv(tv);
+                    await ServerClient.RegisterTvAsync(locationKey, tv);
+                }
+                else
+                {
+                    var banner = _roomBannerPlacements.FirstOrDefault(b => b.Id == _placementManipulator.SelectedId) ?? CurrentBannerPlacement;
+                    if (banner == null) return;
+
+                    CopyTransformToBanner(banner, transform);
+                    banner.BypassLock = bypassLock;
+                    UpsertRoomBanner(banner);
+                    await ServerClient.RegisterBannerAsync(locationKey, banner);
+                }
+
+                SaveScreenForCurrentLocation();
+            }
+            catch (Exception ex)
+            {
+                _pluginLog.Warning(ex, "[Placement] Failed to sync placement after drag.");
+            }
         }
 
         private List<TvPlacement> GetRoomTvsForPrimaryLocation()
@@ -2704,8 +2887,13 @@ namespace XivMediaPlayer
 
             foreach (var tv in roomTvs)
             {
-                ApplyTvPlacementToRenderer(tv);
-                var (tl, tr, br, bl) = _worldRenderer.Transform.Corners;
+                var transform = TvPlacementToTransform(tv);
+                if (IsLiveEditingTv(tv))
+                {
+                    transform = _worldRenderer.Transform.Clone();
+                }
+
+                var (tl, tr, br, bl) = transform.Corners;
                 var tvRight = tr - tl;
                 var tvDown = bl - tl;
                 var tvNormal = System.Numerics.Vector3.Normalize(System.Numerics.Vector3.Cross(tvRight, tvDown));
@@ -3751,18 +3939,43 @@ namespace XivMediaPlayer
                     bool isMouseReleased = !isLeftMousePressed && _wasLeftMousePressed;
                     _wasLeftMousePressed = isLeftMousePressed;
 
+                    bool housingPlacementEdit = false;
+                    if (IsHousingMenuOpen && cameraPos.HasValue && cameraForward.HasValue)
+                    {
+                        BuildPlacementPickables(roomTvsToRender, roomBannersToRender);
+                        housingPlacementEdit = _placementManipulator.HandleInput(
+                            enabled: true,
+                            _gameGui,
+                            cameraPos.Value,
+                            cameraForward.Value,
+                            cameraRight,
+                            cameraUp,
+                            fovY,
+                            aspectRatio,
+                            mousePos,
+                            isMouseClicked,
+                            isMouseReleased,
+                            isLeftMousePressed,
+                            _placementPickables) || _placementManipulator.IsDragging;
+
+                        if (housingPlacementEdit)
+                        {
+                            ImGui.GetIO().WantCaptureMouse = true;
+                        }
+                    }
+
                     bool isOnTv = uv.X >= 0 && uv.X <= 1 && uv.Y >= 0 && uv.Y <= 1;
                     if (isMouseClicked)
                     {
                         _clickStartedOnTv = isOnTv;
                     }
 
-                    if (_clickStartedOnTv && isLeftMousePressed)
+                    if (_clickStartedOnTv && isLeftMousePressed && !housingPlacementEdit)
                     {
                         ImGui.GetIO().WantCaptureMouse = true;
                     }
 
-                    if (isOnTv)
+                    if (isOnTv && !housingPlacementEdit)
                     {
                         hoverUV = uv;
                         float scroll = ImGui.GetIO().MouseWheel;
@@ -4128,7 +4341,11 @@ namespace XivMediaPlayer
                     {
                         foreach (var tv in roomTvsToRender)
                         {
-                            ApplyTvPlacementToRenderer(tv);
+                            if (!IsLiveEditingTv(tv))
+                            {
+                                ApplyTvPlacementToRenderer(tv);
+                            }
+
                             bool showOverlay = roomTvsToRender.Count == 1
                                 || (!string.IsNullOrEmpty(_interactionTvId) && tv.Id == _interactionTvId)
                                 || (hoveredTv != null && tv.Id == hoveredTv.Id);
@@ -4178,6 +4395,11 @@ namespace XivMediaPlayer
                     _prevCameraRight = cameraRight;
                     _prevCameraUp = cameraUp;
                     _prevViewProjMatrix = viewProjMatrix;
+
+                    if (IsHousingMenuOpen)
+                    {
+                        _placementManipulator.DrawOverlay(_gameGui);
+                    }
                 }
                 
                 // Draw floating Emulation Controller UI
