@@ -11,9 +11,9 @@ namespace XivMediaPlayer.Compositing
     {
         public enum TargetType { None, Tv, Banner }
 
-        public enum DragMode { None, MoveScreen, MoveAxisX, MoveAxisY, MoveAxisZ, RotateYaw }
+        public enum DragMode { None, MoveScreen, MoveAxisX, MoveAxisY, MoveAxisZ, RotateYaw, ScaleUniform }
 
-        private enum GizmoHandle { None, AxisX, AxisY, AxisZ, RotateYaw }
+        private enum GizmoHandle { None, AxisX, AxisY, AxisZ, RotateYaw, ScaleCorner }
 
         public readonly struct Pickable
         {
@@ -31,6 +31,7 @@ namespace XivMediaPlayer.Compositing
 
         private const float AxisHitPixels = 16f;
         private const float RingHitPixels = 14f;
+        private const float CornerHitPixels = 14f;
         private const float GizmoDistanceFactor = 0.065f;
         private const float MinGizmoSize = 0.35f;
         private const float MaxGizmoSize = 1.85f;
@@ -58,6 +59,7 @@ namespace XivMediaPlayer.Compositing
         private float _dragStartAxisParam;
         private Vector2 _dragAxisScreenDir;
         private float _dragWorldUnitsPerPixel;
+        private float _dragStartScaleDistance;
 
         private Action<TargetType, string, WorldScreenTransform>? _onSelectionChanged;
         private Action<TargetType, string, WorldScreenTransform>? _onTransformPreview;
@@ -153,6 +155,10 @@ namespace XivMediaPlayer.Compositing
             {
                 float gizmoSize = GetGizmoSize(cameraPos, _workingTransform.Position);
                 _hoverHandle = HitTestGizmo(gameGui, cameraPos, cameraForward, cameraRight, cameraUp, fovY, aspectRatio, mousePos, gizmoSize);
+                if (HitTestScaleCorner(gameGui, mousePos))
+                {
+                    _hoverHandle = GizmoHandle.ScaleCorner;
+                }
             }
             else
             {
@@ -164,6 +170,12 @@ namespace XivMediaPlayer.Compositing
                 if (HasSelection)
                 {
                     float gizmoSize = GetGizmoSize(cameraPos, _workingTransform.Position);
+                    if (HitTestScaleCorner(gameGui, mousePos))
+                    {
+                        BeginScaleDrag(cameraPos, cameraForward, cameraRight, cameraUp, fovY, aspectRatio, mousePos);
+                        return true;
+                    }
+
                     var clickedHandle = HitTestGizmo(gameGui, cameraPos, cameraForward, cameraRight, cameraUp, fovY, aspectRatio, mousePos, gizmoSize);
                     if (clickedHandle != GizmoHandle.None)
                     {
@@ -194,6 +206,7 @@ namespace XivMediaPlayer.Compositing
 
             var drawList = ImGui.GetBackgroundDrawList(ImGui.GetMainViewport());
             DrawQuadOutline(gameGui, drawList, _workingTransform, ImGui.ColorConvertFloat4ToU32(new Vector4(0.2f, 1f, 0.45f, 1f)), 3f);
+            DrawScaleCorners(gameGui, drawList, _workingTransform);
 
             var center = _workingTransform.Position;
             float gizmoSize = GetGizmoSize(cameraPos, center);
@@ -209,10 +222,75 @@ namespace XivMediaPlayer.Compositing
                     DragMode.MoveAxisY => "Moving on Y (Up/Down)...",
                     DragMode.MoveAxisZ => "Moving on Z (North/South)...",
                     DragMode.RotateYaw => "Rotating yaw...",
+                    DragMode.ScaleUniform => "Scaling...",
                     _ => "Moving on screen plane..."
                 }
-                : "Click screen to select • Drag RGB arrows for X/Y/Z • Gold ring = yaw • Drag face = free slide";
+                : "Click to select • RGB arrows = move axis • Gold ring = yaw • Green corners = scale • Drag face = slide";
             drawList.AddText(hintPos, ImGui.ColorConvertFloat4ToU32(new Vector4(0.85f, 1f, 0.9f, 0.95f)), hint);
+        }
+
+        private void BeginScaleDrag(
+            Vector3 cameraPos,
+            Vector3 cameraForward,
+            Vector3 cameraRight,
+            Vector3 cameraUp,
+            float fovY,
+            float aspectRatio,
+            Vector2 mousePos)
+        {
+            _dragMode = DragMode.ScaleUniform;
+            _dragStartTransform = _workingTransform.Clone();
+            _dragPlaneOrigin = _workingTransform.Position;
+            _dragPlaneNormal = Vector3.Normalize(_workingTransform.Forward);
+
+            if (!TryRayPlaneHit(cameraPos, cameraForward, cameraRight, cameraUp, fovY, aspectRatio, mousePos,
+                    _dragPlaneOrigin, _dragPlaneNormal, out _dragStartHitWorld))
+            {
+                _dragStartHitWorld = _workingTransform.Position;
+            }
+
+            _dragStartScaleDistance = Vector3.Distance(_dragPlaneOrigin, _dragStartHitWorld);
+            if (_dragStartScaleDistance < 0.05f)
+            {
+                _dragStartScaleDistance = MathF.Max(_workingTransform.Scale.X, _workingTransform.Scale.Y) * 0.5f;
+            }
+        }
+
+        private bool HitTestScaleCorner(IGameGui gameGui, Vector2 mousePos)
+        {
+            var (tl, tr, br, bl) = _workingTransform.Corners;
+            return IsNearCorner(gameGui, mousePos, tl)
+                || IsNearCorner(gameGui, mousePos, tr)
+                || IsNearCorner(gameGui, mousePos, br)
+                || IsNearCorner(gameGui, mousePos, bl);
+        }
+
+        private static bool IsNearCorner(IGameGui gameGui, Vector2 mousePos, Vector3 corner)
+        {
+            return gameGui.WorldToScreen(corner, out var screen)
+                && Vector2.Distance(mousePos, screen) <= CornerHitPixels;
+        }
+
+        private void DrawScaleCorners(IGameGui gameGui, ImDrawListPtr drawList, WorldScreenTransform transform)
+        {
+            var (tl, tr, br, bl) = transform.Corners;
+            bool active = _dragMode == DragMode.ScaleUniform;
+            bool hover = _hoverHandle == GizmoHandle.ScaleCorner;
+            var color = active || hover ? ColorHighlight : new Vector4(0.2f, 1f, 0.45f, 1f);
+            uint col = ImGui.ColorConvertFloat4ToU32(color);
+            float radius = active ? 7f : hover ? 6f : 5f;
+
+            DrawCornerHandle(gameGui, drawList, tl, col, radius);
+            DrawCornerHandle(gameGui, drawList, tr, col, radius);
+            DrawCornerHandle(gameGui, drawList, br, col, radius);
+            DrawCornerHandle(gameGui, drawList, bl, col, radius);
+        }
+
+        private static void DrawCornerHandle(IGameGui gameGui, ImDrawListPtr drawList, Vector3 corner, uint col, float radius)
+        {
+            if (!gameGui.WorldToScreen(corner, out var screen)) return;
+            drawList.AddCircleFilled(screen, radius, col);
+            drawList.AddCircle(screen, radius, ImGui.ColorConvertFloat4ToU32(new Vector4(0f, 0f, 0f, 1f)), 0, 1.5f);
         }
 
         private void BeginScreenMoveDrag(
@@ -341,6 +419,20 @@ namespace XivMediaPlayer.Compositing
                         _dragStartTransform.RotationDegrees.Y + mouseDelta.X * RotateSensitivity,
                         _dragStartTransform.RotationDegrees.Z);
                     PreviewTransform();
+                    break;
+
+                case DragMode.ScaleUniform:
+                    if (TryRayPlaneHit(cameraPos, cameraForward, cameraRight, cameraUp, fovY, aspectRatio, mousePos,
+                            _dragPlaneOrigin, _dragPlaneNormal, out var scaleHit))
+                    {
+                        float currDist = Vector3.Distance(_dragPlaneOrigin, scaleHit);
+                        if (_dragStartScaleDistance > 0.01f)
+                        {
+                            float factor = Math.Clamp(currDist / _dragStartScaleDistance, 0.05f, 20f);
+                            _workingTransform.Scale = _dragStartTransform.Scale * factor;
+                            PreviewTransform();
+                        }
+                    }
                     break;
             }
         }

@@ -2567,17 +2567,66 @@ namespace XivMediaPlayer
             ApplyTransformToRenderer(_worldRenderer, TvPlacementToTransform(tv));
         }
 
-        private static MediaPlayerCore.Compositing.WorldScreenTransform BannerPlacementToTransform(BannerPlacement banner)
+        private MediaPlayerCore.Compositing.WorldScreenTransform BannerPlacementToTransform(BannerPlacement banner)
         {
             return new MediaPlayerCore.Compositing.WorldScreenTransform
             {
                 Position = new System.Numerics.Vector3(banner.PositionX, banner.PositionY, banner.PositionZ),
                 RotationDegrees = new System.Numerics.Vector3(banner.RotationX, banner.RotationY, banner.RotationZ),
-                Scale = new System.Numerics.Vector2(banner.ScaleX, banner.ScaleY),
+                Scale = ResolveBannerScale(banner),
                 Enabled = true,
                 Opacity = banner.Opacity,
                 IsProjectorMode = false
             };
+        }
+
+        internal bool TryGetBannerImageAspect(BannerPlacement? banner, out float widthOverHeight)
+        {
+            widthOverHeight = 1f;
+            if (banner == null || string.IsNullOrWhiteSpace(banner.ImageUrl)) return false;
+            if (!_imageTextureCache.TryGetTexture(banner.ImageUrl, out _, out int width, out int height) || width <= 0 || height <= 0)
+            {
+                return false;
+            }
+
+            widthOverHeight = width / (float)height;
+            return true;
+        }
+
+        private System.Numerics.Vector2 ResolveBannerScale(BannerPlacement banner)
+        {
+            float width = banner.ScaleX > 0.001f ? banner.ScaleX : 2f;
+            if (TryGetBannerImageAspect(banner, out float imageAspect))
+            {
+                return new System.Numerics.Vector2(width, width / imageAspect);
+            }
+
+            if (banner.ScaleY > 0.001f)
+            {
+                return new System.Numerics.Vector2(banner.ScaleX, banner.ScaleY);
+            }
+
+            return new System.Numerics.Vector2(width, width * (9f / 16f));
+        }
+
+        private void NormalizeBannerTransform(BannerPlacement banner, WorldScreenTransform transform)
+        {
+            float width = transform.Scale.X > 0.001f
+                ? transform.Scale.X
+                : (banner.ScaleX > 0.001f ? banner.ScaleX : 2f);
+
+            float height = transform.Scale.Y;
+            if (TryGetBannerImageAspect(banner, out float imageAspect))
+            {
+                height = width / imageAspect;
+            }
+            else if (height <= 0.001f)
+            {
+                height = width * (9f / 16f);
+            }
+
+            transform.Scale = new System.Numerics.Vector2(width, height);
+            CopyTransformToBanner(banner, transform);
         }
 
         private void ApplyBannerPlacementToRenderer(BannerPlacement banner)
@@ -2635,15 +2684,17 @@ namespace XivMediaPlayer
             if (_worldRenderer?.Transform == null) return;
 
             var transform = _worldRenderer.Transform;
+            if (IsBannerEditActive())
+            {
+                CopyTransformToBannerWithAspect(CurrentBannerPlacement!, transform);
+                UpsertRoomBanner(CurrentBannerPlacement!);
+                return;
+            }
+
             if (CurrentTvPlacement != null)
             {
                 CopyTransformToTv(CurrentTvPlacement, transform);
                 UpsertRoomTv(CurrentTvPlacement);
-            }
-            else if (CurrentBannerPlacement != null)
-            {
-                CopyTransformToBanner(CurrentBannerPlacement, transform);
-                UpsertRoomBanner(CurrentBannerPlacement);
             }
         }
 
@@ -2683,7 +2734,8 @@ namespace XivMediaPlayer
                 .FirstOrDefault(t => t != null && t.LocationKey == locationKey);
             if (roomTv != null)
             {
-                if (CurrentTvPlacement == null || CurrentTvPlacement.LocationKey != locationKey)
+                if (!IsBannerEditActive()
+                    && (CurrentTvPlacement == null || CurrentTvPlacement.LocationKey != locationKey))
                 {
                     CurrentTvPlacement = roomTv;
                 }
@@ -2827,12 +2879,22 @@ namespace XivMediaPlayer
             });
         }
 
+        private bool IsBannerEditActive() =>
+            CurrentBannerPlacement != null && CurrentTvPlacement == null;
+
         private bool IsLiveEditingTv(TvPlacement tv)
         {
+            if (IsBannerEditActive()) return false;
+
             return CurrentTvPlacement != null
                 && tv.Id == CurrentTvPlacement.Id
                 && (_screenSettingsWindow?.IsOpen == true || IsHousingMenuOpen || _placementManipulator.HasSelection);
         }
+
+        private bool IsLiveEditingBanner(BannerPlacement banner) =>
+            IsBannerEditActive()
+            && banner.Id == CurrentBannerPlacement!.Id
+            && (_screenSettingsWindow?.IsOpen == true || IsHousingMenuOpen || _placementManipulator.HasSelection);
 
         private WorldScreenTransform ResolveTvRenderTransform(TvPlacement tv)
         {
@@ -2844,6 +2906,18 @@ namespace XivMediaPlayer
             }
 
             return TvPlacementToTransform(placement);
+        }
+
+        private WorldScreenTransform ResolveBannerRenderTransform(BannerPlacement banner)
+        {
+            var placement = _roomBannerPlacements.FirstOrDefault(b => b != null && b.Id == banner.Id) ?? banner;
+
+            if (IsLiveEditingBanner(placement))
+            {
+                return _worldRenderer!.Transform;
+            }
+
+            return BannerPlacementToTransform(placement);
         }
 
         internal void SyncPlacementManipulatorFromWorkingTransform()
@@ -2918,8 +2992,10 @@ namespace XivMediaPlayer
         internal void SelectBannerForEditing(BannerPlacement banner)
         {
             ApplyWorkingTransformToCurrentSelection();
+            CurrentTvPlacement = null;
             CurrentBannerPlacement = banner;
             ApplyBannerPlacementToRenderer(banner);
+            NormalizeBannerTransform(banner, _worldRenderer!.Transform);
             _screenSettingsWindow?.SyncFromTransform();
             _placementManipulator.SetSelection(Compositing.PlacementManipulator.TargetType.Banner, banner.Id, BannerPlacementToTransform(banner), notify: false);
         }
@@ -2956,6 +3032,15 @@ namespace XivMediaPlayer
             banner.Opacity = transform.Opacity;
         }
 
+        private void CopyTransformToBannerWithAspect(BannerPlacement banner, WorldScreenTransform transform)
+        {
+            CopyTransformToBanner(banner, transform);
+            if (TryGetBannerImageAspect(banner, out float imageAspect))
+            {
+                banner.ScaleY = banner.ScaleX / imageAspect;
+            }
+        }
+
         private void BuildPlacementPickables(IReadOnlyList<TvPlacement> tvs, IReadOnlyList<BannerPlacement> banners)
         {
             _placementPickables.Clear();
@@ -2973,8 +3058,14 @@ namespace XivMediaPlayer
 
             foreach (var banner in banners)
             {
+                var transform = BannerPlacementToTransform(banner);
+                if (IsLiveEditingBanner(banner))
+                {
+                    transform = _worldRenderer!.Transform.Clone();
+                }
+
                 _placementPickables.Add(new Compositing.PlacementManipulator.Pickable(
-                    Compositing.PlacementManipulator.TargetType.Banner, banner.Id, BannerPlacementToTransform(banner)));
+                    Compositing.PlacementManipulator.TargetType.Banner, banner.Id, transform));
             }
         }
 
@@ -3022,7 +3113,7 @@ namespace XivMediaPlayer
                 var banner = _roomBannerPlacements.FirstOrDefault(b => b.Id == id) ?? CurrentBannerPlacement;
                 if (banner != null)
                 {
-                    CopyTransformToBanner(banner, transform);
+                    NormalizeBannerTransform(banner, transform);
                     ApplyBannerPlacementToRenderer(banner);
                 }
             }
@@ -3060,7 +3151,7 @@ namespace XivMediaPlayer
                 banner = _roomBannerPlacements.FirstOrDefault(b => b.Id == selectedId) ?? CurrentBannerPlacement;
                 if (banner == null) return;
 
-                CopyTransformToBanner(banner, transform);
+                NormalizeBannerTransform(banner, transform);
                 banner.BypassLock = bypassLock;
                 UpsertRoomBanner(banner);
             }
@@ -3268,11 +3359,14 @@ namespace XivMediaPlayer
                 if (roomTvsSnapshot.Count > 0)
                 {
                     var preferredTv = SelectPreferredTv(roomTvsSnapshot) ?? roomTvsSnapshot[0];
-                    CurrentTvPlacement = preferredTv;
-
-                    if (_worldRenderer != null && !IsHousingMenuOpen && !(_screenSettingsWindow?.IsOpen == true))
+                    if (!IsBannerEditActive())
                     {
-                        ApplyTvPlacementToRenderer(preferredTv);
+                        CurrentTvPlacement = preferredTv;
+
+                        if (_worldRenderer != null && !IsHousingMenuOpen && !(_screenSettingsWindow?.IsOpen == true))
+                        {
+                            ApplyTvPlacementToRenderer(preferredTv);
+                        }
                     }
 
                     foreach (var tv in roomTvsSnapshot)
@@ -3318,6 +3412,13 @@ namespace XivMediaPlayer
         private void SaveScreenForCurrentLocation()
         {
             if (_worldRenderer?.Transform == null) return;
+
+            if (IsBannerEditActive())
+            {
+                CopyTransformToBannerWithAspect(CurrentBannerPlacement!, _worldRenderer.Transform);
+                UpsertRoomBanner(CurrentBannerPlacement!);
+                return;
+            }
 
             if (CurrentTvPlacement != null)
             {
@@ -4266,7 +4367,9 @@ namespace XivMediaPlayer
                     _wasLeftMousePressed = isLeftMousePressed;
 
                     bool housingPlacementEdit = false;
-                    if (IsHousingMenuOpen && cameraPos.HasValue && cameraForward.HasValue)
+                    bool placementEditActive = (IsHousingMenuOpen || _screenSettingsWindow.IsOpen)
+                        && cameraPos.HasValue && cameraForward.HasValue;
+                    if (placementEditActive)
                     {
                         SyncPlacementManipulatorFromWorkingTransform();
                         BuildPlacementPickables(roomTvsToRender, roomBannersToRender);
@@ -4673,7 +4776,10 @@ namespace XivMediaPlayer
                             _worldRenderer.BeginMultiTvCompositeFrame();
                         }
 
-                        if (_screenSettingsWindow?.IsOpen == true && CurrentTvPlacement != null)
+                        if (_screenSettingsWindow?.IsOpen == true
+                            && CurrentTvPlacement != null
+                            && !IsBannerEditActive()
+                            && _placementManipulator.SelectedType == Compositing.PlacementManipulator.TargetType.Tv)
                         {
                             CopyTransformToTv(CurrentTvPlacement, _worldRenderer.Transform);
                         }
@@ -4725,6 +4831,21 @@ namespace XivMediaPlayer
                             continue;
                         }
 
+                        if (TryGetBannerImageAspect(banner, out float imageAspect))
+                        {
+                            float expectedHeight = banner.ScaleX / imageAspect;
+                            if (MathF.Abs(banner.ScaleY - expectedHeight) > 0.01f)
+                            {
+                                banner.ScaleY = expectedHeight;
+                                UpsertRoomBanner(banner);
+                                if (CurrentBannerPlacement?.Id == banner.Id)
+                                {
+                                    NormalizeBannerTransform(banner, _worldRenderer.Transform);
+                                    _screenSettingsWindow?.SyncFromTransform();
+                                }
+                            }
+                        }
+
                         _worldRenderer.Render(
                             bannerSrv, bannerW, bannerH, bannerW, bannerH, _depthCapture,
                             _prevCameraPos ?? cameraPos, _prevCameraForward ?? cameraForward, _prevCameraRight ?? cameraRight, _prevCameraUp ?? cameraUp,
@@ -4732,7 +4853,7 @@ namespace XivMediaPlayer
                             hoverUV: null, progress: 0f, bufferProgress: 1f, playbackState: 0f, lockState: 0f, volume: 0f,
                             titleSrvPtr: IntPtr.Zero, showScreensaver: 0f, useDifferenceFallback: useDifferenceFallback,
                             viewProjMatrix: _prevViewProjMatrix ?? viewProjMatrix, viewportPos: mainViewport.Pos, viewportSize: mainViewport.Size,
-                            screenTransform: BannerPlacementToTransform(banner));
+                            screenTransform: ResolveBannerRenderTransform(banner));
                     }
                         
                     _prevCameraPos = cameraPos;
@@ -4741,7 +4862,7 @@ namespace XivMediaPlayer
                     _prevCameraUp = cameraUp;
                     _prevViewProjMatrix = viewProjMatrix;
 
-                    if (IsHousingMenuOpen)
+                    if (IsHousingMenuOpen || _screenSettingsWindow.IsOpen)
                     {
                         _placementManipulator.DrawOverlay(_gameGui, cameraPos ?? _cachedLocalPlayerPosition ?? System.Numerics.Vector3.Zero);
                     }

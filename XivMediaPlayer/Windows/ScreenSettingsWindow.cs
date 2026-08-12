@@ -52,7 +52,7 @@ namespace XivMediaPlayer.Windows {
         Action onSave,
         Action onPlaceAtCamera) :
       base("Screen Placement###ScreenPlacement",
-        ImGuiWindowFlags.NoCollapse | ImGuiWindowFlags.AlwaysAutoResize,
+        ImGuiWindowFlags.NoCollapse,
         false) {
       _plugin = plugin;
       _gameGui = gameGui;
@@ -61,7 +61,7 @@ namespace XivMediaPlayer.Windows {
       _onSave = onSave;
       _onPlaceAtCamera = onPlaceAtCamera;
 
-      Size = new Vector2(340, 0);
+      Size = new Vector2(420, 520);
       SizeCondition = ImGuiCond.FirstUseEver;
 
       SyncFromTransform();
@@ -151,7 +151,11 @@ namespace XivMediaPlayer.Windows {
       }
 
       ImGui.SameLine();
-      ImGui.SetCursorPosX(ImGui.GetWindowWidth() - 110);
+      float tutorialButtonWidth = 110f;
+      float tutorialSpacing = ImGui.GetContentRegionAvail().X - tutorialButtonWidth;
+      if (tutorialSpacing > 0f) {
+        ImGui.SetCursorPosX(ImGui.GetCursorPosX() + tutorialSpacing);
+      }
       if (ImGui.Button(Localize("Tutorial Video"))) {
           System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo {
               FileName = "https://www.youtube.com/watch?v=ZgLs2OJQ8ks",
@@ -165,11 +169,7 @@ namespace XivMediaPlayer.Windows {
         return;
       }
 
-      DrawTvSelector(locKey);
-
-      ImGui.Separator();
-
-      // Ctrl+Shift quick-snap logic
+      // Ctrl+Shift quick-snap logic (active on any tab)
       bool isSnapKeyPressed = ImGui.GetIO().KeyShift && ImGui.GetIO().KeyCtrl;
       if (isSnapKeyPressed && !_wasShiftPressed) {
           unsafe {
@@ -191,18 +191,53 @@ namespace XivMediaPlayer.Windows {
       }
       _wasShiftPressed = isSnapKeyPressed;
 
-      // Quick actions 
+      if (ImGui.BeginTabBar("ScreenPlacementTabs")) {
+        if (ImGui.BeginTabItem(Localize("Placement"))) {
+          DrawPlacementTab(locKey, hasPrivileges);
+          ImGui.EndTabItem();
+        }
+        if (ImGui.BeginTabItem(Localize("Appearance"))) {
+          DrawAppearanceTab();
+          ImGui.EndTabItem();
+        }
+        if (ImGui.BeginTabItem(Localize("Branding"))) {
+          DrawVenueBrandingSection(locKey);
+          ImGui.EndTabItem();
+        }
+        if (ImGui.BeginTabItem(Localize("Sync"))) {
+          DrawSyncTab(locKey);
+          ImGui.EndTabItem();
+        }
+        ImGui.EndTabBar();
+      }
+    }
+
+    private void DrawPlacementTab(string locKey, bool hasPrivileges) {
+      if (_plugin.CurrentBannerPlacement != null) {
+        ImGui.TextColored(new Vector4(1f, 0.85f, 0.4f, 1f), Localize("Editing banner — use the gizmo in-world or these controls, then Update Selected Banner on the Branding tab."));
+        ImGui.Spacing();
+      } else if (_plugin.CurrentTvPlacement != null) {
+        ImGui.TextDisabled(Localize("Editing TV screen placement."));
+        ImGui.Spacing();
+      }
+
+      DrawTvSelector(locKey);
+
+      if (ImGui.GetCursorPosY() > ImGui.GetStyle().FramePadding.Y) {
+        ImGui.Separator();
+      }
+
       if (ImGui.Button(Localize("Place at Camera"))) {
         _onPlaceAtCamera?.Invoke();
         SyncFromTransform();
         _onSave?.Invoke();
       }
-      
+
       ImGui.Spacing();
       ImGui.TextColored(new Vector4(0.7f, 1f, 0.7f, 1f), Localize("Quick Snap:"));
       ImGui.TextWrapped(Localize("Hold CTRL + SHIFT while hovering over or selecting a furnishing in Edit Mode to instantly snap the TV to it."));
       ImGui.Spacing();
-      
+
       if (ImGui.Button(Localize("Save"))) {
         SyncToTransform();
         _onSave?.Invoke();
@@ -216,7 +251,7 @@ namespace XivMediaPlayer.Windows {
         _transform.Enabled = false;
         _enabled = false;
         SyncFromTransform();
-        
+
         string locKey2 = _plugin.LocationKey;
         if (!string.IsNullOrEmpty(locKey2) && _plugin.CurrentTvPlacement != null && (_plugin.CurrentTvPlacement.OwnerId == _plugin.Config.OwnerId || hasPrivileges)) {
             _ = DeleteTvAsync(locKey2, restoreOnFailure: true);
@@ -228,7 +263,6 @@ namespace XivMediaPlayer.Windows {
       ImGui.Spacing();
       ImGui.Separator();
 
-      // Position 
       ImGui.TextColored(new Vector4(0.7f, 0.9f, 1f, 1f), Localize("Position"));
 
       bool posChanged = false;
@@ -238,7 +272,7 @@ namespace XivMediaPlayer.Windows {
       savePos |= ImGui.IsItemDeactivatedAfterEdit();
       posChanged |= ImGui.DragFloat("Z##pos", ref _position.Z, 0.05f, -1000f, 1000f, "%.2f");
       savePos |= ImGui.IsItemDeactivatedAfterEdit();
-      
+
       if (posChanged) {
         _transform.Position = _position;
       }
@@ -246,7 +280,6 @@ namespace XivMediaPlayer.Windows {
         _onSave?.Invoke();
       }
 
-      // Nudge buttons
       float nudge = 0.25f;
       if (ImGui.Button("\u2190##posX")) { _position.X -= nudge; _transform.Position = _position; _onSave?.Invoke(); }
       ImGui.SameLine();
@@ -263,7 +296,6 @@ namespace XivMediaPlayer.Windows {
       ImGui.Spacing();
       ImGui.Separator();
 
-      // Rotation 
       ImGui.TextColored(new Vector4(0.7f, 0.9f, 1f, 1f), Localize("Rotation"));
 
       bool rotChanged = false;
@@ -278,7 +310,6 @@ namespace XivMediaPlayer.Windows {
         _onSave?.Invoke();
       }
 
-      // Quick rotation presets
       if (ImGui.Button(Localize("Face North"))) { _rotation.X = 0; _transform.RotationDegrees = new Vector3(_rotation.Y, 0, 0); _onSave?.Invoke(); }
       ImGui.SameLine();
       if (ImGui.Button(Localize("Face East"))) { _rotation.X = 90; _transform.RotationDegrees = new Vector3(_rotation.Y, 90, 0); _onSave?.Invoke(); }
@@ -290,37 +321,86 @@ namespace XivMediaPlayer.Windows {
       ImGui.Spacing();
       ImGui.Separator();
 
-      // Scale 
+      if (_plugin.CurrentBannerPlacement != null) {
+        DrawBannerSizeControls();
+      } else {
+        DrawTvSizeControls();
+      }
+
+      ImGui.Spacing();
+      ImGui.Separator();
+      ImGui.TextColored(new Vector4(0.5f, 0.5f, 0.5f, 1f),
+        string.Format(Localize("Screen: {0:F1}m x {1:F1}m at ({2:F1}, {3:F1}, {4:F1})"), _scale.X, _scale.Y, _position.X, _position.Y, _position.Z));
+    }
+
+    private void ApplyBannerScaleFromImageAspect() {
+      if (_plugin.CurrentBannerPlacement == null) return;
+      if (_plugin.TryGetBannerImageAspect(_plugin.CurrentBannerPlacement, out float imageAspect)) {
+        _scale.Y = _scale.X / imageAspect;
+      }
+    }
+
+    private void DrawBannerSizeControls() {
+      ImGui.TextColored(new Vector4(0.7f, 0.9f, 1f, 1f), Localize("Banner Size (world units)"));
+
+      if (_plugin.TryGetBannerImageAspect(_plugin.CurrentBannerPlacement!, out float imageAspect)) {
+        ImGui.TextDisabled(string.Format(Localize("Image aspect: {0:F2}:1"), imageAspect));
+      } else {
+        ImGui.TextDisabled(Localize("Image aspect will apply once the banner texture loads."));
+      }
+
+      bool scaleChanged = ImGui.DragFloat(Localize("Width##bannerScale"), ref _scale.X, 0.1f, 0.5f, 200f, "%.1f");
+      bool saveScale = ImGui.IsItemDeactivatedAfterEdit();
+      if (scaleChanged) {
+        ApplyBannerScaleFromImageAspect();
+        _transform.Scale = _scale;
+      }
+      if (saveScale || scaleChanged) {
+        _onSave?.Invoke();
+      }
+
+      if (ImGui.Button(Localize("Small (2m)"))) { _scale.X = 2f; ApplyBannerScaleFromImageAspect(); _transform.Scale = _scale; _onSave?.Invoke(); }
+      ImGui.SameLine();
+      if (ImGui.Button(Localize("Medium (4m)"))) { _scale.X = 4f; ApplyBannerScaleFromImageAspect(); _transform.Scale = _scale; _onSave?.Invoke(); }
+      ImGui.SameLine();
+      if (ImGui.Button(Localize("Large (8m)"))) { _scale.X = 8f; ApplyBannerScaleFromImageAspect(); _transform.Scale = _scale; _onSave?.Invoke(); }
+      ImGui.SameLine();
+      if (ImGui.Button(Localize("Cinema (12m)"))) { _scale.X = 12f; ApplyBannerScaleFromImageAspect(); _transform.Scale = _scale; _onSave?.Invoke(); }
+
+      ImGui.TextDisabled(string.Format(Localize("Height: {0:F1}m (from image aspect)"), _scale.Y));
+      ImGui.TextWrapped(Localize("You can also drag the green corner handles on the banner in-world to scale it."));
+    }
+
+    private void DrawTvSizeControls() {
       ImGui.TextColored(new Vector4(0.7f, 0.9f, 1f, 1f), Localize("Size (world units)"));
 
       bool aspectChanged = false;
       aspectChanged |= ImGui.RadioButton("16:9", ref _aspectRatio, 0);
-        ImGui.SameLine();
-        aspectChanged |= ImGui.RadioButton("4:3", ref _aspectRatio, 1);
-        ImGui.SameLine();
-        aspectChanged |= ImGui.RadioButton(Localize("Custom / Free"), ref _aspectRatio, 2);
-      
+      ImGui.SameLine();
+      aspectChanged |= ImGui.RadioButton("4:3", ref _aspectRatio, 1);
+      ImGui.SameLine();
+      aspectChanged |= ImGui.RadioButton(Localize("Custom / Free"), ref _aspectRatio, 2);
+
       bool scaleChanged = false;
-        if (_aspectRatio != 2) {
-            scaleChanged |= ImGui.DragFloat(Localize("Diagonal Size##scale"), ref _scale.X, 0.1f, 0.5f, 200f, "%.1f");
-        } else {
-            scaleChanged |= ImGui.DragFloat(Localize("Width##scaleX"), ref _scale.X, 0.1f, 0.5f, 200f, "%.1f");
-            scaleChanged |= ImGui.DragFloat(Localize("Height##scaleY"), ref _scale.Y, 0.1f, 0.5f, 200f, "%.1f");
-        }
+      if (_aspectRatio != 2) {
+        scaleChanged |= ImGui.DragFloat(Localize("Diagonal Size##scale"), ref _scale.X, 0.1f, 0.5f, 200f, "%.1f");
+      } else {
+        scaleChanged |= ImGui.DragFloat(Localize("Width##scaleX"), ref _scale.X, 0.1f, 0.5f, 200f, "%.1f");
+        scaleChanged |= ImGui.DragFloat(Localize("Height##scaleY"), ref _scale.Y, 0.1f, 0.5f, 200f, "%.1f");
+      }
       bool saveScale = ImGui.IsItemDeactivatedAfterEdit();
 
       if (aspectChanged || scaleChanged) {
-          if (_aspectRatio != 2) {
-              float ratio = _aspectRatio == 0 ? (9f / 16f) : (3f / 4f);
-              _scale.Y = _scale.X * ratio;
-          }
-          _transform.Scale = _scale;
+        if (_aspectRatio != 2) {
+          float ratio = _aspectRatio == 0 ? (9f / 16f) : (3f / 4f);
+          _scale.Y = _scale.X * ratio;
         }
+        _transform.Scale = _scale;
+      }
       if (saveScale || aspectChanged) {
         _onSave?.Invoke();
       }
 
-      // Preset sizes
       if (ImGui.Button(Localize("Small (2m)"))) { _scale.X = 2f; _scale.Y = _scale.X * (_aspectRatio == 1 ? (3f/4f) : (9f/16f)); _transform.Scale = _scale; _onSave?.Invoke(); }
       ImGui.SameLine();
       if (ImGui.Button(Localize("Medium (4m)"))) { _scale.X = 4f; _scale.Y = _scale.X * (_aspectRatio == 1 ? (3f/4f) : (9f/16f)); _transform.Scale = _scale; _onSave?.Invoke(); }
@@ -328,16 +408,13 @@ namespace XivMediaPlayer.Windows {
       if (ImGui.Button(Localize("Large (8m)"))) { _scale.X = 8f; _scale.Y = _scale.X * (_aspectRatio == 1 ? (3f/4f) : (9f/16f)); _transform.Scale = _scale; _onSave?.Invoke(); }
       ImGui.SameLine();
       if (ImGui.Button(Localize("Cinema (12m)"))) { _scale.X = 12f; _scale.Y = _scale.X * (_aspectRatio == 1 ? (3f/4f) : (9f/16f)); _transform.Scale = _scale; _onSave?.Invoke(); }
+    }
 
-      ImGui.Spacing();
-      ImGui.Separator();
-
-      // Projector & Transparency
+    private void DrawAppearanceTab() {
       ImGui.TextColored(new Vector4(0.7f, 0.9f, 1f, 1f), Localize("Projector & Transparency"));
-      
+
       bool appearanceChanged = false;
       appearanceChanged |= ImGui.Checkbox(Localize("Projector Mode (Additive Blend)"), ref _isProjectorMode);
-      
       appearanceChanged |= ImGui.SliderFloat(Localize("Opacity"), ref _opacity, 0.05f, 1.0f, "%.2f");
       appearanceChanged |= ImGui.ColorEdit3(Localize("Screensaver Color"), ref _screensaverColor);
 
@@ -345,9 +422,9 @@ namespace XivMediaPlayer.Windows {
         Localize("Bouncing Logo"), Localize("VCR"), Localize("No Signal"), Localize("Static"), Localize("Test Pattern"), Localize("Matrix Rain")
       };
       appearanceChanged |= ImGui.Combo(Localize("Screensaver Style"), ref _screensaverStyle, screensaverStyles, screensaverStyles.Length);
-      
+
       bool saveAppearance = ImGui.IsItemDeactivatedAfterEdit() || ImGui.IsItemDeactivated();
-      
+
       if (appearanceChanged) {
         _transform.Opacity = _opacity;
         _transform.IsProjectorMode = _isProjectorMode;
@@ -357,17 +434,79 @@ namespace XivMediaPlayer.Windows {
       if (saveAppearance || appearanceChanged) {
         _onSave?.Invoke();
       }
+    }
 
-      ImGui.Spacing();
-      ImGui.Separator();
-      DrawVenueBrandingSection(_plugin.LocationKey);
+    private void DrawSyncTab(string locationKey) {
+      ImGui.TextColored(new Vector4(0.7f, 0.9f, 1f, 1f), Localize("Room Sync"));
+      ImGui.TextWrapped(Localize("Saving above only saves locally. To make the TV visible to other players, you must sync it to the room."));
 
-      ImGui.Spacing();
-      ImGui.Separator();
+      bool isOutdoorsSync = !string.IsNullOrEmpty(locationKey) && locationKey.StartsWith("zone_");
+      bool isIslandSync = !string.IsNullOrEmpty(locationKey) && locationKey.StartsWith("island_");
 
-      // Info 
-      ImGui.TextColored(new Vector4(0.5f, 0.5f, 0.5f, 1f),
-        string.Format(Localize("Screen: {0:F1}m x {1:F1}m at ({2:F1}, {3:F1}, {4:F1})"), _scale.X, _scale.Y, _position.X, _position.Y, _position.Z));
+      if (string.IsNullOrEmpty(locationKey) || (!locationKey.StartsWith("house_") && !locationKey.StartsWith("zone_") && !locationKey.StartsWith("island_"))) {
+        ImGui.TextColored(new Vector4(1f, 0.4f, 0.4f, 1f), Localize("You must be inside a housing area or valid outdoor zone to sync TVs."));
+      } else {
+        unsafe
+        {
+          var housingMgr = FFXIVClientStructs.FFXIV.Client.Game.HousingManager.Instance();
+          if (housingMgr != null && !housingMgr->IsInside() && housingMgr->GetCurrentPlot() >= 0 && housingMgr->GetCurrentWard() >= 0)
+          {
+            ImGui.TextColored(new Vector4(0.4f, 1f, 0.4f, 1f), string.Format(Localize("You are standing in Plot {0}"), housingMgr->GetCurrentPlot() + 1));
+          }
+        }
+
+        ImGui.TextColored(new Vector4(0.7f, 0.7f, 0.7f, 1f), Localize("Placement Key:"));
+        ImGui.SameLine();
+        ImGui.Text(locationKey);
+
+        if (_plugin.CurrentTvPlacement != null)
+        {
+          ImGui.TextColored(new Vector4(0.4f, 1f, 0.4f, 1f), Localize("Synced TV Key:"));
+          ImGui.SameLine();
+          ImGui.Text(_plugin.CurrentTvPlacement.LocationKey);
+        }
+
+        if (_plugin.CurrentTvPlacement == null || _plugin.CurrentTvPlacement.OwnerId == _plugin.Config.OwnerId) {
+          bool isLocked = _plugin.CurrentTvPlacement?.IsLocked ?? !isOutdoorsSync;
+          if (!isOutdoorsSync) {
+            if (ImGui.Checkbox(Localize("Lock TV to Owner Only"), ref isLocked)) {
+              if (_plugin.CurrentTvPlacement != null) {
+                _plugin.CurrentTvPlacement.IsLocked = isLocked;
+              } else {
+                _plugin.CurrentTvPlacement = new Networking.Models.TvPlacement {
+                  OwnerId = _plugin.Config.OwnerId,
+                  IsLocked = isLocked
+                };
+              }
+              RegisterTvAsync(locationKey);
+            }
+          }
+
+          ImGui.Spacing();
+          if (ImGui.Button(Localize("Sync Placements to Area"))) {
+            RegisterTvAsync(locationKey);
+          }
+          ImGui.SameLine();
+          if (ImGui.Button(Localize("Remove TV from Area"))) {
+            _ = DeleteTvAsync(locationKey);
+          }
+        } else {
+          if (_plugin.IsHousingMenuOpen || isOutdoorsSync || isIslandSync) {
+            if (ImGui.Button(Localize("Take Ownership of TV"))) {
+              RegisterTvAsync(locationKey);
+            }
+            ImGui.TextColored(new Vector4(1f, 0.8f, 0.2f, 1f), Localize("You can override this locked TV because you have privileges here."));
+          } else {
+            if (_plugin.CurrentTvPlacement.IsLocked) {
+              ImGui.TextColored(new Vector4(1f, 0.4f, 0.4f, 1f), Localize("This TV is locked by its owner."));
+            }
+          }
+        }
+
+        if (!string.IsNullOrEmpty(_statusMessage)) {
+          ImGui.TextColored(_statusColor, Localize(_statusMessage));
+        }
+      }
 
       var depthDebug = _renderer.DepthDebugInfo;
       if (!string.IsNullOrEmpty(depthDebug)) {
@@ -379,81 +518,6 @@ namespace XivMediaPlayer.Windows {
       var rendererError = _renderer.DepthRendererError;
       if (!string.IsNullOrEmpty(rendererError)) {
         ImGui.TextColored(new Vector4(1f, 0.3f, 0.3f, 1f), string.Format(Localize("GPU Error: {0}"), rendererError));
-      }
-
-      ImGui.Spacing();
-      ImGui.Separator();
-
-      ImGui.TextColored(new Vector4(0.7f, 0.9f, 1f, 1f), Localize("Room Sync"));
-      ImGui.TextWrapped(Localize("Saving above only saves locally. To make the TV visible to other players, you must sync it to the room."));
-      
-      string locationKey = _plugin.LocationKey;
-      bool isOutdoorsSync = !string.IsNullOrEmpty(locationKey) && locationKey.StartsWith("zone_");
-      bool isIslandSync = !string.IsNullOrEmpty(locationKey) && locationKey.StartsWith("island_");
-      
-      if (string.IsNullOrEmpty(locationKey) || (!locationKey.StartsWith("house_") && !locationKey.StartsWith("zone_") && !locationKey.StartsWith("island_"))) {
-          ImGui.TextColored(new Vector4(1f, 0.4f, 0.4f, 1f), Localize("You must be inside a housing area or valid outdoor zone to sync TVs."));
-      } else {
-          unsafe
-          {
-              var housingMgr = FFXIVClientStructs.FFXIV.Client.Game.HousingManager.Instance();
-              if (housingMgr != null && !housingMgr->IsInside() && housingMgr->GetCurrentPlot() >= 0 && housingMgr->GetCurrentWard() >= 0)
-              {
-                  ImGui.TextColored(new Vector4(0.4f, 1f, 0.4f, 1f), string.Format(Localize("You are standing in Plot {0}"), housingMgr->GetCurrentPlot() + 1));
-              }
-          }
-          
-          ImGui.TextColored(new Vector4(0.7f, 0.7f, 0.7f, 1f), Localize("Placement Key:"));
-          ImGui.SameLine();
-          ImGui.Text(locationKey);
-
-          if (_plugin.CurrentTvPlacement != null)
-          {
-              ImGui.TextColored(new Vector4(0.4f, 1f, 0.4f, 1f), Localize("Synced TV Key:"));
-              ImGui.SameLine();
-              ImGui.Text(_plugin.CurrentTvPlacement.LocationKey);
-          }
-
-          if (_plugin.CurrentTvPlacement == null || _plugin.CurrentTvPlacement.OwnerId == _plugin.Config.OwnerId) {
-              bool isLocked = _plugin.CurrentTvPlacement?.IsLocked ?? !isOutdoorsSync;
-              if (!isOutdoorsSync) {
-                  if (ImGui.Checkbox(Localize("Lock TV to Owner Only"), ref isLocked)) {
-                      if (_plugin.CurrentTvPlacement != null) {
-                          _plugin.CurrentTvPlacement.IsLocked = isLocked;
-                      } else {
-                          _plugin.CurrentTvPlacement = new Networking.Models.TvPlacement {
-                              OwnerId = _plugin.Config.OwnerId,
-                              IsLocked = isLocked
-                          };
-                      }
-                      RegisterTvAsync(locationKey);
-                  }
-              }
-              
-              ImGui.Spacing();
-              if (ImGui.Button(Localize("Sync Placements to Area"))) {
-                  RegisterTvAsync(locationKey);
-              }
-              ImGui.SameLine();
-              if (ImGui.Button(Localize("Remove TV from Area"))) {
-                  _ = DeleteTvAsync(locationKey);
-              }
-          } else {
-              if (_plugin.IsHousingMenuOpen || isOutdoorsSync || isIslandSync) {
-                  if (ImGui.Button(Localize("Take Ownership of TV"))) {
-                      RegisterTvAsync(locationKey);
-                  }
-                  ImGui.TextColored(new Vector4(1f, 0.8f, 0.2f, 1f), Localize("You can override this locked TV because you have privileges here."));
-              } else {
-                  if (_plugin.CurrentTvPlacement.IsLocked) {
-                      ImGui.TextColored(new Vector4(1f, 0.4f, 0.4f, 1f), Localize("This TV is locked by its owner."));
-                  }
-              }
-          }
-
-          if (!string.IsNullOrEmpty(_statusMessage)) {
-              ImGui.TextColored(_statusColor, Localize(_statusMessage));
-          }
       }
     }
 
@@ -470,11 +534,25 @@ namespace XivMediaPlayer.Windows {
 
       ImGui.Spacing();
       ImGui.TextColored(new Vector4(0.7f, 0.9f, 1f, 1f), Localize("Banner Props"));
-      ImGui.TextWrapped(Localize("Static image banners are separate from TVs. Place them in the world with the controls above, then add an image URL here."));
+      ImGui.TextWrapped(Localize("Banners are static images placed in the world (posters, signs, etc.). Steps:"));
+      ImGui.BulletText(Localize("Enter a direct image URL below (png/jpg/webp)."));
+      ImGui.BulletText(Localize("On the Placement tab, position the banner with Place at Camera or the sliders."));
+      ImGui.BulletText(Localize("Click Add Banner Here — the image appears in-world and the gizmo lets you drag it."));
+      ImGui.BulletText(Localize("When finished moving, click Update Selected Banner to save changes."));
+      ImGui.Spacing();
 
       ImGui.InputText(Localize("Banner Image URL"), ref _bannerImageUrl, 512);
       if (ImGui.Button(Localize("Add Banner Here"))) {
         RegisterBannerAsync(locationKey);
+      }
+      ImGui.SameLine();
+      if (_plugin.CurrentBannerPlacement != null && ImGui.Button(Localize("Update Selected Banner"))) {
+        UpdateBannerAsync(locationKey);
+      }
+
+      if (!string.IsNullOrEmpty(_statusMessage)) {
+        ImGui.Spacing();
+        ImGui.TextColored(_statusColor, Localize(_statusMessage));
       }
 
       var banners = _plugin.RoomBannerPlacements
@@ -488,13 +566,8 @@ namespace XivMediaPlayer.Windows {
           ImGui.TextWrapped(string.Format(Localize("Banner {0}: {1}"), i + 1, banner.ImageUrl));
           ImGui.SameLine();
           if (ImGui.SmallButton($"{Localize("Edit")}##banner_{banner.Id}")) {
-            _plugin.CurrentBannerPlacement = banner;
-            _position = new Vector3(banner.PositionX, banner.PositionY, banner.PositionZ);
-            _rotation = new Vector2(banner.RotationY, banner.RotationX);
-            _scale = new Vector2(banner.ScaleX, banner.ScaleY);
-            _opacity = banner.Opacity;
+            _plugin.SelectBannerForEditing(banner);
             _bannerImageUrl = banner.ImageUrl;
-            SyncToTransform();
           }
           ImGui.SameLine();
           if (ImGui.SmallButton($"{Localize("Delete")}##del_banner_{banner.Id}")) {
@@ -503,8 +576,53 @@ namespace XivMediaPlayer.Windows {
         }
       }
 
-      if (_plugin.CurrentBannerPlacement != null && ImGui.Button(Localize("Update Selected Banner"))) {
-        UpdateBannerAsync(locationKey);
+    }
+
+    public async void RegisterBannerAsync(string locationKey)
+    {
+      if (string.IsNullOrEmpty(locationKey)) {
+        _statusMessage = "You must be in a housing area to add banners.";
+        _statusColor = new Vector4(1, 0.3f, 0.3f, 1);
+        return;
+      }
+
+      if (string.IsNullOrWhiteSpace(_bannerImageUrl)) {
+        _statusMessage = "Enter a banner image URL first.";
+        _statusColor = new Vector4(1, 0.6f, 0.2f, 1);
+        return;
+      }
+
+      SyncToTransform();
+      var placement = BuildBannerFromTransform(locationKey, createNewId: true);
+      placement.ImageUrl = _bannerImageUrl.Trim();
+
+      _statusMessage = "Adding banner...";
+      _statusColor = new Vector4(1, 1, 1, 1);
+
+      try {
+        var result = await _plugin.ServerClient.RegisterBannerAsync(locationKey, placement, create: true);
+        _plugin.RunOnFrameworkThread(() =>
+        {
+          if (result != null) {
+            _plugin.UpsertRoomBanner(result);
+            _plugin.SelectBannerForEditing(result);
+            _statusMessage = "Banner added! Drag it with the in-world gizmo, then Update Selected Banner.";
+            _statusColor = new Vector4(0.3f, 1f, 0.3f, 1);
+          } else {
+            _plugin.UpsertRoomBanner(placement);
+            _plugin.SelectBannerForEditing(placement);
+            _statusMessage = "Banner added locally, but sync server rejected it. You can still move it here.";
+            _statusColor = new Vector4(1, 0.6f, 0.2f, 1);
+          }
+        });
+      } catch (Exception) {
+        _plugin.RunOnFrameworkThread(() =>
+        {
+          _plugin.UpsertRoomBanner(placement);
+          _plugin.SelectBannerForEditing(placement);
+          _statusMessage = "Banner added locally, but failed to reach sync server.";
+          _statusColor = new Vector4(1, 0.6f, 0.2f, 1);
+        });
       }
     }
 
@@ -541,34 +659,6 @@ namespace XivMediaPlayer.Windows {
       }
     }
 
-    public async void RegisterBannerAsync(string locationKey)
-    {
-      if (string.IsNullOrEmpty(locationKey) || string.IsNullOrWhiteSpace(_bannerImageUrl)) return;
-
-      SyncToTransform();
-      var placement = BuildBannerFromTransform(locationKey, createNewId: true);
-      placement.ImageUrl = _bannerImageUrl.Trim();
-
-      _statusMessage = "Adding banner...";
-      _statusColor = new Vector4(1, 1, 1, 1);
-
-      try {
-        var result = await _plugin.ServerClient.RegisterBannerAsync(locationKey, placement, create: true);
-        if (result != null) {
-          _plugin.UpsertRoomBanner(result);
-          _plugin.CurrentBannerPlacement = result;
-          _statusMessage = "Banner added for all visitors!";
-          _statusColor = new Vector4(0.3f, 1f, 0.3f, 1);
-        } else {
-          _statusMessage = "Failed to add banner.";
-          _statusColor = new Vector4(1, 0.3f, 0.3f, 1);
-        }
-      } catch (Exception) {
-        _statusMessage = "Failed to add banner.";
-        _statusColor = new Vector4(1, 0.3f, 0.3f, 1);
-      }
-    }
-
     public async void UpdateBannerAsync(string locationKey)
     {
       if (_plugin.CurrentBannerPlacement == null || string.IsNullOrEmpty(locationKey)) return;
@@ -580,16 +670,33 @@ namespace XivMediaPlayer.Windows {
           ? _plugin.CurrentBannerPlacement.ImageUrl
           : _bannerImageUrl.Trim();
 
+      _statusMessage = "Updating banner...";
+      _statusColor = new Vector4(1, 1, 1, 1);
+
       try {
         var result = await _plugin.ServerClient.RegisterBannerAsync(locationKey, placement, create: false);
-        if (result != null) {
-          _plugin.UpsertRoomBanner(result);
-          _statusMessage = "Banner updated!";
-          _statusColor = new Vector4(0.3f, 1f, 0.3f, 1);
-        }
+        _plugin.RunOnFrameworkThread(() =>
+        {
+          if (result != null) {
+            _plugin.UpsertRoomBanner(result);
+            _plugin.SelectBannerForEditing(result);
+            _statusMessage = "Banner updated!";
+            _statusColor = new Vector4(0.3f, 1f, 0.3f, 1);
+          } else {
+            _plugin.UpsertRoomBanner(placement);
+            _plugin.SelectBannerForEditing(placement);
+            _statusMessage = "Banner saved locally, but sync server rejected the update.";
+            _statusColor = new Vector4(1, 0.6f, 0.2f, 1);
+          }
+        });
       } catch (Exception) {
-        _statusMessage = "Failed to update banner.";
-        _statusColor = new Vector4(1, 0.3f, 0.3f, 1);
+        _plugin.RunOnFrameworkThread(() =>
+        {
+          _plugin.UpsertRoomBanner(placement);
+          _plugin.SelectBannerForEditing(placement);
+          _statusMessage = "Banner saved locally, but failed to reach sync server.";
+          _statusColor = new Vector4(1, 0.6f, 0.2f, 1);
+        });
       }
     }
 
