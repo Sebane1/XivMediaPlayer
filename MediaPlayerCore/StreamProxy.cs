@@ -120,6 +120,21 @@ namespace MediaPlayerCore
                 }
             }
 
+            bool isTwitchCdn = targetUrl.Contains("twitch.tv", StringComparison.OrdinalIgnoreCase)
+                || targetUrl.Contains("ttvnw.net", StringComparison.OrdinalIgnoreCase);
+            if (isTwitchCdn)
+            {
+                if (!client.DefaultRequestHeaders.TryGetValues("Referer", out _))
+                {
+                    client.DefaultRequestHeaders.TryAddWithoutValidation("Referer", "https://www.twitch.tv/");
+                }
+
+                if (!client.DefaultRequestHeaders.TryGetValues("Origin", out _))
+                {
+                    client.DefaultRequestHeaders.TryAddWithoutValidation("Origin", "https://www.twitch.tv");
+                }
+            }
+
             return client;
         }
 
@@ -206,27 +221,36 @@ namespace MediaPlayerCore
                         ? Encoding.UTF8.GetString(Convert.FromBase64String(req.QueryString["target"]))
                         : session.OriginalM3u8Url;
 
-                    string text = "";
-                    if (req.QueryString["target"] == null && !string.IsNullOrEmpty(session.PreFetchedM3u8Content))
+                    string text;
+                    try 
                     {
-                        text = session.PreFetchedM3u8Content;
-                    }
-                    else
-                    {
-                        try 
-                        {
-                            var response = await session.Client.GetAsync(m3u8Url);
-                            response.EnsureSuccessStatusCode();
-                            text = await response.Content.ReadAsStringAsync();
-                        } 
-                        catch (Exception netEx)
+                        var response = await session.Client.GetAsync(m3u8Url);
+                        if (!response.IsSuccessStatusCode)
                         {
                             System.Diagnostics.Debug.WriteLine(
-                                $"[StreamProxy] HLS fetch failed for {m3u8Url}: {netEx.Message}");
+                                $"[StreamProxy] HLS playlist fetch failed ({(int)response.StatusCode}) for {m3u8Url[..Math.Min(m3u8Url.Length, 120)]}...");
+                            res.StatusCode = (int)response.StatusCode;
+                            res.StatusDescription = response.ReasonPhrase;
+                            res.Close();
+                            return;
+                        }
+
+                        text = await response.Content.ReadAsStringAsync();
+                        if (!text.TrimStart().StartsWith("#EXTM3U", StringComparison.OrdinalIgnoreCase))
+                        {
+                            System.Diagnostics.Debug.WriteLine($"[StreamProxy] HLS playlist fetch returned invalid data for {m3u8Url[..Math.Min(m3u8Url.Length, 120)]}...");
                             res.StatusCode = 502;
                             res.Close();
                             return;
                         }
+                    } 
+                    catch (Exception netEx)
+                    {
+                        System.Diagnostics.Debug.WriteLine(
+                            $"[StreamProxy] HLS fetch failed for {m3u8Url}: {netEx.Message}");
+                        res.StatusCode = 502;
+                        res.Close();
+                        return;
                     }
 
                     // Rewrite URLs
@@ -248,6 +272,16 @@ namespace MediaPlayerCore
                 {
                     string targetUrl = Encoding.UTF8.GetString(Convert.FromBase64String(req.QueryString["target"]));
                     using var response = await session.Client.GetAsync(targetUrl, HttpCompletionOption.ResponseHeadersRead);
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        res.StatusCode = (int)response.StatusCode;
+                        res.StatusDescription = response.ReasonPhrase;
+                        System.Diagnostics.Debug.WriteLine(
+                            $"[StreamProxy] HLS segment request failed ({(int)response.StatusCode}) for {targetUrl[..Math.Min(targetUrl.Length, 120)]}...");
+                        res.Close();
+                        return;
+                    }
+
                     res.ContentType = response.Content.Headers.ContentType?.ToString() ?? "video/MP2T";
                     if (response.Content.Headers.ContentLength.HasValue)
                         res.ContentLength64 = response.Content.Headers.ContentLength.Value;
