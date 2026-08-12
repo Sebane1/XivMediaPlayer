@@ -80,6 +80,21 @@ namespace XivMediaPlayer
         private readonly Compositing.PlacementManipulator _placementManipulator = new();
         private readonly List<Compositing.PlacementManipulator.Pickable> _placementPickables = new();
 
+        private enum WorldQuadDrawKind { Tv, Banner }
+
+        private struct WorldQuadDrawItem
+        {
+            public WorldQuadDrawKind Kind;
+            public float SortDistance;
+            public TvPlacement Tv;
+            public BannerPlacement Banner;
+            public IntPtr BannerTextureSrv;
+            public int BannerTextureWidth;
+            public int BannerTextureHeight;
+        }
+
+        private readonly List<WorldQuadDrawItem> _worldQuadDrawOrder = new();
+
         private MediaManager _mediaManager;
         public MediaManager MediaManager => _mediaManager;
         private YtDlpManager _ytDlpManager;
@@ -2949,6 +2964,82 @@ namespace XivMediaPlayer
             return BannerPlacementToTransform(placement);
         }
 
+        private static float GetWorldQuadSortDistance(
+            System.Numerics.Vector3 cameraPos,
+            System.Numerics.Vector3 cameraForward,
+            WorldScreenTransform transform)
+        {
+            return System.Numerics.Vector3.Dot(transform.Position - cameraPos, cameraForward);
+        }
+
+        private void PrepareBannerAspectForRender(BannerPlacement banner)
+        {
+            if (!TryGetBannerImageAspect(banner, out float imageAspect)) return;
+
+            float expectedHeight = banner.ScaleX / imageAspect;
+            if (MathF.Abs(banner.ScaleY - expectedHeight) <= 0.01f) return;
+
+            banner.ScaleY = expectedHeight;
+            UpsertRoomBanner(banner);
+            if (CurrentBannerPlacement?.Id == banner.Id)
+            {
+                NormalizeBannerTransform(banner, _worldRenderer!.Transform);
+                _screenSettingsWindow?.SyncFromTransform();
+            }
+        }
+
+        private void BuildWorldQuadDrawOrder(
+            System.Numerics.Vector3 cameraPos,
+            System.Numerics.Vector3 cameraForward,
+            IReadOnlyList<TvPlacement> tvs,
+            IReadOnlyList<BannerPlacement> banners,
+            bool includeTvs,
+            bool includeBanners)
+        {
+            _worldQuadDrawOrder.Clear();
+
+            if (includeTvs)
+            {
+                foreach (var tv in tvs)
+                {
+                    var transform = ResolveTvRenderTransform(tv);
+                    _worldQuadDrawOrder.Add(new WorldQuadDrawItem
+                    {
+                        Kind = WorldQuadDrawKind.Tv,
+                        SortDistance = GetWorldQuadSortDistance(cameraPos, cameraForward, transform),
+                        Tv = tv
+                    });
+                }
+            }
+
+            if (includeBanners)
+            {
+                foreach (var banner in banners)
+                {
+                    PrepareBannerAspectForRender(banner);
+
+                    if (!_imageTextureCache.TryGetTexture(banner.ImageUrl, out IntPtr bannerSrv, out int bannerW, out int bannerH))
+                    {
+                        _imageTextureCache.RequestLoad(banner.ImageUrl);
+                        continue;
+                    }
+
+                    var transform = ResolveBannerRenderTransform(banner);
+                    _worldQuadDrawOrder.Add(new WorldQuadDrawItem
+                    {
+                        Kind = WorldQuadDrawKind.Banner,
+                        SortDistance = GetWorldQuadSortDistance(cameraPos, cameraForward, transform),
+                        Banner = banner,
+                        BannerTextureSrv = bannerSrv,
+                        BannerTextureWidth = bannerW,
+                        BannerTextureHeight = bannerH
+                    });
+                }
+            }
+
+            _worldQuadDrawOrder.Sort(static (a, b) => a.SortDistance.CompareTo(b.SortDistance));
+        }
+
         internal void SyncPlacementManipulatorFromWorkingTransform()
         {
             if (_worldRenderer?.Transform == null || !_placementManipulator.HasSelection || _placementManipulator.IsDragging)
@@ -4813,30 +4904,71 @@ namespace XivMediaPlayer
                             CopyTransformToTv(CurrentTvPlacement, _worldRenderer.Transform);
                         }
 
+                        var sortCameraPos = _prevCameraPos ?? cameraPos;
+                        var sortCameraForward = _prevCameraForward ?? cameraForward;
+                        bool canSortByDepth = sortCameraPos.HasValue && sortCameraForward.HasValue;
+
                         foreach (var pass in renderPasses)
                         {
-                            foreach (var tv in roomTvsToRender)
+                            bool includeTvs = true;
+                            bool includeBanners = pass != Compositing.WorldTvRenderPass.GlowOnly;
+                            bool useSortedDrawOrder = canSortByDepth && (includeBanners || roomTvsToRender.Count > 1);
+
+                            if (useSortedDrawOrder)
                             {
-                                _worldRenderer.ResetCornerStabilization();
-                                var tvTransform = ResolveTvRenderTransform(tv);
+                                BuildWorldQuadDrawOrder(
+                                    sortCameraPos!.Value,
+                                    sortCameraForward!.Value,
+                                    roomTvsToRender,
+                                    roomBannersToRender,
+                                    includeTvs,
+                                    includeBanners);
+                            }
 
-                                bool showOverlay = roomTvsToRender.Count == 1
-                                    || (!string.IsNullOrEmpty(_interactionTvId) && tv.Id == _interactionTvId)
-                                    || (hoveredTv != null && tv.Id == hoveredTv.Id);
-                                var screenHover = showOverlay ? hoverUV : new System.Numerics.Vector2(-1, -1);
-                                var screenOverlay = showOverlay ? srvPtr : IntPtr.Zero;
+                            IEnumerable<WorldQuadDrawItem> drawItems = useSortedDrawOrder
+                                ? _worldQuadDrawOrder
+                                : roomTvsToRender.Select(tv => new WorldQuadDrawItem { Kind = WorldQuadDrawKind.Tv, Tv = tv });
 
-                                bool isolateComposite = multiTv && pass != Compositing.WorldTvRenderPass.GlowOnly;
+                            foreach (var item in drawItems)
+                            {
+                                if (item.Kind == WorldQuadDrawKind.Tv)
+                                {
+                                    var tv = item.Tv;
+                                    _worldRenderer.ResetCornerStabilization();
+                                    var tvTransform = ResolveTvRenderTransform(tv);
 
-                                _worldRenderer.Render(videoSrv, videoWidth, videoHeight, videoTrueWidth, videoTrueHeight, _depthCapture,
-                                    _prevCameraPos ?? cameraPos, _prevCameraForward ?? cameraForward, _prevCameraRight ?? cameraRight, _prevCameraUp ?? cameraUp,
-                                    fovY, aspectRatio, _uiCapture, nearPlane, farPlane, screenHover, progress, bufferProgress, playbackState, lockState, volume, screenOverlay, _config.LoopEnabled, _config.ShuffleEnabled, timeSeconds, showScreensaver, useDifferenceFallback: useDifferenceFallback,
-                                    viewProjMatrix: _prevViewProjMatrix ?? viewProjMatrix, viewportPos: mainViewport.Pos, viewportSize: mainViewport.Size, uiBlendThreshold: _config.UIBlendThreshold,
-                                    loadingPulse: IsMediaLoading ? MediaLoadingPulse : 0f, isLoadingOverlay: IsMediaLoading,
-                                    idleBrandingSrvPtr: idleBrandingSrv, idleBrandingAspect: idleBrandingAspect,
-                                    screenTransform: tvTransform,
-                                    isolateCompositeOutput: isolateComposite,
-                                    renderPass: pass);
+                                    bool showOverlay = roomTvsToRender.Count == 1
+                                        || (!string.IsNullOrEmpty(_interactionTvId) && tv.Id == _interactionTvId)
+                                        || (hoveredTv != null && tv.Id == hoveredTv.Id);
+                                    var screenHover = showOverlay ? hoverUV : new System.Numerics.Vector2(-1, -1);
+                                    var screenOverlay = showOverlay ? srvPtr : IntPtr.Zero;
+
+                                    bool isolateComposite = multiTv && pass != Compositing.WorldTvRenderPass.GlowOnly;
+
+                                    _worldRenderer.Render(videoSrv, videoWidth, videoHeight, videoTrueWidth, videoTrueHeight, _depthCapture,
+                                        _prevCameraPos ?? cameraPos, _prevCameraForward ?? cameraForward, _prevCameraRight ?? cameraRight, _prevCameraUp ?? cameraUp,
+                                        fovY, aspectRatio, _uiCapture, nearPlane, farPlane, screenHover, progress, bufferProgress, playbackState, lockState, volume, screenOverlay, _config.LoopEnabled, _config.ShuffleEnabled, timeSeconds, showScreensaver, useDifferenceFallback: useDifferenceFallback,
+                                        viewProjMatrix: _prevViewProjMatrix ?? viewProjMatrix, viewportPos: mainViewport.Pos, viewportSize: mainViewport.Size, uiBlendThreshold: _config.UIBlendThreshold,
+                                        loadingPulse: IsMediaLoading ? MediaLoadingPulse : 0f, isLoadingOverlay: IsMediaLoading,
+                                        idleBrandingSrvPtr: idleBrandingSrv, idleBrandingAspect: idleBrandingAspect,
+                                        screenTransform: tvTransform,
+                                        isolateCompositeOutput: isolateComposite,
+                                        renderPass: pass,
+                                        preserveSortedDrawOrder: useSortedDrawOrder);
+                                }
+                                else if (includeBanners)
+                                {
+                                    _worldRenderer.Render(
+                                        item.BannerTextureSrv, item.BannerTextureWidth, item.BannerTextureHeight,
+                                        item.BannerTextureWidth, item.BannerTextureHeight, _depthCapture,
+                                        _prevCameraPos ?? cameraPos, _prevCameraForward ?? cameraForward, _prevCameraRight ?? cameraRight, _prevCameraUp ?? cameraUp,
+                                        fovY, aspectRatio, _uiCapture, nearPlane, farPlane,
+                                        hoverUV: null, progress: 0f, bufferProgress: 1f, playbackState: 0f, lockState: 0f, volume: 0f,
+                                        titleSrvPtr: IntPtr.Zero, showScreensaver: 0f, useDifferenceFallback: useDifferenceFallback,
+                                        viewProjMatrix: _prevViewProjMatrix ?? viewProjMatrix, viewportPos: mainViewport.Pos, viewportSize: mainViewport.Size,
+                                        screenTransform: ResolveBannerRenderTransform(item.Banner),
+                                        preserveSortedDrawOrder: useSortedDrawOrder);
+                                }
                             }
                         }
                     }
@@ -4851,38 +4983,36 @@ namespace XivMediaPlayer
                     }
                     }
 
-                    _worldRenderer.EnableGlow = _config.DepthOcclusionEnabled && _config.TvGlowEnabled;
-                    foreach (var banner in roomBannersToRender)
+                    if (roomTvsToRender.Count == 0 && roomBannersToRender.Count > 0)
                     {
-                        if (!_imageTextureCache.TryGetTexture(banner.ImageUrl, out IntPtr bannerSrv, out int bannerW, out int bannerH))
+                        var sortCameraPos = _prevCameraPos ?? cameraPos;
+                        var sortCameraForward = _prevCameraForward ?? cameraForward;
+                        if (sortCameraPos.HasValue && sortCameraForward.HasValue)
                         {
-                            _imageTextureCache.RequestLoad(banner.ImageUrl);
-                            continue;
-                        }
+                            BuildWorldQuadDrawOrder(
+                                sortCameraPos.Value,
+                                sortCameraForward.Value,
+                                roomTvsToRender,
+                                roomBannersToRender,
+                                includeTvs: false,
+                                includeBanners: true);
 
-                        if (TryGetBannerImageAspect(banner, out float imageAspect))
-                        {
-                            float expectedHeight = banner.ScaleX / imageAspect;
-                            if (MathF.Abs(banner.ScaleY - expectedHeight) > 0.01f)
+                            foreach (var item in _worldQuadDrawOrder)
                             {
-                                banner.ScaleY = expectedHeight;
-                                UpsertRoomBanner(banner);
-                                if (CurrentBannerPlacement?.Id == banner.Id)
-                                {
-                                    NormalizeBannerTransform(banner, _worldRenderer.Transform);
-                                    _screenSettingsWindow?.SyncFromTransform();
-                                }
+                                if (item.Kind != WorldQuadDrawKind.Banner) continue;
+
+                                _worldRenderer.Render(
+                                    item.BannerTextureSrv, item.BannerTextureWidth, item.BannerTextureHeight,
+                                    item.BannerTextureWidth, item.BannerTextureHeight, _depthCapture,
+                                    _prevCameraPos ?? cameraPos, _prevCameraForward ?? cameraForward, _prevCameraRight ?? cameraRight, _prevCameraUp ?? cameraUp,
+                                    fovY, aspectRatio, _uiCapture, nearPlane, farPlane,
+                                    hoverUV: null, progress: 0f, bufferProgress: 1f, playbackState: 0f, lockState: 0f, volume: 0f,
+                                    titleSrvPtr: IntPtr.Zero, showScreensaver: 0f, useDifferenceFallback: useDifferenceFallback,
+                                    viewProjMatrix: _prevViewProjMatrix ?? viewProjMatrix, viewportPos: mainViewport.Pos, viewportSize: mainViewport.Size,
+                                    screenTransform: ResolveBannerRenderTransform(item.Banner),
+                                    preserveSortedDrawOrder: true);
                             }
                         }
-
-                        _worldRenderer.Render(
-                            bannerSrv, bannerW, bannerH, bannerW, bannerH, _depthCapture,
-                            _prevCameraPos ?? cameraPos, _prevCameraForward ?? cameraForward, _prevCameraRight ?? cameraRight, _prevCameraUp ?? cameraUp,
-                            fovY, aspectRatio, _uiCapture, nearPlane, farPlane,
-                            hoverUV: null, progress: 0f, bufferProgress: 1f, playbackState: 0f, lockState: 0f, volume: 0f,
-                            titleSrvPtr: IntPtr.Zero, showScreensaver: 0f, useDifferenceFallback: useDifferenceFallback,
-                            viewProjMatrix: _prevViewProjMatrix ?? viewProjMatrix, viewportPos: mainViewport.Pos, viewportSize: mainViewport.Size,
-                            screenTransform: ResolveBannerRenderTransform(banner));
                     }
                         
                     _prevCameraPos = cameraPos;

@@ -111,14 +111,15 @@ namespace XivMediaPlayer.Compositing {
       Matrix4x4? viewProjMatrix = null, Vector2? viewportPos = null, Vector2? viewportSize = null, float uiBlendThreshold = 0.0f, float loadingPulse = 0f, bool isLoadingOverlay = false, IntPtr idleBrandingSrvPtr = default, float idleBrandingAspect = 1.0f,
       WorldScreenTransform? screenTransform = null,
       bool isolateCompositeOutput = false,
-      WorldTvRenderPass renderPass = WorldTvRenderPass.Full) {
+      WorldTvRenderPass renderPass = WorldTvRenderPass.Full,
+      bool preserveSortedDrawOrder = false) {
 
       var placement = screenTransform ?? _transform;
       if (_disposed || !placement.Enabled || textureSrv == IntPtr.Zero) return;
       
       var drawList = Dalamud.Bindings.ImGui.ImGui.GetBackgroundDrawList(ImGui.GetMainViewport());
       int initialCmdSize = drawList.CmdBuffer.Size;
-      bool pushCompositeToFront = renderPass != WorldTvRenderPass.GlowOnly;
+      bool pushCompositeToFront = renderPass != WorldTvRenderPass.GlowOnly && !preserveSortedDrawOrder;
 
       float trueVidHeight = textureTrueHeight > 0 ? textureTrueHeight : 0;
       float trueVidWidth = textureTrueWidth > 0 ? textureTrueWidth : 0;
