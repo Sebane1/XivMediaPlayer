@@ -98,7 +98,7 @@ namespace XivMediaPlayer.Networking
                 {
                     throw new UnauthorizedAccessException("Cannot delete TV: It is locked by its owner.");
                 }
-                return response.IsSuccessStatusCode;
+                return response.IsSuccessStatusCode || response.StatusCode == System.Net.HttpStatusCode.NotFound;
             }
             catch (Exception ex)
             {

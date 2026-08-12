@@ -51,6 +51,9 @@ namespace MediaPlayerCore.Compositing {
     [JsonProperty("screensaverStyle")]
     public int ScreensaverStyle { get; set; } = 0;
 
+    [JsonProperty("idleBrandingUrl")]
+    public string IdleBrandingUrl { get; set; } = string.Empty;
+
     /// <summary>
     /// Returns the four corners of the screen quad in world space.
     /// Order: TopLeft, TopRight, BottomRight, BottomLeft (when facing the screen).
@@ -121,7 +124,8 @@ namespace MediaPlayerCore.Compositing {
         Opacity = Opacity,
         IsProjectorMode = IsProjectorMode,
         ScreensaverColor = ScreensaverColor,
-        ScreensaverStyle = ScreensaverStyle
+        ScreensaverStyle = ScreensaverStyle,
+        IdleBrandingUrl = IdleBrandingUrl
       };
     }
   }

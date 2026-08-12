@@ -127,6 +127,7 @@ namespace XivMediaPlayer.Server.Controllers
             target.ScreensaverColorG = source.ScreensaverColorG;
             target.ScreensaverColorB = source.ScreensaverColorB;
             target.ScreensaverStyle = source.ScreensaverStyle;
+            target.IdleBrandingUrl = source.IdleBrandingUrl ?? string.Empty;
             target.IsLocked = source.IsLocked;
             target.OwnerId = source.OwnerId;
         }

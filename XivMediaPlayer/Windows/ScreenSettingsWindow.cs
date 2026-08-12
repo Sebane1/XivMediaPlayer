@@ -61,7 +61,7 @@ namespace XivMediaPlayer.Windows {
       _onSave = onSave;
       _onPlaceAtCamera = onPlaceAtCamera;
 
-      Size = new Vector2(420, 520);
+      Size = new Vector2(620, 540);
       SizeCondition = ImGuiCond.FirstUseEver;
 
       SyncFromTransform();
@@ -77,6 +77,15 @@ namespace XivMediaPlayer.Windows {
       _isProjectorMode = _transform.IsProjectorMode;
       _screensaverColor = _transform.ScreensaverColor;
       _screensaverStyle = _transform.ScreensaverStyle;
+      _idleBrandingUrl = _transform.IdleBrandingUrl ?? string.Empty;
+      if (_plugin.CurrentTvPlacement != null && string.IsNullOrWhiteSpace(_idleBrandingUrl))
+      {
+        _idleBrandingUrl = _plugin.CurrentTvPlacement.IdleBrandingUrl ?? string.Empty;
+      }
+      if (_plugin.CurrentBannerPlacement != null)
+      {
+        _bannerImageUrl = _plugin.CurrentBannerPlacement.ImageUrl ?? string.Empty;
+      }
     }
 
     private static int ResolveAspectMode(Vector2 scale, int storedMode) {
@@ -100,6 +109,7 @@ namespace XivMediaPlayer.Windows {
       _transform.IsProjectorMode = _isProjectorMode;
       _transform.ScreensaverColor = _screensaverColor;
       _transform.ScreensaverStyle = _screensaverStyle;
+      _transform.IdleBrandingUrl = _idleBrandingUrl?.Trim() ?? string.Empty;
       _plugin.SyncPlacementManipulatorFromWorkingTransform();
     }
 
@@ -124,7 +134,7 @@ namespace XivMediaPlayer.Windows {
           ImGui.Spacing();
           if (ImGui.Button(Localize("Tutorial Video"))) {
               System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo {
-                  FileName = "https://www.youtube.com/watch?v=ZgLs2OJQ8ks",
+                  FileName = "https://youtu.be/RyvphbJxf5s",
                   UseShellExecute = true
               });
           }
@@ -140,11 +150,17 @@ namespace XivMediaPlayer.Windows {
       // Enable toggle 
       if (ImGui.Checkbox(Localize("Render in World"), ref _enabled)) {
         _transform.Enabled = _enabled;
-        
+
         // Auto-delete from server if turning off and we own it or have privileges
         if (!_enabled && !string.IsNullOrEmpty(locKey) &&
             _plugin.CurrentTvPlacement != null && (_plugin.CurrentTvPlacement.OwnerId == _plugin.Config.OwnerId || hasPrivileges)) {
             _ = DeleteTvAsync(locKey, restoreOnFailure: true);
+        } else if (_enabled && !string.IsNullOrEmpty(locKey)
+            && !_plugin.RoomTvPlacements.Any(t => t.LocationKey == locKey)) {
+            var tv = _plugin.MaterializeTvFromWorkingTransform(locKey);
+            _plugin.SelectTvForEditing(tv);
+            SyncFromTransform();
+            _onSave?.Invoke();
         } else {
             _onSave?.Invoke();
         }
@@ -158,7 +174,7 @@ namespace XivMediaPlayer.Windows {
       }
       if (ImGui.Button(Localize("Tutorial Video"))) {
           System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo {
-              FileName = "https://www.youtube.com/watch?v=ZgLs2OJQ8ks",
+              FileName = "https://youtu.be/RyvphbJxf5s",
               UseShellExecute = true
           });
       }
@@ -191,17 +207,23 @@ namespace XivMediaPlayer.Windows {
       }
       _wasShiftPressed = isSnapKeyPressed;
 
+      ImGui.BeginChild("ScreenSettingsHost", Vector2.Zero, false);
+
+      ImGui.BeginChild("ObjectSidebar", new Vector2(PlacementSidebarWidth, 0), true);
+      DrawPlacementSidebar(locKey);
+      ImGui.EndChild();
+
+      ImGui.SameLine();
+
+      ImGui.BeginChild("ScreenSettingsMain", Vector2.Zero, false, ImGuiWindowFlags.AlwaysVerticalScrollbar);
+      bool editingBanner = _plugin.IsBannerEditActive();
       if (ImGui.BeginTabBar("ScreenPlacementTabs")) {
         if (ImGui.BeginTabItem(Localize("Placement"))) {
-          DrawPlacementTab(locKey, hasPrivileges);
+          DrawPlacementEditor(locKey, hasPrivileges);
           ImGui.EndTabItem();
         }
-        if (ImGui.BeginTabItem(Localize("Appearance"))) {
+        if (!editingBanner && ImGui.BeginTabItem(Localize("Appearance"))) {
           DrawAppearanceTab();
-          ImGui.EndTabItem();
-        }
-        if (ImGui.BeginTabItem(Localize("Branding"))) {
-          DrawVenueBrandingSection(locKey);
           ImGui.EndTabItem();
         }
         if (ImGui.BeginTabItem(Localize("Sync"))) {
@@ -210,6 +232,9 @@ namespace XivMediaPlayer.Windows {
         }
         ImGui.EndTabBar();
       }
+      ImGui.EndChild();
+
+      ImGui.EndChild();
     }
 
     private DateTime _lastAddScreenTime = DateTime.MinValue;
@@ -222,7 +247,11 @@ namespace XivMediaPlayer.Windows {
       }
     }
 
-    private void DrawPlacementTargetSelector(string locationKey) {
+    private const float PlacementSidebarWidth = 196f;
+
+    private void DrawPlacementSidebar(string locationKey) {
+      ImGui.PushTextWrapPos(0f);
+
       var roomTvs = _plugin.RoomTvPlacements
         .Where(t => t.LocationKey == locationKey)
         .OrderBy(t => t.LastUpdated)
@@ -236,94 +265,118 @@ namespace XivMediaPlayer.Windows {
         .OrderBy(b => b.LastUpdated)
         .ToList();
 
-      bool showTvGroup = roomTvs.Count > 0;
-      bool showBannerGroup = roomBanners.Count > 0;
-      if (!showTvGroup && !showBannerGroup) {
-        ImGui.TextColored(new Vector4(0.7f, 0.9f, 1f, 1f), Localize("Banners"));
-        ImGui.InputText(Localize("Banner Image URL"), ref _bannerImageUrl, 512);
-        ImGui.SameLine();
-        if (ImGui.Button(Localize("Add Banner"))) {
-          RegisterAdditionalBannerAsync(locationKey);
-        }
-        ImGui.TextDisabled(Localize("Place with the controls below, then click Add Banner."));
-        return;
-      }
-
-      ImGui.TextColored(new Vector4(0.7f, 0.9f, 1f, 1f), Localize("Editing"));
       bool editingBanner = _plugin.IsBannerEditActive();
+      string currentTvId = _plugin.CurrentTvPlacement?.Id ?? string.Empty;
+      string currentBannerId = _plugin.CurrentBannerPlacement?.Id ?? string.Empty;
 
-      if (showTvGroup) {
-        ImGui.TextDisabled(Localize("TV Screens"));
-        string currentTvId = _plugin.CurrentTvPlacement?.Id ?? string.Empty;
-        for (int i = 0; i < roomTvs.Count; i++) {
-          var tv = roomTvs[i];
-          string label = string.Format(Localize("Screen {0}"), i + 1);
-          bool selected = !editingBanner && tv.Id == currentTvId;
-          if (ImGui.RadioButton($"{label}##tv_{tv.Id}", selected)) {
-            _plugin.SelectTvForEditing(tv);
-            SyncFromTransform();
+      ImGui.TextDisabled(Localize("Objects"));
+      ImGui.Separator();
+
+      if (roomTvs.Count == 0 && roomBanners.Count == 0) {
+        ImGui.TextWrapped(Localize("No screens or banners yet."));
+        ImGui.Spacing();
+      } else {
+        if (roomTvs.Count > 0) {
+          ImGui.TextDisabled(Localize("TV Screens"));
+          for (int i = 0; i < roomTvs.Count; i++) {
+            var tv = roomTvs[i];
+            string label = string.Format(Localize("Screen {0}"), i + 1);
+            bool selected = !editingBanner && tv.Id == currentTvId;
+            if (DrawSidebarEntry(label, selected)) {
+              _plugin.SelectTvForEditing(tv);
+              SyncFromTransform();
+            }
           }
-          if (i + 1 < roomTvs.Count) {
-            ImGui.SameLine();
+
+          if (roomBanners.Count > 0) {
+            ImGui.Spacing();
           }
         }
-        if (roomTvs.Count > 1) {
-          ImGui.TextDisabled(string.Format(Localize("{0} screen(s) share the same playback."), roomTvs.Count));
-        }
-      }
 
-      if (showBannerGroup || showTvGroup) {
-        if (showTvGroup && showBannerGroup) {
-          ImGui.Spacing();
-        }
-
-        if (showBannerGroup) {
+        if (roomBanners.Count > 0) {
           ImGui.TextDisabled(Localize("Banners"));
-          string currentBannerId = _plugin.CurrentBannerPlacement?.Id ?? string.Empty;
           for (int i = 0; i < roomBanners.Count; i++) {
             var banner = roomBanners[i];
             string label = string.Format(Localize("Banner {0}"), i + 1);
             bool selected = editingBanner && banner.Id == currentBannerId;
-            if (ImGui.RadioButton($"{label}##banner_{banner.Id}", selected)) {
+            if (DrawSidebarEntry(label, selected)) {
               _plugin.SelectBannerForEditing(banner);
               _bannerImageUrl = banner.ImageUrl;
               SyncFromTransform();
             }
-            if (i + 1 < roomBanners.Count) {
-              ImGui.SameLine();
-            }
-          }
-        }
-
-        ImGui.Spacing();
-        ImGui.InputText(Localize("Banner Image URL"), ref _bannerImageUrl, 512);
-        ImGui.SameLine();
-        if (ImGui.Button(Localize("Add Banner"))) {
-          RegisterAdditionalBannerAsync(locationKey);
-        }
-        if (editingBanner && _plugin.CurrentBannerPlacement != null) {
-          ImGui.SameLine();
-          if (ImGui.Button(Localize("Delete Banner"))) {
-            _ = DeleteBannerAsync(locationKey, _plugin.CurrentBannerPlacement.Id);
           }
         }
       }
+
+      ImGui.Spacing();
+      ImGui.Separator();
+      if (ImGui.Button(Localize("+ Screen"), new Vector2(-1, 0))) {
+        RegisterAdditionalTvAsync(locationKey);
+      }
+      if (ImGui.Button(Localize("+ Banner"), new Vector2(-1, 0))) {
+        RegisterAdditionalBannerAsync(locationKey);
+      }
+
+      ImGui.PopTextWrapPos();
     }
 
-    private void DrawPlacementTab(string locKey, bool hasPrivileges) {
-      DrawPlacementTargetSelector(locKey);
+    private static bool DrawSidebarEntry(string label, bool selected) {
+      var accent = new Vector4(0.35f, 0.75f, 1f, 0.45f);
+      var accentHover = new Vector4(0.45f, 0.85f, 1f, 0.65f);
+      if (selected) {
+        ImGui.PushStyleColor(ImGuiCol.Header, accent);
+        ImGui.PushStyleColor(ImGuiCol.HeaderHovered, accentHover);
+        ImGui.PushStyleColor(ImGuiCol.HeaderActive, accentHover);
+      }
 
-      if (ImGui.GetCursorPosY() > ImGui.GetStyle().FramePadding.Y) {
+      float width = ImGui.GetContentRegionAvail().X;
+      bool clicked = ImGui.Selectable(label, selected, ImGuiSelectableFlags.None, new Vector2(width, 0f));
+
+      if (selected) {
+        ImGui.PopStyleColor(3);
+      }
+
+      return clicked;
+    }
+
+    private void DrawPlacementEditor(string locKey, bool hasPrivileges) {
+      bool editingBanner = _plugin.IsBannerEditActive();
+      bool hasObjects = _plugin.RoomTvPlacements.Any(t => t.LocationKey == locKey)
+          || _plugin.RoomBannerPlacements.Any(b => b.LocationKey == locKey)
+          || _plugin.CurrentTvPlacement != null;
+
+      if (!hasObjects) {
+        ImGui.TextWrapped(Localize("Add a screen or banner from the sidebar. You can set the banner image URL after creating it."));
+        ImGui.Spacing();
         ImGui.Separator();
-      }
+        ImGui.Spacing();
+      } else if (editingBanner) {
+        DrawBannerImageUrlField(applyLive: true);
+        if (_plugin.CurrentBannerPlacement != null) {
+          if (ImGui.Button(Localize("Delete Banner"))) {
+            _ = DeleteBannerAsync(locKey, _plugin.CurrentBannerPlacement.Id);
+          }
+        }
+        ImGui.Spacing();
+        ImGui.Separator();
+        ImGui.Spacing();
+      } else {
+        int tvCount = _plugin.RoomTvPlacements.Count(t => t.LocationKey == locKey);
+        if (tvCount > 1) {
+          ImGui.TextDisabled(string.Format(Localize("{0} screens in this area share the same playback."), tvCount));
+          ImGui.Spacing();
+        }
 
-      if (_plugin.CurrentBannerPlacement != null) {
-        ImGui.TextColored(new Vector4(1f, 0.85f, 0.4f, 1f),
-          Localize("Banner placement uses the same move, rotate, and scale controls below as TVs."));
-      } else if (_plugin.CurrentTvPlacement != null) {
-        ImGui.TextDisabled(Localize("Editing TV screen placement."));
+        if (_plugin.CurrentTvPlacement != null
+            && (_plugin.CurrentTvPlacement.OwnerId == _plugin.Config.OwnerId || hasPrivileges)) {
+          if (ImGui.Button(Localize("Remove Screen"))) {
+            _ = DeleteTvAsync(locKey);
+          }
+          ImGui.Spacing();
+          ImGui.Separator();
+          ImGui.Spacing();
+        }
       }
-      ImGui.Spacing();
 
       if (ImGui.Button(Localize("Place at Camera"))) {
         _onPlaceAtCamera?.Invoke();
@@ -336,30 +389,10 @@ namespace XivMediaPlayer.Windows {
       ImGui.TextWrapped(Localize("Hold CTRL + SHIFT while hovering over or selecting a furnishing in Edit Mode to instantly snap the selected object to it."));
       ImGui.Spacing();
 
-      bool editingBanner = _plugin.IsBannerEditActive();
       if (ImGui.Button(Localize("Save"))) {
         SyncToTransform();
         _onSave?.Invoke();
-        if (editingBanner) {
-          UpdateBannerAsync(locKey);
-        }
-      }
-      ImGui.SameLine();
-      if (ImGui.Button(Localize("Add Screen"))) {
-        RegisterAdditionalTvAsync(locKey);
-      }
-      ImGui.SameLine();
-      if (!editingBanner && ImGui.Button(Localize("Reset"))) {
-        _transform.Enabled = false;
-        _enabled = false;
-        SyncFromTransform();
-
-        string locKey2 = _plugin.LocationKey;
-        if (!string.IsNullOrEmpty(locKey2) && _plugin.CurrentTvPlacement != null && (_plugin.CurrentTvPlacement.OwnerId == _plugin.Config.OwnerId || hasPrivileges)) {
-          _ = DeleteTvAsync(locKey2, restoreOnFailure: true);
-        } else {
-          _onSave?.Invoke();
-        }
+        _plugin.FlushPlacementServerSync();
       }
 
       DrawPlacementStatus();
@@ -432,6 +465,13 @@ namespace XivMediaPlayer.Windows {
       ImGui.Separator();
       ImGui.TextColored(new Vector4(0.5f, 0.5f, 0.5f, 1f),
         string.Format(Localize("Screen: {0:F1}m x {1:F1}m at ({2:F1}, {3:F1}, {4:F1})"), _scale.X, _scale.Y, _position.X, _position.Y, _position.Z));
+    }
+
+    private void DrawBannerImageUrlField(bool applyLive) {
+      bool urlChanged = ImGui.InputText(Localize("Banner Image URL"), ref _bannerImageUrl, 512);
+      if (applyLive && (urlChanged || ImGui.IsItemDeactivatedAfterEdit())) {
+        _plugin.ApplyBannerImageUrl(_bannerImageUrl);
+      }
     }
 
     private void ApplyBannerScaleFromImageAspect() {
@@ -520,9 +560,14 @@ namespace XivMediaPlayer.Windows {
       appearanceChanged |= ImGui.ColorEdit3(Localize("Screensaver Color"), ref _screensaverColor);
 
       string[] screensaverStyles = new string[] {
-        Localize("Bouncing Logo"), Localize("VCR"), Localize("No Signal"), Localize("Static"), Localize("Test Pattern"), Localize("Matrix Rain")
+        Localize("Bouncing Logo"), Localize("VCR"), Localize("No Signal"), Localize("Static"), Localize("Test Pattern"), Localize("Matrix Rain"), Localize("Custom Image")
       };
       appearanceChanged |= ImGui.Combo(Localize("Screensaver Style"), ref _screensaverStyle, screensaverStyles, screensaverStyles.Length);
+
+      if (_screensaverStyle == 6) {
+        appearanceChanged |= ImGui.InputText(Localize("Screensaver Image URL"), ref _idleBrandingUrl, 512);
+        ImGui.TextWrapped(Localize("Shown when the TV is idle (after ~5 seconds with nothing playing). Sync the TV on the Sync tab to share with visitors."));
+      }
 
       bool saveAppearance = ImGui.IsItemDeactivatedAfterEdit() || ImGui.IsItemDeactivated();
 
@@ -531,6 +576,7 @@ namespace XivMediaPlayer.Windows {
         _transform.IsProjectorMode = _isProjectorMode;
         _transform.ScreensaverColor = _screensaverColor;
         _transform.ScreensaverStyle = _screensaverStyle;
+        _transform.IdleBrandingUrl = _idleBrandingUrl?.Trim() ?? string.Empty;
       }
       if (saveAppearance || appearanceChanged) {
         _onSave?.Invoke();
@@ -622,26 +668,6 @@ namespace XivMediaPlayer.Windows {
       }
     }
 
-    private void DrawVenueBrandingSection(string locationKey)
-    {
-      ImGui.TextColored(new Vector4(0.7f, 0.9f, 1f, 1f), Localize("Venue Branding"));
-      ImGui.TextWrapped(Localize("When TVs are idle, show a custom image instead of the default XMP screensaver. Applies to the whole room."));
-
-      _idleBrandingUrl = _plugin.RoomVenueSettings?.IdleBrandingUrl ?? _idleBrandingUrl;
-      ImGui.InputText(Localize("Idle Branding Image URL"), ref _idleBrandingUrl, 512);
-      if (ImGui.Button(Localize("Save Venue Branding"))) {
-        SaveVenueBrandingAsync(locationKey);
-      }
-
-      ImGui.Spacing();
-      ImGui.TextColored(new Vector4(0.7f, 0.9f, 1f, 1f), Localize("Banner Props"));
-      ImGui.TextWrapped(Localize("Place and manage banners on the Placement tab — same move, rotate, scale, and gizmo controls as TVs."));
-      var bannerCount = _plugin.RoomBannerPlacements.Count(b => b.LocationKey == locationKey);
-      if (bannerCount > 0) {
-        ImGui.TextDisabled(string.Format(Localize("{0} banner(s) in this area — switch to the Placement tab to edit them."), bannerCount));
-      }
-    }
-
     public async void RegisterBannerAsync(string locationKey)
     {
       if (string.IsNullOrEmpty(locationKey)) {
@@ -650,15 +676,8 @@ namespace XivMediaPlayer.Windows {
         return;
       }
 
-      if (string.IsNullOrWhiteSpace(_bannerImageUrl)) {
-        _statusMessage = "Enter a banner image URL first.";
-        _statusColor = new Vector4(1, 0.6f, 0.2f, 1);
-        return;
-      }
-
       SyncToTransform();
       var placement = BuildBannerFromTransform(locationKey, createNewId: true);
-      placement.ImageUrl = _bannerImageUrl.Trim();
 
       _statusMessage = "Adding banner...";
       _statusColor = new Vector4(1, 1, 1, 1);
@@ -670,12 +689,16 @@ namespace XivMediaPlayer.Windows {
           if (result != null) {
             _plugin.UpsertRoomBanner(result);
             _plugin.SelectBannerForEditing(result);
-            _statusMessage = "Banner added! Use Placement controls or the gizmo, then Save.";
+            _statusMessage = string.IsNullOrWhiteSpace(result.ImageUrl)
+                ? "Banner added! Set its image URL below, then Save."
+                : "Banner added! Use Placement controls or the gizmo, then Save.";
             _statusColor = new Vector4(0.3f, 1f, 0.3f, 1);
           } else {
             _plugin.UpsertRoomBanner(placement);
             _plugin.SelectBannerForEditing(placement);
-            _statusMessage = "Banner added locally, but sync server rejected it. You can still move it here.";
+            _statusMessage = string.IsNullOrWhiteSpace(placement.ImageUrl)
+                ? "Banner added locally! Set its image URL below, then Save."
+                : "Banner added locally, but sync server rejected it. You can still move it here.";
             _statusColor = new Vector4(1, 0.6f, 0.2f, 1);
           }
         });
@@ -690,50 +713,11 @@ namespace XivMediaPlayer.Windows {
       }
     }
 
-    public async void SaveVenueBrandingAsync(string locationKey)
-    {
-      if (string.IsNullOrEmpty(locationKey)) return;
-
-      _statusMessage = "Saving venue branding...";
-      _statusColor = new Vector4(1, 1, 1, 1);
-
-      try {
-        bool isOutdoorsSync = locationKey.StartsWith("zone_");
-        bool isIslandSync = locationKey.StartsWith("island_");
-        var settings = new RoomVenueSettings {
-          LocationKey = locationKey,
-          IdleBrandingUrl = _idleBrandingUrl?.Trim() ?? string.Empty,
-          OwnerId = _plugin.Config.OwnerId,
-          BypassLock = _plugin.IsHousingMenuOpen || isOutdoorsSync || isIslandSync
-        };
-
-        var result = await _plugin.ServerClient.UpdateVenueSettingsAsync(locationKey, settings);
-        if (result != null) {
-          _plugin.ImageTextureCache.Invalidate(_plugin.RoomVenueSettings?.IdleBrandingUrl);
-          _plugin.UpsertRoomVenueSettings(result);
-          _statusMessage = "Venue branding saved for all visitors!";
-          _statusColor = new Vector4(0.3f, 1f, 0.3f, 1);
-        } else {
-          _statusMessage = "Failed to save venue branding.";
-          _statusColor = new Vector4(1, 0.3f, 0.3f, 1);
-        }
-      } catch (Exception) {
-        _statusMessage = "Failed to save venue branding.";
-        _statusColor = new Vector4(1, 0.3f, 0.3f, 1);
-      }
-    }
-
     public async void RegisterAdditionalBannerAsync(string locationKey)
     {
       if (string.IsNullOrEmpty(locationKey)) {
         _statusMessage = "You must be in a housing area to add banners.";
         _statusColor = new Vector4(1, 0.3f, 0.3f, 1);
-        return;
-      }
-
-      if (string.IsNullOrWhiteSpace(_bannerImageUrl)) {
-        _statusMessage = "Enter a banner image URL first.";
-        _statusColor = new Vector4(1, 0.6f, 0.2f, 1);
         return;
       }
 
@@ -747,13 +731,17 @@ namespace XivMediaPlayer.Windows {
           .Where(b => b.LocationKey == locationKey)
           .ToList();
 
+      string? imageUrlOverride = string.IsNullOrWhiteSpace(_bannerImageUrl) ? null : _bannerImageUrl.Trim();
       BannerPlacement placement;
       if (existing.Count == 0 || !_plugin.IsBannerEditActive()) {
         placement = BuildBannerFromTransform(locationKey, createNewId: true);
-        placement.ImageUrl = _bannerImageUrl.Trim();
+        if (imageUrlOverride != null)
+        {
+          placement.ImageUrl = imageUrlOverride;
+        }
       } else {
         var anchor = _plugin.CurrentBannerPlacement ?? existing[^1];
-        placement = Plugin.CloneBannerPlacement(anchor, locationKey, _bannerImageUrl.Trim());
+        placement = Plugin.CloneBannerPlacement(anchor, locationKey, imageUrlOverride);
         Plugin.OffsetDuplicateBannerPlacement(placement, anchor);
       }
 
@@ -767,12 +755,16 @@ namespace XivMediaPlayer.Windows {
           if (result != null) {
             _plugin.UpsertRoomBanner(result);
             _plugin.SelectBannerForEditing(result);
-            _statusMessage = "Banner added! Use Placement controls or Save to sync.";
+            _statusMessage = string.IsNullOrWhiteSpace(result.ImageUrl)
+                ? "Banner added! Set its image URL below, then Save."
+                : "Banner added! Use Placement controls or Save to sync.";
             _statusColor = new Vector4(0.3f, 1f, 0.3f, 1);
           } else {
             _plugin.UpsertRoomBanner(placement);
             _plugin.SelectBannerForEditing(placement);
-            _statusMessage = "Banner added locally, but sync server rejected it.";
+            _statusMessage = string.IsNullOrWhiteSpace(placement.ImageUrl)
+                ? "Banner added locally! Set its image URL below, then Save."
+                : "Banner added locally, but sync server rejected it.";
             _statusColor = new Vector4(1, 0.6f, 0.2f, 1);
           }
         });
@@ -787,9 +779,12 @@ namespace XivMediaPlayer.Windows {
       }
     }
 
-    public async void UpdateBannerAsync(string locationKey)
+    public async void UpdateBannerAsync(string locationKey, bool quiet = false, bool bypassDebounce = false)
     {
       if (_plugin.CurrentBannerPlacement == null || string.IsNullOrEmpty(locationKey)) return;
+
+      if (!bypassDebounce && (DateTime.UtcNow - _lastBannerUpdateTime).TotalSeconds < 1) return;
+      _lastBannerUpdateTime = DateTime.UtcNow;
 
       SyncToTransform();
       var placement = BuildBannerFromTransform(locationKey, createNewId: false);
@@ -798,8 +793,10 @@ namespace XivMediaPlayer.Windows {
           ? _plugin.CurrentBannerPlacement.ImageUrl
           : _bannerImageUrl.Trim();
 
-      _statusMessage = "Updating banner...";
-      _statusColor = new Vector4(1, 1, 1, 1);
+      if (!quiet) {
+        _statusMessage = "Updating banner...";
+        _statusColor = new Vector4(1, 1, 1, 1);
+      }
 
       try {
         var result = await _plugin.ServerClient.RegisterBannerAsync(locationKey, placement, create: false);
@@ -808,8 +805,10 @@ namespace XivMediaPlayer.Windows {
           if (result != null) {
             _plugin.UpsertRoomBanner(result);
             _plugin.SelectBannerForEditing(result);
-            _statusMessage = "Banner updated!";
-            _statusColor = new Vector4(0.3f, 1f, 0.3f, 1);
+            if (!quiet) {
+              _statusMessage = "Banner updated!";
+              _statusColor = new Vector4(0.3f, 1f, 0.3f, 1);
+            }
           } else {
             _plugin.UpsertRoomBanner(placement);
             _plugin.SelectBannerForEditing(placement);
@@ -881,56 +880,89 @@ namespace XivMediaPlayer.Windows {
         if (_plugin.CurrentTvPlacement == null) return false;
         var currentPlacement = _plugin.CurrentTvPlacement;
         var serverLocationKey = string.IsNullOrEmpty(currentPlacement.LocationKey) ? locationKey : currentPlacement.LocationKey;
-        
+
         _statusMessage = "Deleting TV from server...";
         _statusColor = new Vector4(1, 1, 1, 1);
-        
+
         try {
             bool isOutdoorsSync = !string.IsNullOrEmpty(serverLocationKey) && serverLocationKey.StartsWith("zone_");
             bool isIslandSync = !string.IsNullOrEmpty(serverLocationKey) && serverLocationKey.StartsWith("island_");
-            bool success = await _plugin.ServerClient.DeleteTvAsync(serverLocationKey, currentPlacement.Id, _plugin.Config.OwnerId, _plugin.IsHousingMenuOpen || isOutdoorsSync || isIslandSync);
+            bool success = await _plugin.ServerClient.DeleteTvAsync(
+                serverLocationKey,
+                currentPlacement.Id,
+                _plugin.Config.OwnerId,
+                _plugin.IsHousingMenuOpen || isOutdoorsSync || isIslandSync);
+
             if (success) {
-                _plugin.RemoveRoomTv(currentPlacement.Id);
-                var remaining = _plugin.RoomTvPlacements
-                    .Where(t => t.LocationKey == serverLocationKey)
-                    .ToList();
-                if (remaining.Count > 0) {
-                    _plugin.SelectTvForEditing(remaining[0]);
-                    SyncFromTransform();
-                    _enabled = true;
-                    _transform.Enabled = true;
-                } else {
-                    _plugin.CurrentTvPlacement = null;
-                    _transform.Enabled = false;
-                    _enabled = false;
-                    _plugin.Config.ScreenPlacements.Remove(locationKey);
-                    _plugin.Config.ScreenPlacements.Remove(serverLocationKey);
-                }
-                _plugin.Config.Save();
-                _statusMessage = "Successfully removed TV from the room!";
-                _statusColor = new Vector4(0.3f, 1f, 0.3f, 1);
-                PrintStatus("Successfully removed TV from the room!");
+                string deletedId = currentPlacement.Id;
+                _plugin.RunOnFrameworkThread(() =>
+                {
+                    ApplyTvDeletedLocally(deletedId, serverLocationKey, locationKey);
+                    _statusMessage = "Successfully removed TV from the room!";
+                    _statusColor = new Vector4(0.3f, 1f, 0.3f, 1);
+                    PrintStatus("Successfully removed TV from the room!");
+                });
                 return true;
-            } else {
+            }
+
+            _plugin.RunOnFrameworkThread(() =>
+            {
                 RestoreEnabledAfterDeleteFailure(restoreOnFailure);
                 _statusMessage = "Failed to remove TV.";
                 _statusColor = new Vector4(1, 0.3f, 0.3f, 1);
                 PrintStatusError("Failed to remove TV.");
-                return false;
-            }
+            });
+            return false;
         } catch (UnauthorizedAccessException) {
-            RestoreEnabledAfterDeleteFailure(restoreOnFailure);
-            _statusMessage = "Cannot delete TV: It is locked by its owner.";
-            _statusColor = new Vector4(1, 0.3f, 0.3f, 1);
-            PrintStatusError("Cannot delete TV: It is locked by its owner.");
+            _plugin.RunOnFrameworkThread(() =>
+            {
+                RestoreEnabledAfterDeleteFailure(restoreOnFailure);
+                _statusMessage = "Cannot delete TV: It is locked by its owner.";
+                _statusColor = new Vector4(1, 0.3f, 0.3f, 1);
+                PrintStatusError("Cannot delete TV: It is locked by its owner.");
+            });
         } catch (Exception) {
-            RestoreEnabledAfterDeleteFailure(restoreOnFailure);
-            _statusMessage = "Network error while deleting TV.";
-            _statusColor = new Vector4(1, 0.3f, 0.3f, 1);
-            PrintStatusError("Network error while deleting TV.");
+            _plugin.RunOnFrameworkThread(() =>
+            {
+                RestoreEnabledAfterDeleteFailure(restoreOnFailure);
+                _statusMessage = "Network error while deleting TV.";
+                _statusColor = new Vector4(1, 0.3f, 0.3f, 1);
+                PrintStatusError("Network error while deleting TV.");
+            });
         }
 
         return false;
+    }
+
+    private void ApplyTvDeletedLocally(string deletedTvId, string serverLocationKey, string locationKey) {
+        _plugin.RemoveRoomTv(deletedTvId);
+        _plugin.StopMediaIfNoPlayableTargetForUi();
+
+        if (_plugin.CurrentTvPlacement?.Id == deletedTvId) {
+            _plugin.CurrentTvPlacement = null;
+        }
+
+        var remaining = _plugin.RoomTvPlacements
+            .Where(t => t.LocationKey == serverLocationKey)
+            .ToList();
+
+        if (remaining.Count > 0) {
+            _plugin.SelectTvForEditing(remaining[0]);
+            SyncFromTransform();
+            _enabled = true;
+            _transform.Enabled = true;
+        } else {
+            _plugin.CurrentTvPlacement = null;
+            _transform.Enabled = false;
+            _enabled = false;
+            _plugin.Config.ScreenPlacements.Remove(locationKey);
+            _plugin.Config.ScreenPlacements.Remove(serverLocationKey);
+            _plugin.ClearPlacementSelection();
+            _plugin.DisableOrphanWorldScreenForUi();
+            SyncFromTransform();
+        }
+
+        _plugin.Config.Save();
     }
 
     private void RestoreEnabledAfterDeleteFailure(bool restoreOnFailure) {
@@ -980,6 +1012,7 @@ namespace XivMediaPlayer.Windows {
     }
 
     private DateTime _lastRegistrationTime = DateTime.MinValue;
+    private DateTime _lastBannerUpdateTime = DateTime.MinValue;
 
     private TvPlacement BuildPlacementFromTransform(string locationKey, bool createNewId) {
       return new TvPlacement {
@@ -1000,6 +1033,7 @@ namespace XivMediaPlayer.Windows {
         ScreensaverColorG = _screensaverColor.Y,
         ScreensaverColorB = _screensaverColor.Z,
         ScreensaverStyle = _screensaverStyle,
+        IdleBrandingUrl = _idleBrandingUrl?.Trim() ?? string.Empty,
         OwnerId = _plugin.Config.OwnerId,
         IsLocked = _plugin.CurrentTvPlacement?.IsLocked ?? (!locationKey.StartsWith("zone_") && !locationKey.StartsWith("island_")),
         BypassLock = _plugin.IsHousingMenuOpen || locationKey.StartsWith("zone_") || locationKey.StartsWith("island_")
@@ -1083,24 +1117,30 @@ namespace XivMediaPlayer.Windows {
       }
     }
 
-    public async void RegisterTvAsync(string locationKey) {
+    public async void RegisterTvAsync(string locationKey, bool quiet = false, bool bypassDebounce = false) {
       if (!_enabled) {
-        _statusMessage = "World screen is not enabled!";
-        _statusColor = new Vector4(1, 0.3f, 0.3f, 1);
+        if (!quiet) {
+          _statusMessage = "World screen is not enabled!";
+          _statusColor = new Vector4(1, 0.3f, 0.3f, 1);
+        }
         return;
       }
 
-      if ((DateTime.UtcNow - _lastRegistrationTime).TotalSeconds < 2) {
+      if (!bypassDebounce && (DateTime.UtcNow - _lastRegistrationTime).TotalSeconds < 2) {
           return; // Debounce to prevent double-logs from FFXIV UI flickering
       }
       _lastRegistrationTime = DateTime.UtcNow;
 
-      _statusMessage = "Registering TV on server...";
-      _statusColor = new Vector4(1, 1, 1, 1);
+      if (!quiet) {
+        _statusMessage = "Registering TV on server...";
+        _statusColor = new Vector4(1, 1, 1, 1);
+      }
 
       SyncToTransform();
       _plugin.ApplyWorkingTransformToCurrentSelection();
-      _onSave?.Invoke();
+      if (!quiet) {
+        _onSave?.Invoke();
+      }
       var placement = BuildPlacementFromTransform(locationKey, createNewId: false);
 
       try 
@@ -1111,10 +1151,12 @@ namespace XivMediaPlayer.Windows {
           if (result != null) {
             _plugin.UpsertRoomTv(result);
             _plugin.SelectTvForEditing(result);
-            _statusMessage = "Successfully registered TV for all visitors!";
-            _statusColor = new Vector4(0.3f, 1f, 0.3f, 1);
-            PrintStatus("Successfully registered TV for all visitors!");
-          } else {
+            if (!quiet) {
+              _statusMessage = "Successfully registered changes for all visitors!";
+              _statusColor = new Vector4(0.3f, 1f, 0.3f, 1);
+              PrintStatus("Successfully registered changes for all visitors!");
+            }
+          } else if (!quiet) {
             _statusMessage = "Saved locally, but failed to reach the sync server.";
             _statusColor = new Vector4(1, 0.6f, 0.2f, 1);
             PrintStatusError("Saved locally, but failed to reach the sync server.");

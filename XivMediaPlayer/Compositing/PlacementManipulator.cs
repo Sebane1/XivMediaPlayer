@@ -30,8 +30,9 @@ namespace XivMediaPlayer.Compositing
         }
 
         private const float AxisHitPixels = 16f;
-        private const float RingHitPixels = 14f;
+        private const float RingHitPixels = 18f;
         private const float CornerHitPixels = 14f;
+        private const int YawRingSegments = 48;
         private const float GizmoDistanceFactor = 0.065f;
         private const float MinGizmoSize = 0.35f;
         private const float MaxGizmoSize = 1.85f;
@@ -498,20 +499,51 @@ namespace XivMediaPlayer.Compositing
             float bestDist = float.MaxValue;
             GizmoHandle best = GizmoHandle.None;
 
+            float ringDist = YawRingSegmentDistancePixels(gameGui, center, gizmoSize * 0.9f, mousePos);
+            if (ringDist <= RingHitPixels)
+            {
+                return GizmoHandle.RotateYaw;
+            }
+
             TestAxisHit(gameGui, mousePos, center, Vector3.UnitX, gizmoSize, GizmoHandle.AxisX, ref bestDist, ref best);
             TestAxisHit(gameGui, mousePos, center, Vector3.UnitY, gizmoSize, GizmoHandle.AxisY, ref bestDist, ref best);
             TestAxisHit(gameGui, mousePos, center, Vector3.UnitZ, gizmoSize, GizmoHandle.AxisZ, ref bestDist, ref best);
 
-            if (TryHitYawRing(gameGui, center, gizmoSize * 0.9f, mousePos))
+            return best;
+        }
+
+        private static Vector3 YawRingWorldPoint(Vector3 center, float radius, float angle)
+        {
+            return center + new Vector3(MathF.Cos(angle) * radius, 0f, MathF.Sin(angle) * radius);
+        }
+
+        /// <summary>Minimum pixel distance from mouse to the projected yaw ring polyline.</summary>
+        private static float YawRingSegmentDistancePixels(
+            IGameGui gameGui,
+            Vector3 center,
+            float radius,
+            Vector2 mousePos)
+        {
+            Vector2? prev = null;
+            float bestDist = float.MaxValue;
+
+            for (int i = 0; i <= YawRingSegments; i++)
             {
-                float ringDist = RingDistancePixels(gameGui, center, gizmoSize * 0.9f, mousePos);
-                if (ringDist < bestDist)
+                float angle = i / (float)YawRingSegments * MathF.PI * 2f;
+                if (!gameGui.WorldToScreen(YawRingWorldPoint(center, radius, angle), out var screen))
                 {
-                    best = GizmoHandle.RotateYaw;
+                    continue;
                 }
+
+                if (prev.HasValue)
+                {
+                    bestDist = MathF.Min(bestDist, DistancePointToSegment(mousePos, prev.Value, screen));
+                }
+
+                prev = screen;
             }
 
-            return best;
+            return bestDist;
         }
 
         private static void TestAxisHit(
@@ -533,19 +565,6 @@ namespace XivMediaPlayer.Compositing
                 bestDist = dist;
                 best = handle;
             }
-        }
-
-        private static float RingDistancePixels(IGameGui gameGui, Vector3 center, float radius, Vector2 mousePos)
-        {
-            if (!gameGui.WorldToScreen(center, out var sCenter)) return float.MaxValue;
-            if (!gameGui.WorldToScreen(center + new Vector3(radius, 0f, 0f), out var sEdge)) return float.MaxValue;
-            float screenRadius = Vector2.Distance(sCenter, sEdge);
-            return MathF.Abs(Vector2.Distance(mousePos, sCenter) - screenRadius);
-        }
-
-        private static bool TryHitYawRing(IGameGui gameGui, Vector3 center, float radius, Vector2 mousePos)
-        {
-            return RingDistancePixels(gameGui, center, radius, mousePos) <= RingHitPixels;
         }
 
         private void DrawTranslateGizmo(IGameGui gameGui, ImDrawListPtr drawList, Vector3 center, float size)
@@ -602,7 +621,6 @@ namespace XivMediaPlayer.Compositing
 
         private void DrawYawRing(IGameGui gameGui, ImDrawListPtr drawList, Vector3 center, float radius)
         {
-            const int segments = 48;
             Vector2? prev = null;
             bool active = _dragMode == DragMode.RotateYaw;
             bool hover = _hoverHandle == GizmoHandle.RotateYaw;
@@ -610,11 +628,13 @@ namespace XivMediaPlayer.Compositing
             uint col = ImGui.ColorConvertFloat4ToU32(color);
             float thickness = active ? 3.5f : hover ? 3f : 2f;
 
-            for (int i = 0; i <= segments; i++)
+            for (int i = 0; i <= YawRingSegments; i++)
             {
-                float angle = i / (float)segments * MathF.PI * 2f;
-                var point = center + new Vector3(MathF.Cos(angle) * radius, 0f, MathF.Sin(angle) * radius);
-                if (!gameGui.WorldToScreen(point, out var screen)) continue;
+                float angle = i / (float)YawRingSegments * MathF.PI * 2f;
+                if (!gameGui.WorldToScreen(YawRingWorldPoint(center, radius, angle), out var screen))
+                {
+                    continue;
+                }
 
                 if (prev.HasValue)
                 {
@@ -671,6 +691,7 @@ namespace XivMediaPlayer.Compositing
             target.IsProjectorMode = source.IsProjectorMode;
             target.ScreensaverColor = source.ScreensaverColor;
             target.ScreensaverStyle = source.ScreensaverStyle;
+            target.IdleBrandingUrl = source.IdleBrandingUrl;
             target.ScaleAspectMode = source.ScaleAspectMode;
         }
 

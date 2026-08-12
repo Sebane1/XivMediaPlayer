@@ -25,6 +25,7 @@ namespace XivMediaPlayer.Server.Models
         public float ScreensaverColorG { get; set; } = 0.0f;
         public float ScreensaverColorB { get; set; } = 0.0f;
         public int ScreensaverStyle { get; set; } = 0;
+        public string IdleBrandingUrl { get; set; } = string.Empty;
 
         [NotMapped]
         public bool BypassLock { get; set; } = false;

@@ -25,6 +25,7 @@ namespace XivMediaPlayer.Networking.Models
         public float ScreensaverColorG { get; set; } = 0.0f;
         public float ScreensaverColorB { get; set; } = 0.0f;
         public int ScreensaverStyle { get; set; } = 0;
+        public string IdleBrandingUrl { get; set; } = string.Empty;
         public DateTime LastUpdated { get; set; } = DateTime.UtcNow;
     }
 

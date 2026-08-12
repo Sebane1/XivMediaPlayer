@@ -146,6 +146,10 @@ namespace XivMediaPlayer.Server.Migrations
                     b.Property<int>("ScreensaverStyle")
                         .HasColumnType("INTEGER");
 
+                    b.Property<string>("IdleBrandingUrl")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
                     b.HasKey("Id");
 
                     b.HasIndex("LocationKey");

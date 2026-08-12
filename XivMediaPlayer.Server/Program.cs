@@ -77,6 +77,12 @@ using (var scope = app.Services.CreateScope())
         {
             db.Database.ExecuteSqlRaw("INSERT INTO \"__EFMigrationsHistory\" (\"MigrationId\", \"ProductVersion\") VALUES ('20260812050000_TvScaleAspectMode', '10.0.8');");
         }
+
+        var idleBrandingCols = db.Database.SqlQueryRaw<string>("SELECT name FROM pragma_table_info('TvPlacements') WHERE name='IdleBrandingUrl'").ToList();
+        if (idleBrandingCols.Any() && !history.Contains("20260812060000_TvIdleBrandingUrl"))
+        {
+            db.Database.ExecuteSqlRaw("INSERT INTO \"__EFMigrationsHistory\" (\"MigrationId\", \"ProductVersion\") VALUES ('20260812060000_TvIdleBrandingUrl', '10.0.8');");
+        }
     }
 
     db.Database.Migrate();

@@ -442,7 +442,7 @@ namespace XivMediaPlayer.Windows {
       if (ImGui.Button(Localize("Tutorial Video (How to Place TVs)"))) {
         try {
           System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo {
-            FileName = "https://www.youtube.com/watch?v=ZgLs2OJQ8ks",
+            FileName = "https://youtu.be/RyvphbJxf5s",
             UseShellExecute = true
           });
         } catch { }

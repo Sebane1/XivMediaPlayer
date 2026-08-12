@@ -395,15 +395,18 @@ float4 PS(VS_OUT input) : SV_TARGET {
               float aspect = 16.0 / 9.0;
               if (RenderResolution.y > 0) aspect = RenderResolution.x / RenderResolution.y;
 
-              if (HasIdleBranding > 0.5) {
-                  float imgAspect = max(IdleBrandingAspect, 0.01);
-                  float2 scale = float2(1.0, 1.0);
-                  if (imgAspect > aspect) scale.y = aspect / imgAspect;
-                  else scale.x = imgAspect / aspect;
-                  float2 centered = (uv - 0.5) / scale + 0.5;
-                  if (centered.x >= 0.0 && centered.x <= 1.0 && centered.y >= 0.0 && centered.y <= 1.0) {
-                      float4 img = IdleBrandingTexture.Sample(VideoSampler, centered);
-                      color.rgb = lerp(color.rgb, img.rgb, img.a);
+              if (ScreensaverStyle > 5.5) {
+                  // Style 6: Custom Image
+                  if (HasIdleBranding > 0.5) {
+                      float imgAspect = max(IdleBrandingAspect, 0.01);
+                      float2 scale = float2(1.0, 1.0);
+                      if (imgAspect > aspect) scale.y = aspect / imgAspect;
+                      else scale.x = imgAspect / aspect;
+                      float2 centered = (uv - 0.5) / scale + 0.5;
+                      if (centered.x >= 0.0 && centered.x <= 1.0 && centered.y >= 0.0 && centered.y <= 1.0) {
+                          float4 img = IdleBrandingTexture.Sample(VideoSampler, centered);
+                          color.rgb = lerp(color.rgb, img.rgb, img.a);
+                      }
                   }
               } else if (ScreensaverStyle < 0.5) {
                   // Style 0: Bouncing Logo
