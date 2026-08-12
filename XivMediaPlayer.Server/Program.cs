@@ -59,7 +59,12 @@ using (var scope = app.Services.CreateScope())
         if (ssCols.Any() && !history.Contains("20260622061404_AddScreensaverSettings")) {
             db.Database.ExecuteSqlRaw("INSERT INTO \"__EFMigrationsHistory\" (\"MigrationId\", \"ProductVersion\") VALUES ('20260622061404_AddScreensaverSettings', '10.0.8');");
         }
-    }
+        // Multi-TV schema already applied outside EF history (manual deploy / table rebuild).
+        var idPkCols = db.Database.SqlQueryRaw<string>("SELECT name FROM pragma_table_info('TvPlacements') WHERE pk = 1").ToList();
+        if (idPkCols.Any() && idPkCols[0] == "Id" && !history.Contains("20260812030000_MultiTvPlacements"))
+        {
+            db.Database.ExecuteSqlRaw("INSERT INTO \"__EFMigrationsHistory\" (\"MigrationId\", \"ProductVersion\") VALUES ('20260812030000_MultiTvPlacements', '10.0.8');");
+        }    }
 
     db.Database.Migrate();
 }

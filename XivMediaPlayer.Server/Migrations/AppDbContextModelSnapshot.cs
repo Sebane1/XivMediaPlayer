@@ -83,10 +83,8 @@ namespace XivMediaPlayer.Server.Migrations
 
             modelBuilder.Entity("XivMediaPlayer.Server.Models.TvPlacement", b =>
                 {
-                    b.Property<string>("LocationKey")
-                        .HasColumnType("TEXT");
-
                     b.Property<string>("Id")
+                        .IsRequired()
                         .HasColumnType("TEXT");
 
                     b.Property<bool>("IsLocked")
@@ -96,6 +94,10 @@ namespace XivMediaPlayer.Server.Migrations
                         .HasColumnType("INTEGER");
 
                     b.Property<DateTime>("LastUpdated")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("LocationKey")
+                        .IsRequired()
                         .HasColumnType("TEXT");
 
                     b.Property<float>("Opacity")
@@ -141,7 +143,9 @@ namespace XivMediaPlayer.Server.Migrations
                     b.Property<int>("ScreensaverStyle")
                         .HasColumnType("INTEGER");
 
-                    b.HasKey("LocationKey");
+                    b.HasKey("Id");
+
+                    b.HasIndex("LocationKey");
 
                     b.ToTable("TvPlacements");
                 });

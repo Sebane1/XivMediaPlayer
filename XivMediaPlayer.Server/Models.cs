@@ -83,7 +83,18 @@ namespace XivMediaPlayer.Server.Models
         protected override void OnModelCreating(Microsoft.EntityFrameworkCore.ModelBuilder modelBuilder)
         {
             modelBuilder.Entity<TvPlacement>()
-                .HasKey(t => t.LocationKey); // We only allow one TV per room right now
+                .HasKey(t => t.Id);
+
+            modelBuilder.Entity<TvPlacement>()
+                .HasIndex(t => t.LocationKey);
+
+            modelBuilder.Entity<TvPlacement>()
+                .Property(t => t.Id)
+                .IsRequired();
+
+            modelBuilder.Entity<TvPlacement>()
+                .Property(t => t.LocationKey)
+                .IsRequired();
 
             modelBuilder.Entity<RoomMediaStateSync>()
                 .HasKey(m => m.LocationKey);

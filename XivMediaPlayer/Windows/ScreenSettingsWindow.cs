@@ -3,6 +3,7 @@ using Dalamud.Interface.Windowing;
 using MediaPlayerCore.Compositing;
 using XivMediaPlayer.Compositing;
 using System;
+using System.Linq;
 using System.Numerics;
 using Dalamud.Plugin.Services;
 using XivMediaPlayer.Networking.Models;
@@ -148,6 +149,8 @@ namespace XivMediaPlayer.Windows {
         return;
       }
 
+      DrawTvSelector(locKey);
+
       ImGui.Separator();
 
       // Ctrl+Shift quick-snap logic
@@ -187,6 +190,10 @@ namespace XivMediaPlayer.Windows {
       if (ImGui.Button(L("Save"))) {
         SyncToTransform();
         _onSave?.Invoke();
+      }
+      ImGui.SameLine();
+      if (ImGui.Button(L("Add Screen"))) {
+        RegisterAdditionalTvAsync(locKey);
       }
       ImGui.SameLine();
       if (ImGui.Button(L("Reset"))) {
@@ -443,11 +450,22 @@ namespace XivMediaPlayer.Windows {
             bool isIslandSync = !string.IsNullOrEmpty(serverLocationKey) && serverLocationKey.StartsWith("island_");
             bool success = await _plugin.ServerClient.DeleteTvAsync(serverLocationKey, currentPlacement.Id, _plugin.Config.OwnerId, _plugin.IsHousingMenuOpen || isOutdoorsSync || isIslandSync);
             if (success) {
-                _plugin.CurrentTvPlacement = null;
-                _plugin.Config.ScreenPlacements.Remove(locationKey);
-                _plugin.Config.ScreenPlacements.Remove(serverLocationKey);
-                _transform.Enabled = false;
-                _enabled = false;
+                _plugin.RemoveRoomTv(currentPlacement.Id);
+                var remaining = _plugin.RoomTvPlacements
+                    .Where(t => t.LocationKey == serverLocationKey)
+                    .ToList();
+                if (remaining.Count > 0) {
+                    _plugin.SelectTvForEditing(remaining[0]);
+                    SyncFromTransform();
+                    _enabled = true;
+                    _transform.Enabled = true;
+                } else {
+                    _plugin.CurrentTvPlacement = null;
+                    _transform.Enabled = false;
+                    _enabled = false;
+                    _plugin.Config.ScreenPlacements.Remove(locationKey);
+                    _plugin.Config.ScreenPlacements.Remove(serverLocationKey);
+                }
                 _plugin.Config.Save();
                 _statusMessage = "Successfully removed TV from the room!";
                 _statusColor = new Vector4(0.3f, 1f, 0.3f, 1);
@@ -523,22 +541,44 @@ namespace XivMediaPlayer.Windows {
 
     private DateTime _lastRegistrationTime = DateTime.MinValue;
 
-    public async void RegisterTvAsync(string locationKey) {
-      if (!_enabled) {
-        _statusMessage = "World screen is not enabled!";
-        _statusColor = new Vector4(1, 0.3f, 0.3f, 1);
+    private void DrawTvSelector(string locationKey) {
+      var roomTvs = _plugin.RoomTvPlacements
+        .Where(t => t.LocationKey == locationKey)
+        .OrderBy(t => t.LastUpdated)
+        .ToList();
+
+      if (roomTvs.Count == 0 && _plugin.CurrentTvPlacement != null) {
+        roomTvs.Add(_plugin.CurrentTvPlacement);
+      }
+
+      if (roomTvs.Count <= 1) {
         return;
       }
 
-      if ((DateTime.UtcNow - _lastRegistrationTime).TotalSeconds < 2) {
-          return; // Debounce to prevent double-logs from FFXIV UI flickering
+      ImGui.TextColored(new Vector4(0.7f, 0.9f, 1f, 1f), L("Screens in this area"));
+
+      string currentId = _plugin.CurrentTvPlacement?.Id ?? string.Empty;
+      for (int i = 0; i < roomTvs.Count; i++) {
+        var tv = roomTvs[i];
+        string label = string.Format(L("Screen {0}"), i + 1);
+        bool selected = tv.Id == currentId;
+        if (ImGui.RadioButton($"{label}##tv_{tv.Id}", selected)) {
+          _plugin.SelectTvForEditing(tv);
+          SyncFromTransform();
+        }
+        if (i + 1 < roomTvs.Count) {
+          ImGui.SameLine();
+        }
       }
-      _lastRegistrationTime = DateTime.UtcNow;
 
-      _statusMessage = "Registering TV on server...";
-      _statusColor = new Vector4(1, 1, 1, 1);
+      if (roomTvs.Count > 0) {
+        ImGui.TextDisabled(string.Format(L("{0} screen(s) share the same playback."), roomTvs.Count));
+      }
+    }
 
-      var placement = new TvPlacement {
+    private TvPlacement BuildPlacementFromTransform(string locationKey, bool createNewId) {
+      return new TvPlacement {
+        Id = createNewId ? Guid.NewGuid().ToString() : (_plugin.CurrentTvPlacement?.Id ?? Guid.NewGuid().ToString()),
         LocationKey = locationKey,
         PositionX = _position.X,
         PositionY = _position.Y,
@@ -558,15 +598,66 @@ namespace XivMediaPlayer.Windows {
         IsLocked = _plugin.CurrentTvPlacement?.IsLocked ?? (!locationKey.StartsWith("zone_") && !locationKey.StartsWith("island_")),
         BypassLock = _plugin.IsHousingMenuOpen || locationKey.StartsWith("zone_") || locationKey.StartsWith("island_")
       };
+    }
+
+    public async void RegisterAdditionalTvAsync(string locationKey) {
+      if (!_enabled) return;
+
+      if ((DateTime.UtcNow - _lastRegistrationTime).TotalSeconds < 2) return;
+      _lastRegistrationTime = DateTime.UtcNow;
+
+      SyncToTransform();
+      var placement = BuildPlacementFromTransform(locationKey, createNewId: true);
+      placement.PositionX += 2.0f;
+
+      _statusMessage = "Adding another screen to this area...";
+      _statusColor = new Vector4(1, 1, 1, 1);
+
+      try {
+        var result = await _plugin.ServerClient.RegisterTvAsync(locationKey, placement, create: true);
+        if (result != null) {
+          _plugin.UpsertRoomTv(result);
+          _plugin.SelectTvForEditing(result);
+          SyncFromTransform();
+          _statusMessage = "Added another screen for all visitors!";
+          _statusColor = new Vector4(0.3f, 1f, 0.3f, 1);
+          PrintStatus("Added another screen for all visitors!");
+        } else {
+          _statusMessage = "Saved locally, but failed to reach the sync server.";
+          _statusColor = new Vector4(1, 0.6f, 0.2f, 1);
+        }
+      } catch (Exception) {
+        _statusMessage = "Network error while adding screen.";
+        _statusColor = new Vector4(1, 0.3f, 0.3f, 1);
+      }
+    }
+
+    public async void RegisterTvAsync(string locationKey) {
+      if (!_enabled) {
+        _statusMessage = "World screen is not enabled!";
+        _statusColor = new Vector4(1, 0.3f, 0.3f, 1);
+        return;
+      }
+
+      if ((DateTime.UtcNow - _lastRegistrationTime).TotalSeconds < 2) {
+          return; // Debounce to prevent double-logs from FFXIV UI flickering
+      }
+      _lastRegistrationTime = DateTime.UtcNow;
+
+      _statusMessage = "Registering TV on server...";
+      _statusColor = new Vector4(1, 1, 1, 1);
+
+      var placement = BuildPlacementFromTransform(locationKey, createNewId: false);
 
       SyncToTransform();
       _onSave?.Invoke();
 
       try 
       {
-        var result = await _plugin.ServerClient.RegisterTvAsync(locationKey, placement);
+        var result = await _plugin.ServerClient.RegisterTvAsync(locationKey, placement, create: false);
         if (result != null) {
-          _plugin.CurrentTvPlacement = result;
+          _plugin.UpsertRoomTv(result);
+          _plugin.SelectTvForEditing(result);
           _statusMessage = "Successfully registered TV for all visitors!";
           _statusColor = new Vector4(0.3f, 1f, 0.3f, 1);
           PrintStatus("Successfully registered TV for all visitors!");

@@ -57,11 +57,17 @@ namespace XivMediaPlayer.Networking
             return new List<TvPlacement>();
         }
 
-        public async Task<TvPlacement> RegisterTvAsync(string locationKey, TvPlacement placement)
+        public async Task<TvPlacement> RegisterTvAsync(string locationKey, TvPlacement placement, bool create = false)
         {
             try
             {
-                var response = await _httpClient.PostAsJsonAsync($"{_baseUrl}/api/rooms/{Uri.EscapeDataString(locationKey)}/tvs", placement);
+                string url = $"{_baseUrl}/api/rooms/{Uri.EscapeDataString(locationKey)}/tvs";
+                if (create)
+                {
+                    url += "?create=true";
+                }
+
+                var response = await _httpClient.PostAsJsonAsync(url, placement);
                 if (response.StatusCode == System.Net.HttpStatusCode.Forbidden)
                 {
                     throw new UnauthorizedAccessException("This TV is locked by its owner and cannot be moved.");

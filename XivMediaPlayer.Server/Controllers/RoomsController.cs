@@ -41,12 +41,33 @@ namespace XivMediaPlayer.Server.Controllers
         }
 
         [HttpPost("{locationKey}/tvs")]
-        public async Task<IActionResult> RegisterTv(string locationKey, [FromBody] TvPlacement placement)
+        public async Task<IActionResult> RegisterTv(string locationKey, [FromBody] TvPlacement placement, [FromQuery] bool create = false)
         {
             placement.LocationKey = locationKey;
             placement.LastUpdated = DateTime.UtcNow;
 
-            var existing = await _db.TvPlacements.FirstOrDefaultAsync(t => t.LocationKey == locationKey);
+            if (string.IsNullOrWhiteSpace(placement.Id))
+            {
+                placement.Id = Guid.NewGuid().ToString();
+            }
+
+            var roomTvs = await _db.TvPlacements
+                .Where(t => t.LocationKey == locationKey)
+                .ToListAsync();
+
+            TvPlacement? existing = null;
+
+            if (!create)
+            {
+                existing = roomTvs.FirstOrDefault(t => t.Id == placement.Id);
+
+                // Legacy clients send a fresh random Id on every save but expect upsert-by-room.
+                if (existing == null && roomTvs.Count == 1)
+                {
+                    existing = roomTvs[0];
+                }
+            }
+
             if (existing != null)
             {
                 bool isForfeited = false;
@@ -66,38 +87,55 @@ namespace XivMediaPlayer.Server.Controllers
 
                 if (isForfeited) existing.IsLocked = false; // Reset lock if it was abandoned
 
-
-                // Update existing TV
-                existing.PositionX = placement.PositionX;
-                existing.PositionY = placement.PositionY;
-                existing.PositionZ = placement.PositionZ;
-                existing.RotationX = placement.RotationX;
-                existing.RotationY = placement.RotationY;
-                existing.RotationZ = placement.RotationZ;
-                existing.ScaleX = placement.ScaleX;
-                existing.ScaleY = placement.ScaleY;
-                existing.Opacity = placement.Opacity;
-                existing.IsProjectorMode = placement.IsProjectorMode;
-                existing.ScreensaverColorR = placement.ScreensaverColorR;
-                existing.ScreensaverColorG = placement.ScreensaverColorG;
-                existing.ScreensaverColorB = placement.ScreensaverColorB;
-                existing.ScreensaverStyle = placement.ScreensaverStyle;
-                existing.IsLocked = placement.IsLocked;
-                // We do NOT update the OwnerId of an existing TV unless they were already the owner, 
-                // but if it wasn't locked they can technically steal it right now.
-                existing.OwnerId = placement.OwnerId;
+                ApplyPlacementFields(existing, placement);
                 existing.LastUpdated = placement.LastUpdated;
                 _db.TvPlacements.Update(existing);
+                await _db.SaveChangesAsync();
+                return Ok(existing);
             }
-            else
+
+            if (create || roomTvs.Count == 0)
             {
-                // Add new TV
+                if (roomTvs.Count > 0 && !create)
+                {
+                    // Ambiguous legacy request against a multi-TV room — require explicit create=true.
+                    return BadRequest("Multiple TVs exist for this location. Pass create=true to add another screen.");
+                }
+
                 _db.TvPlacements.Add(placement);
+                await _db.SaveChangesAsync();
+                return Ok(placement);
             }
 
-            await _db.SaveChangesAsync();
+            return BadRequest("Multiple TVs exist for this location. Pass create=true to add another screen.");
+        }
 
-            return Ok(placement);
+        private static void ApplyPlacementFields(TvPlacement target, TvPlacement source)
+        {
+            target.PositionX = source.PositionX;
+            target.PositionY = source.PositionY;
+            target.PositionZ = source.PositionZ;
+            target.RotationX = source.RotationX;
+            target.RotationY = source.RotationY;
+            target.RotationZ = source.RotationZ;
+            target.ScaleX = source.ScaleX;
+            target.ScaleY = source.ScaleY;
+            target.Opacity = source.Opacity;
+            target.IsProjectorMode = source.IsProjectorMode;
+            target.ScreensaverColorR = source.ScreensaverColorR;
+            target.ScreensaverColorG = source.ScreensaverColorG;
+            target.ScreensaverColorB = source.ScreensaverColorB;
+            target.ScreensaverStyle = source.ScreensaverStyle;
+            target.IsLocked = source.IsLocked;
+            target.OwnerId = source.OwnerId;
+        }
+
+        private async Task<bool> IsRoomMediaLockedAsync(string locationKey, string ownerId, bool bypassLock)
+        {
+            if (bypassLock) return false;
+
+            return await _db.TvPlacements.AnyAsync(
+                t => t.LocationKey == locationKey && t.IsLocked && t.OwnerId != ownerId);
         }
 
         [HttpDelete("{locationKey}/tvs/{tvId}")]
@@ -212,9 +250,8 @@ namespace XivMediaPlayer.Server.Controllers
 
             state.LocationKey = locationKey;
             
-            // Check if the TV is locked
-            var tv = await _db.TvPlacements.FindAsync(locationKey);
-            if (tv != null && tv.IsLocked && tv.OwnerId != state.OwnerId && !state.BypassLock)
+            // Check if any TV in the room is locked against this DJ.
+            if (await IsRoomMediaLockedAsync(locationKey, state.OwnerId, state.BypassLock))
             {
                 return StatusCode(403);
             }
