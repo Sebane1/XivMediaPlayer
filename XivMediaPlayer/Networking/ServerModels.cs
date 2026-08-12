@@ -26,6 +26,9 @@ namespace XivMediaPlayer.Networking.Models
         public float ScreensaverColorB { get; set; } = 0.0f;
         public int ScreensaverStyle { get; set; } = 0;
         public string IdleBrandingUrl { get; set; } = string.Empty;
+        public int VisualEffectMode { get; set; } = 0;
+        public float EffectIntensity { get; set; } = 0.65f;
+        public float EffectSpeed { get; set; } = 1.0f;
         public DateTime LastUpdated { get; set; } = DateTime.UtcNow;
     }
 
@@ -74,6 +77,9 @@ namespace XivMediaPlayer.Networking.Models
         public float ScaleY { get; set; }
         public string ImageUrl { get; set; } = string.Empty;
         public float Opacity { get; set; } = 1.0f;
+        public int VisualEffectMode { get; set; } = 0;
+        public float EffectIntensity { get; set; } = 0.65f;
+        public float EffectSpeed { get; set; } = 1.0f;
         public string OwnerId { get; set; } = string.Empty;
         public DateTime LastUpdated { get; set; } = DateTime.UtcNow;
         public bool BypassLock { get; set; } = false;

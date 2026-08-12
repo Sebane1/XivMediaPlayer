@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Net.Http;
 using System.Net.Http.Json;
 using System.Threading.Tasks;
@@ -59,6 +60,15 @@ namespace XivMediaPlayer.Networking
 
         public async Task<TvPlacement> RegisterTvAsync(string locationKey, TvPlacement placement, bool create = false)
         {
+            return await RegisterTvInternalAsync(locationKey, placement, create, allowAutoCreate: true);
+        }
+
+        private async Task<TvPlacement> RegisterTvInternalAsync(
+            string locationKey,
+            TvPlacement placement,
+            bool create,
+            bool allowAutoCreate)
+        {
             try
             {
                 string url = $"{_baseUrl}/api/rooms/{Uri.EscapeDataString(locationKey)}/tvs";
@@ -79,6 +89,20 @@ namespace XivMediaPlayer.Networking
                 }
 
                 var errorBody = await response.Content.ReadAsStringAsync();
+                if (allowAutoCreate
+                    && !create
+                    && response.StatusCode == System.Net.HttpStatusCode.BadRequest
+                    && errorBody.Contains("create=true", StringComparison.OrdinalIgnoreCase)
+                    && !string.IsNullOrWhiteSpace(placement.Id))
+                {
+                    var serverTvs = await GetTvsForRoomAsync(locationKey);
+                    if (!serverTvs.Any(t => string.Equals(t.Id, placement.Id, StringComparison.Ordinal)))
+                    {
+                        _log.Info($"TV id {placement.Id} is not on server for {locationKey}; registering as a new screen.");
+                        return await RegisterTvInternalAsync(locationKey, placement, create: true, allowAutoCreate: false);
+                    }
+                }
+
                 _log.Error($"Failed to register TV for room {locationKey} ({(int)response.StatusCode}): {errorBody}");
             }
             catch (Exception ex)

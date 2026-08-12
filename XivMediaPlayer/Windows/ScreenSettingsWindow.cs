@@ -36,6 +36,9 @@ namespace XivMediaPlayer.Windows {
     private bool _isProjectorMode = false;
     private Vector3 _screensaverColor = new Vector3(0.0f, 0.0f, 0.0f);
     private int _screensaverStyle = 0;
+    private int _visualEffectMode = 0;
+    private float _effectIntensity = 0.65f;
+    private float _effectSpeed = 1.0f;
     private string _idleBrandingUrl = "";
     private string _bannerImageUrl = "";
 
@@ -77,6 +80,9 @@ namespace XivMediaPlayer.Windows {
       _isProjectorMode = _transform.IsProjectorMode;
       _screensaverColor = _transform.ScreensaverColor;
       _screensaverStyle = _transform.ScreensaverStyle;
+      _visualEffectMode = _transform.VisualEffectMode;
+      _effectIntensity = _transform.EffectIntensity;
+      _effectSpeed = _transform.EffectSpeed;
       _idleBrandingUrl = _transform.IdleBrandingUrl ?? string.Empty;
       if (_plugin.CurrentTvPlacement != null && string.IsNullOrWhiteSpace(_idleBrandingUrl))
       {
@@ -99,6 +105,10 @@ namespace XivMediaPlayer.Windows {
       return storedMode is 0 or 1 ? storedMode : 2;
     }
 
+    internal void FlushUiToTransform() {
+      SyncToTransform();
+    }
+
     private void SyncToTransform() {
       _transform.Position = _position;
       _transform.RotationDegrees = new Vector3(_rotation.Y, _rotation.X, 0); // pitch, yaw, roll
@@ -110,6 +120,9 @@ namespace XivMediaPlayer.Windows {
       _transform.ScreensaverColor = _screensaverColor;
       _transform.ScreensaverStyle = _screensaverStyle;
       _transform.IdleBrandingUrl = _idleBrandingUrl?.Trim() ?? string.Empty;
+      _transform.VisualEffectMode = _visualEffectMode;
+      _transform.EffectIntensity = _effectIntensity;
+      _transform.EffectSpeed = _effectSpeed;
       _plugin.SyncPlacementManipulatorFromWorkingTransform();
     }
 
@@ -222,8 +235,8 @@ namespace XivMediaPlayer.Windows {
           DrawPlacementEditor(locKey, hasPrivileges);
           ImGui.EndTabItem();
         }
-        if (!editingBanner && ImGui.BeginTabItem(Localize("Appearance"))) {
-          DrawAppearanceTab();
+        if (ImGui.BeginTabItem(Localize("Appearance"))) {
+          DrawAppearanceTab(editingBanner);
           ImGui.EndTabItem();
         }
         if (ImGui.BeginTabItem(Localize("Sync"))) {
@@ -564,47 +577,84 @@ namespace XivMediaPlayer.Windows {
       if (ImGui.Button(Localize("Cinema (12m)"))) { _scale.X = 12f; _scale.Y = _scale.X * (_aspectRatio == 1 ? (3f/4f) : (9f/16f)); _transform.Scale = _scale; _onSave?.Invoke(); }
     }
 
-    private void DrawAppearanceTab() {
-      ImGui.TextColored(new Vector4(0.7f, 0.9f, 1f, 1f), Localize("Projector & Transparency"));
+    private void DrawAppearanceTab(bool editingBanner) {
+      ImGui.TextColored(new Vector4(0.7f, 0.9f, 1f, 1f), editingBanner
+        ? Localize("Banner Appearance")
+        : Localize("Projector & Transparency"));
 
       bool appearanceChanged = false;
-      appearanceChanged |= ImGui.Checkbox(Localize("Projector Mode (Additive Blend)"), ref _isProjectorMode);
-      appearanceChanged |= ImGui.SliderFloat(Localize("Opacity"), ref _opacity, 0.05f, 1.0f, "%.2f");
-      appearanceChanged |= ImGui.ColorEdit3(Localize("Screensaver Color"), ref _screensaverColor);
+      if (!editingBanner) {
+        appearanceChanged |= ImGui.Checkbox(Localize("Projector Mode (Additive Blend)"), ref _isProjectorMode);
+        appearanceChanged |= ImGui.SliderFloat(Localize("Opacity"), ref _opacity, 0.05f, 1.0f, "%.2f");
+        appearanceChanged |= ImGui.ColorEdit3(Localize("Screensaver Color"), ref _screensaverColor);
 
-      string[] screensaverStyles = new string[] {
-        Localize("Bouncing Logo"), Localize("VCR"), Localize("No Signal"), Localize("Static"), Localize("Test Pattern"), Localize("Matrix Rain"), Localize("Custom Image")
-      };
-      appearanceChanged |= ImGui.Combo(Localize("Screensaver Style"), ref _screensaverStyle, screensaverStyles, screensaverStyles.Length);
+        string[] screensaverStyles = new string[] {
+          Localize("Bouncing Logo"), Localize("VCR"), Localize("No Signal"), Localize("Static"), Localize("Test Pattern"), Localize("Matrix Rain"), Localize("Custom Image")
+        };
+        appearanceChanged |= ImGui.Combo(Localize("Screensaver Style"), ref _screensaverStyle, screensaverStyles, screensaverStyles.Length);
 
-      if (_screensaverStyle == 6) {
-        DrawIdleBrandingUrlField(applyLive: true);
-        if (_plugin.IsImageTextureReady(_idleBrandingUrl))
-        {
-          ImGui.TextDisabled(Localize("Image loaded. Preview shows on the TV while this window is open and nothing is playing."));
+        if (_screensaverStyle == 6) {
+          DrawIdleBrandingUrlField(applyLive: true);
+          if (_plugin.IsImageTextureReady(_idleBrandingUrl))
+          {
+            ImGui.TextDisabled(Localize("Image loaded. Preview shows on the TV while this window is open and nothing is playing."));
+          }
+          else if (!string.IsNullOrWhiteSpace(_idleBrandingUrl))
+          {
+            ImGui.TextDisabled(Localize("Downloading image... It appears once loaded, or after ~5 seconds idle with nothing playing."));
+          }
+          else
+          {
+            ImGui.TextWrapped(Localize("Paste any direct HTTPS image link — file extensions are optional. Stop playback to preview idle screensaver images."));
+          }
         }
-        else if (!string.IsNullOrWhiteSpace(_idleBrandingUrl))
-        {
-          ImGui.TextDisabled(Localize("Downloading image... It appears once loaded, or after ~5 seconds idle with nothing playing."));
-        }
-        else
-        {
-          ImGui.TextWrapped(Localize("Paste any direct HTTPS image link — file extensions are optional. Stop playback to preview idle screensaver images."));
-        }
+      } else {
+        appearanceChanged |= ImGui.SliderFloat(Localize("Opacity"), ref _opacity, 0.05f, 1.0f, "%.2f");
       }
 
       bool saveAppearance = ImGui.IsItemDeactivatedAfterEdit() || ImGui.IsItemDeactivated();
 
       if (appearanceChanged) {
         _transform.Opacity = _opacity;
-        _transform.IsProjectorMode = _isProjectorMode;
-        _transform.ScreensaverColor = _screensaverColor;
-        _transform.ScreensaverStyle = _screensaverStyle;
-        _transform.IdleBrandingUrl = _idleBrandingUrl?.Trim() ?? string.Empty;
-        if (_screensaverStyle == 6 && !string.IsNullOrWhiteSpace(_idleBrandingUrl))
-        {
-          _plugin.ApplyIdleBrandingUrl(_idleBrandingUrl);
+        if (!editingBanner) {
+          _transform.IsProjectorMode = _isProjectorMode;
+          _transform.ScreensaverColor = _screensaverColor;
+          _transform.ScreensaverStyle = _screensaverStyle;
+          _transform.IdleBrandingUrl = _idleBrandingUrl?.Trim() ?? string.Empty;
+          if (_screensaverStyle == 6 && !string.IsNullOrWhiteSpace(_idleBrandingUrl))
+          {
+            _plugin.ApplyIdleBrandingUrl(_idleBrandingUrl);
+          }
         }
+      }
+      if (saveAppearance || appearanceChanged) {
+        _onSave?.Invoke();
+      }
+
+      ImGui.Spacing();
+      ImGui.TextColored(new Vector4(0.7f, 0.9f, 1f, 1f), Localize("Visual Effects (Experimental)"));
+      ImGui.TextWrapped(editingBanner
+        ? Localize("Shader post-effects on the banner image.")
+        : Localize("Shader post-effects on the TV/banner image. Audio modes react to playback when spatial audio is active."));
+
+      string[] visualEffects = new string[] {
+        Localize("None"),
+        Localize("CRT (scanlines + chromatic)"),
+        Localize("Ripple"),
+        Localize("Glitch"),
+        Localize("Parallax"),
+        Localize("Audio Pulse"),
+        Localize("Audio Spectrum"),
+        Localize("Kaleidoscope"),
+      };
+      appearanceChanged |= ImGui.Combo(Localize("Effect Mode"), ref _visualEffectMode, visualEffects, visualEffects.Length);
+      appearanceChanged |= ImGui.SliderFloat(Localize("Effect Intensity"), ref _effectIntensity, 0f, 2f, "%.2fx");
+      appearanceChanged |= ImGui.SliderFloat(Localize("Effect Speed"), ref _effectSpeed, 0.1f, 3f, "%.1fx");
+
+      if (appearanceChanged) {
+        _transform.VisualEffectMode = _visualEffectMode;
+        _transform.EffectIntensity = _effectIntensity;
+        _transform.EffectSpeed = _effectSpeed;
       }
       if (saveAppearance || appearanceChanged) {
         _onSave?.Invoke();
@@ -715,6 +765,7 @@ namespace XivMediaPlayer.Windows {
         _plugin.RunOnFrameworkThread(() =>
         {
           if (result != null) {
+            result = Plugin.MergeBannerPlacementFromServer(result, placement);
             _plugin.UpsertRoomBanner(result);
             _plugin.SelectBannerForEditing(result);
             _statusMessage = string.IsNullOrWhiteSpace(result.ImageUrl)
@@ -781,6 +832,7 @@ namespace XivMediaPlayer.Windows {
         _plugin.RunOnFrameworkThread(() =>
         {
           if (result != null) {
+            result = Plugin.MergeBannerPlacementFromServer(result, placement);
             _plugin.UpsertRoomBanner(result);
             _plugin.SelectBannerForEditing(result);
             _statusMessage = string.IsNullOrWhiteSpace(result.ImageUrl)
@@ -831,6 +883,7 @@ namespace XivMediaPlayer.Windows {
         _plugin.RunOnFrameworkThread(() =>
         {
           if (result != null) {
+            result = Plugin.MergeBannerPlacementFromServer(result, placement);
             _plugin.UpsertRoomBanner(result);
             _plugin.SelectBannerForEditing(result);
             if (!quiet) {
@@ -899,6 +952,9 @@ namespace XivMediaPlayer.Windows {
         ScaleY = _scale.Y,
         Opacity = _opacity,
         ImageUrl = _bannerImageUrl?.Trim() ?? string.Empty,
+        VisualEffectMode = _visualEffectMode,
+        EffectIntensity = _effectIntensity,
+        EffectSpeed = _effectSpeed,
         OwnerId = _plugin.Config.OwnerId,
         BypassLock = _plugin.IsHousingMenuOpen || isOutdoorsSync || isIslandSync
       };
@@ -1044,7 +1100,7 @@ namespace XivMediaPlayer.Windows {
 
     private TvPlacement BuildPlacementFromTransform(string locationKey, bool createNewId) {
       return new TvPlacement {
-        Id = createNewId ? Guid.NewGuid().ToString() : (_plugin.CurrentTvPlacement?.Id ?? Guid.NewGuid().ToString()),
+        Id = _plugin.ResolveTvIdForSync(locationKey, createNewId),
         LocationKey = locationKey,
         PositionX = _position.X,
         PositionY = _position.Y,
@@ -1062,6 +1118,9 @@ namespace XivMediaPlayer.Windows {
         ScreensaverColorB = _screensaverColor.Z,
         ScreensaverStyle = _screensaverStyle,
         IdleBrandingUrl = _idleBrandingUrl?.Trim() ?? string.Empty,
+        VisualEffectMode = _visualEffectMode,
+        EffectIntensity = _effectIntensity,
+        EffectSpeed = _effectSpeed,
         OwnerId = _plugin.Config.OwnerId,
         IsLocked = _plugin.CurrentTvPlacement?.IsLocked ?? (!locationKey.StartsWith("zone_") && !locationKey.StartsWith("island_")),
         BypassLock = _plugin.IsHousingMenuOpen || locationKey.StartsWith("zone_") || locationKey.StartsWith("island_")
@@ -1120,6 +1179,7 @@ namespace XivMediaPlayer.Windows {
           }
 
           if (result != null) {
+            result = Plugin.MergeTvPlacementFromServer(result, placement);
             _plugin.UpsertRoomTv(result);
             _plugin.SelectTvForEditing(result);
             SyncFromTransform();
@@ -1166,6 +1226,7 @@ namespace XivMediaPlayer.Windows {
 
       SyncToTransform();
       _plugin.ApplyWorkingTransformToCurrentSelection();
+      _plugin.EnsureCurrentTvForSync(locationKey);
       if (!quiet) {
         _onSave?.Invoke();
       }
@@ -1177,6 +1238,7 @@ namespace XivMediaPlayer.Windows {
         _plugin.RunOnFrameworkThread(() =>
         {
           if (result != null) {
+            result = Plugin.MergeTvPlacementFromServer(result, placement);
             _plugin.UpsertRoomTv(result);
             _plugin.SelectTvForEditing(result);
             if (!quiet) {

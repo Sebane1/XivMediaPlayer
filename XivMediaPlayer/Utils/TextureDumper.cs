@@ -49,10 +49,14 @@ float4 PS(VS_OUT input) : SV_TARGET {
                 _context = new ID3D11DeviceContext(contextPtr);
                 _device = _context.Device;
 
-                var vsBytecode = Compiler.Compile(ShaderCode, "VS", "", "vs_5_0");
+                if (!Compositing.ShaderCompileHelper.TryCompile(ShaderCode, "VS", "TextureDumper.hlsl", "vs_5_0", out ReadOnlyMemory<byte> vsBytecode, out _)) {
+                    return false;
+                }
                 _vertexShader = _device.CreateVertexShader(vsBytecode.Span);
 
-                var psBytecode = Compiler.Compile(ShaderCode, "PS", "", "ps_5_0");
+                if (!Compositing.ShaderCompileHelper.TryCompile(ShaderCode, "PS", "TextureDumper.hlsl", "ps_5_0", out ReadOnlyMemory<byte> psBytecode, out _)) {
+                    return false;
+                }
                 _pixelShader = _device.CreatePixelShader(psBytecode.Span);
 
                 _sampler = _device.CreateSamplerState(new SamplerDescription {

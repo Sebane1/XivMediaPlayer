@@ -83,6 +83,32 @@ using (var scope = app.Services.CreateScope())
         {
             db.Database.ExecuteSqlRaw("INSERT INTO \"__EFMigrationsHistory\" (\"MigrationId\", \"ProductVersion\") VALUES ('20260812060000_TvIdleBrandingUrl', '10.0.8');");
         }
+
+        var tvFxCols = db.Database.SqlQueryRaw<string>("SELECT name FROM pragma_table_info('TvPlacements') WHERE name='EffectIntensity'").ToList();
+        if (tables.Any() && !tvFxCols.Any())
+        {
+            db.Database.ExecuteSqlRaw("ALTER TABLE \"TvPlacements\" ADD COLUMN \"VisualEffectMode\" INTEGER NOT NULL DEFAULT 0;");
+            db.Database.ExecuteSqlRaw("ALTER TABLE \"TvPlacements\" ADD COLUMN \"EffectIntensity\" REAL NOT NULL DEFAULT 0.65;");
+            db.Database.ExecuteSqlRaw("ALTER TABLE \"TvPlacements\" ADD COLUMN \"EffectSpeed\" REAL NOT NULL DEFAULT 1.0;");
+        }
+
+        var bannerTables = db.Database.SqlQueryRaw<string>("SELECT name FROM sqlite_master WHERE type='table' AND name='BannerPlacements'").ToList();
+        if (bannerTables.Any())
+        {
+            var bannerFxCols = db.Database.SqlQueryRaw<string>("SELECT name FROM pragma_table_info('BannerPlacements') WHERE name='EffectIntensity'").ToList();
+            if (!bannerFxCols.Any())
+            {
+                db.Database.ExecuteSqlRaw("ALTER TABLE \"BannerPlacements\" ADD COLUMN \"VisualEffectMode\" INTEGER NOT NULL DEFAULT 0;");
+                db.Database.ExecuteSqlRaw("ALTER TABLE \"BannerPlacements\" ADD COLUMN \"EffectIntensity\" REAL NOT NULL DEFAULT 0.65;");
+                db.Database.ExecuteSqlRaw("ALTER TABLE \"BannerPlacements\" ADD COLUMN \"EffectSpeed\" REAL NOT NULL DEFAULT 1.0;");
+            }
+        }
+
+        var visualFxCols = db.Database.SqlQueryRaw<string>("SELECT name FROM pragma_table_info('TvPlacements') WHERE name='EffectIntensity'").ToList();
+        if (visualFxCols.Any() && !history.Contains("20260812070000_VisualEffectSettings"))
+        {
+            db.Database.ExecuteSqlRaw("INSERT INTO \"__EFMigrationsHistory\" (\"MigrationId\", \"ProductVersion\") VALUES ('20260812070000_VisualEffectSettings', '10.0.8');");
+        }
     }
 
     db.Database.Migrate();

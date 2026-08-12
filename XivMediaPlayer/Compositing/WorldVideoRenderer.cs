@@ -29,6 +29,7 @@ namespace XivMediaPlayer.Compositing {
     private VignetteExtractor? _vignetteExtractor;
     private bool _disposed;
     private bool _useDepthOcclusion = true;
+    public AudioVisualState? SharedAudioVisuals { get; set; }
     private bool _enableGlow = true;
     private bool _enableUiCulling = true;
     
@@ -413,7 +414,9 @@ namespace XivMediaPlayer.Compositing {
         }
         if (!_depthRenderer.IsInitialized) {
           if (!_depthRenderer.Initialize()) {
-            DepthRendererError = $"Init failed: {_depthRenderer.InitError}";
+            DepthRendererError = string.IsNullOrEmpty(_depthRenderer.InitError)
+              ? "DepthTestedRenderer initialization failed."
+              : _depthRenderer.InitError;
             RenderScreenSpace(placement, textureSrv, videoAspectRatio, viewProjMatrix, viewportPos, viewportSize, uvBottom, uvRight);
             return;
           }
@@ -471,7 +474,11 @@ namespace XivMediaPlayer.Compositing {
           placement.ScreensaverColor,
           placement.ScreensaverStyle,
           uiBlendThreshold, uvBottom, uvRight, _enableGlow && renderGlow, loadingPulse, isLoadingOverlay, idleBrandingSrvPtr, idleBrandingAspect,
-          surfaceOnly: isolateCompositeOutput);
+          surfaceOnly: isolateCompositeOutput,
+          visualEffectMode: placement.VisualEffectMode,
+          effectIntensity: placement.EffectIntensity,
+          effectSpeed: placement.EffectSpeed,
+          audioVisuals: SharedAudioVisuals);
 
         DepthDebugInfo = $"Cam: {cameraPos:F1}\nFwd: {cameraForward:F2}\nFov: {fovY:F3}\nAspect: {aspectRatio:F3}";
 

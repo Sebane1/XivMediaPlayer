@@ -1,3 +1,4 @@
+using MediaPlayerCore.Compositing;
 using MediaPlayerCore.YtDlp;
 using NAudio.Wave;
 using System.Collections.Concurrent;
@@ -42,6 +43,8 @@ namespace MediaPlayerCore {
     /// <summary>Re-resolves a SABR temp path to the current on-disk file (handles temp→final rename).</summary>
     public Func<string, string?>? ResolveSabrPlayPath { get; set; }
 
+    public AudioVisualState AudioVisuals { get; } = new();
+
     public string ResolvePlaybackPath(string mediaPath)
     {
       string? resolved = ResolveSabrPlayPath?.Invoke(mediaPath);
@@ -62,6 +65,16 @@ namespace MediaPlayerCore {
       _camera = camera;
       _libVLCPath = libVLCPath;
       _updateLoop = Task.Run(() => Update());
+    }
+
+    public void UpdateAudioVisuals(ReadOnlySpan<byte> pcmBytes)
+    {
+      AudioVisuals.UpdateFromPcm16Mono(pcmBytes);
+    }
+
+    public void ResetAudioVisuals()
+    {
+      AudioVisuals.Reset();
     }
 
     public void PlayStream(IMediaGameObject playerObject, string audioPath, bool spatialAllowed, int startTimeMs = 0, Dictionary<string, string>? httpHeaders = null, bool audioOnly = false, string? slaveAudioPath = null, bool isLiveStream = false) {
@@ -151,6 +164,7 @@ namespace MediaPlayerCore {
     }
 
     public void StopStream() {
+      ResetAudioVisuals();
       // Copy references before clearing to avoid collection modification issues
       MediaObject[] streams;
       lock (_playbackStreams) {

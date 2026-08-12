@@ -24,6 +24,25 @@ namespace XivMediaPlayer.Server.Controllers
             _config = config;
         }
 
+        private const int MaxVisualEffectMode = 7;
+        private const float MaxEffectIntensity = 2f;
+        private const float MinEffectSpeed = 0.1f;
+        private const float MaxEffectSpeed = 3f;
+
+        private static void NormalizeVisualFx(TvPlacement placement)
+        {
+            placement.VisualEffectMode = Math.Clamp(placement.VisualEffectMode, 0, MaxVisualEffectMode);
+            placement.EffectIntensity = Math.Clamp(placement.EffectIntensity, 0f, MaxEffectIntensity);
+            placement.EffectSpeed = Math.Clamp(placement.EffectSpeed, MinEffectSpeed, MaxEffectSpeed);
+        }
+
+        private static void NormalizeVisualFx(BannerPlacement placement)
+        {
+            placement.VisualEffectMode = Math.Clamp(placement.VisualEffectMode, 0, MaxVisualEffectMode);
+            placement.EffectIntensity = Math.Clamp(placement.EffectIntensity, 0f, MaxEffectIntensity);
+            placement.EffectSpeed = Math.Clamp(placement.EffectSpeed, MinEffectSpeed, MaxEffectSpeed);
+        }
+
         [HttpGet("{locationKey}/tvs")]
         public async Task<IActionResult> GetTvs(string locationKey)
         {
@@ -45,11 +64,7 @@ namespace XivMediaPlayer.Server.Controllers
         {
             placement.LocationKey = locationKey;
             placement.LastUpdated = DateTime.UtcNow;
-
-            if (string.IsNullOrWhiteSpace(placement.Id))
-            {
-                placement.Id = Guid.NewGuid().ToString();
-            }
+            NormalizeVisualFx(placement);
 
             var roomTvs = await _db.TvPlacements
                 .Where(t => t.LocationKey == locationKey)
@@ -59,13 +74,21 @@ namespace XivMediaPlayer.Server.Controllers
 
             if (!create)
             {
-                existing = roomTvs.FirstOrDefault(t => t.Id == placement.Id);
+                if (!string.IsNullOrWhiteSpace(placement.Id))
+                {
+                    existing = roomTvs.FirstOrDefault(t => t.Id == placement.Id);
+                }
 
                 // Legacy clients send a fresh random Id on every save but expect upsert-by-room.
                 if (existing == null && roomTvs.Count == 1)
                 {
                     existing = roomTvs[0];
                 }
+            }
+
+            if (string.IsNullOrWhiteSpace(placement.Id))
+            {
+                placement.Id = Guid.NewGuid().ToString();
             }
 
             if (existing != null)
@@ -128,6 +151,9 @@ namespace XivMediaPlayer.Server.Controllers
             target.ScreensaverColorB = source.ScreensaverColorB;
             target.ScreensaverStyle = source.ScreensaverStyle;
             target.IdleBrandingUrl = source.IdleBrandingUrl ?? string.Empty;
+            target.VisualEffectMode = source.VisualEffectMode;
+            target.EffectIntensity = source.EffectIntensity;
+            target.EffectSpeed = source.EffectSpeed;
             target.IsLocked = source.IsLocked;
             target.OwnerId = source.OwnerId;
         }
@@ -213,6 +239,7 @@ namespace XivMediaPlayer.Server.Controllers
         {
             placement.LocationKey = locationKey;
             placement.LastUpdated = DateTime.UtcNow;
+            NormalizeVisualFx(placement);
 
             if (string.IsNullOrWhiteSpace(placement.Id))
             {
@@ -275,6 +302,9 @@ namespace XivMediaPlayer.Server.Controllers
             target.ScaleY = source.ScaleY;
             target.ImageUrl = source.ImageUrl;
             target.Opacity = source.Opacity;
+            target.VisualEffectMode = source.VisualEffectMode;
+            target.EffectIntensity = source.EffectIntensity;
+            target.EffectSpeed = source.EffectSpeed;
             target.OwnerId = source.OwnerId;
         }
 

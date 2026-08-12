@@ -99,10 +99,14 @@ float4 PS(VS_OUT input) : SV_TARGET {
         _glowSize = glowSize;
 
         // Compile shaders
-        var vsBytecode = Compiler.Compile(GlowShaderCode, "VS", "", "vs_5_0");
+        if (!ShaderCompileHelper.TryCompile(GlowShaderCode, "VS", "GlowRenderer.hlsl", "vs_5_0", out ReadOnlyMemory<byte> vsBytecode, out _)) {
+          return false;
+        }
         _vertexShader = _device.CreateVertexShader(vsBytecode.Span);
 
-        var psBytecode = Compiler.Compile(GlowShaderCode, "PS", "", "ps_5_0");
+        if (!ShaderCompileHelper.TryCompile(GlowShaderCode, "PS", "GlowRenderer.hlsl", "ps_5_0", out ReadOnlyMemory<byte> psBytecode, out _)) {
+          return false;
+        }
         _pixelShader = _device.CreatePixelShader(psBytecode.Span);
 
         // Linear sampler for smooth downsampling

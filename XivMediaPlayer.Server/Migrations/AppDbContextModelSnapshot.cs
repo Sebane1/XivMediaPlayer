@@ -150,6 +150,15 @@ namespace XivMediaPlayer.Server.Migrations
                         .IsRequired()
                         .HasColumnType("TEXT");
 
+                    b.Property<float>("EffectIntensity")
+                        .HasColumnType("REAL");
+
+                    b.Property<float>("EffectSpeed")
+                        .HasColumnType("REAL");
+
+                    b.Property<int>("VisualEffectMode")
+                        .HasColumnType("INTEGER");
+
                     b.HasKey("Id");
 
                     b.HasIndex("LocationKey");
@@ -224,6 +233,15 @@ namespace XivMediaPlayer.Server.Migrations
 
                     b.Property<float>("ScaleY")
                         .HasColumnType("REAL");
+
+                    b.Property<float>("EffectIntensity")
+                        .HasColumnType("REAL");
+
+                    b.Property<float>("EffectSpeed")
+                        .HasColumnType("REAL");
+
+                    b.Property<int>("VisualEffectMode")
+                        .HasColumnType("INTEGER");
 
                     b.HasKey("Id");
 

@@ -79,6 +79,7 @@ namespace MediaPlayerCore {
 
     private bool _audioOnly;
     private long _pendingResumeSeekMs;
+    private int _audioVisualSampleBytes;
 
     public bool IsPendingResumeSeek => _pendingResumeSeekMs > 0;
 
@@ -794,6 +795,13 @@ namespace MediaPlayerCore {
                 }
                 Marshal.Copy(samples, _audioCopyBuffer, 0, bytes);
                 _bufferedWaveProvider.AddSamples(_audioCopyBuffer, 0, bytes);
+
+                _audioVisualSampleBytes += bytes;
+                if (_audioVisualSampleBytes >= 4096)
+                {
+                    _audioVisualSampleBytes = 0;
+                    _parent.UpdateAudioVisuals(_audioCopyBuffer.AsSpan(0, bytes));
+                }
 
                 if (_waveOut != null) {
                     if (_waveOut.PlaybackState != PlaybackState.Playing) {

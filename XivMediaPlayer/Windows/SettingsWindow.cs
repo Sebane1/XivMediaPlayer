@@ -356,7 +356,7 @@ namespace XivMediaPlayer.Windows {
       {
         ImGui.TextColored(new Vector4(1f, 0.7f, 0.3f, 1f), Localize("Status: Setup needed"));
         ImGui.TextWrapped(
-          Localize("If a Windows popup asked about internet access and you clicked Block or No, use the button below — no game restart required."));
+          Localize("If a Windows popup asked about internet access and you clicked Block or No, use the button below. No game restart required."));
       }
 
       if (yt.IsYouTubeSetupRunning)

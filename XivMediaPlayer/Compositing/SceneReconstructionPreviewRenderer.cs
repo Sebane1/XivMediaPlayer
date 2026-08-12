@@ -208,10 +208,14 @@ float4 PS(VS_OUT input) : SV_TARGET {
         _height = height;
 
         // Compile shaders
-        var vsBytecode = Compiler.Compile(PreviewShaderCode, "VS", "", "vs_5_0");
+        if (!ShaderCompileHelper.TryCompile(PreviewShaderCode, "VS", "SceneReconstructionPreviewRenderer.hlsl", "vs_5_0", out ReadOnlyMemory<byte> vsBytecode, out string shaderError)) {
+          return false;
+        }
         _vertexShader = _device.CreateVertexShader(vsBytecode.Span);
 
-        var psBytecode = Compiler.Compile(PreviewShaderCode, "PS", "", "ps_5_0");
+        if (!ShaderCompileHelper.TryCompile(PreviewShaderCode, "PS", "SceneReconstructionPreviewRenderer.hlsl", "ps_5_0", out ReadOnlyMemory<byte> psBytecode, out shaderError)) {
+          return false;
+        }
         _pixelShader = _device.CreatePixelShader(psBytecode.Span);
 
         _sampler = _device.CreateSamplerState(new SamplerDescription {

@@ -129,13 +129,22 @@ float4 PSExtrapolate(PSInput input) : SV_Target {
                 _context = new ID3D11DeviceContext(contextPtr);
                 _device = _context.Device;
 
-                var vsBlob = Compiler.Compile(ExtractorShaderCode, "VSMain", "", "vs_5_0");
+                if (!ShaderCompileHelper.TryCompile(ExtractorShaderCode, "VSMain", "VignetteExtractor.hlsl", "vs_5_0", out ReadOnlyMemory<byte> vsBlob, out string error)) {
+                    System.Diagnostics.Debug.WriteLine(error);
+                    return false;
+                }
                 _vertexShader = _device.CreateVertexShader(vsBlob.Span);
 
-                var psExBlob = Compiler.Compile(ExtractorShaderCode, "PSExtract", "", "ps_5_0");
+                if (!ShaderCompileHelper.TryCompile(ExtractorShaderCode, "PSExtract", "VignetteExtractor.hlsl", "ps_5_0", out ReadOnlyMemory<byte> psExBlob, out error)) {
+                    System.Diagnostics.Debug.WriteLine(error);
+                    return false;
+                }
                 _extractShader = _device.CreatePixelShader(psExBlob.Span);
 
-                var psExtraBlob = Compiler.Compile(ExtractorShaderCode, "PSExtrapolate", "", "ps_5_0");
+                if (!ShaderCompileHelper.TryCompile(ExtractorShaderCode, "PSExtrapolate", "VignetteExtractor.hlsl", "ps_5_0", out ReadOnlyMemory<byte> psExtraBlob, out error)) {
+                    System.Diagnostics.Debug.WriteLine(error);
+                    return false;
+                }
                 _extrapolateShader = _device.CreatePixelShader(psExtraBlob.Span);
 
                 _linearSampler = _device.CreateSamplerState(new SamplerDescription {
@@ -158,7 +167,7 @@ float4 PSExtrapolate(PSInput input) : SV_Target {
                 _initialized = true;
                 return true;
             } catch (Exception ex) {
-                System.IO.File.WriteAllText(@"C:\Users\stel9\Documents\InitializeError2.txt", ex.ToString());
+                ShaderCompileHelper.LogIssue?.Invoke("[shader] VignetteExtractor init failed: " + ex);
                 return false;
             }
         }

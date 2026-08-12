@@ -604,6 +604,7 @@ namespace XivMediaPlayer
             string pluginDir = System.IO.Path.GetDirectoryName(_pluginInterface.AssemblyLocation.FullName) ?? "";
             string version = this.GetType().Assembly.GetName().Version?.ToString() ?? "0.0.0.0";
             _pluginVersion = version;
+            Compositing.ShaderCompileHelper.LogIssue = message => _pluginLog.Warning(message);
             _dependencyManager = new DependencyManager(configDir, pluginDir, version, _pluginLog);
 
             // Bypass Dalamud's assembly resolver for CefSharp natively (just in case)
@@ -2634,7 +2635,10 @@ namespace XivMediaPlayer
                 ScreensaverColor = new System.Numerics.Vector3(tv.ScreensaverColorR, tv.ScreensaverColorG, tv.ScreensaverColorB),
                 ScreensaverStyle = tv.ScreensaverStyle,
                 IdleBrandingUrl = tv.IdleBrandingUrl ?? string.Empty,
-                ScaleAspectMode = tv.ScaleAspectMode
+                ScaleAspectMode = tv.ScaleAspectMode,
+                VisualEffectMode = tv.VisualEffectMode,
+                EffectIntensity = tv.EffectIntensity,
+                EffectSpeed = tv.EffectSpeed,
             };
         }
 
@@ -2651,6 +2655,9 @@ namespace XivMediaPlayer
             t.ScreensaverStyle = source.ScreensaverStyle;
             t.IdleBrandingUrl = source.IdleBrandingUrl;
             t.ScaleAspectMode = source.ScaleAspectMode;
+            t.VisualEffectMode = source.VisualEffectMode;
+            t.EffectIntensity = source.EffectIntensity;
+            t.EffectSpeed = source.EffectSpeed;
         }
 
         private void ApplyTvPlacementToRenderer(TvPlacement tv)
@@ -2671,7 +2678,10 @@ namespace XivMediaPlayer
                 Scale = ResolveBannerScale(banner),
                 Enabled = true,
                 Opacity = banner.Opacity,
-                IsProjectorMode = false
+                IsProjectorMode = false,
+                VisualEffectMode = banner.VisualEffectMode,
+                EffectIntensity = banner.EffectIntensity,
+                EffectSpeed = banner.EffectSpeed,
             };
         }
 
@@ -2959,6 +2969,8 @@ namespace XivMediaPlayer
         {
             if (_worldRenderer?.Transform == null) return;
 
+            _screenSettingsWindow?.FlushUiToTransform();
+
             var transform = _worldRenderer.Transform;
             if (IsBannerEditActive())
             {
@@ -2974,12 +2986,55 @@ namespace XivMediaPlayer
             }
         }
 
+        internal void EnsureCurrentTvForSync(string locationKey)
+        {
+            if (IsBannerEditActive() || string.IsNullOrEmpty(locationKey)) return;
+
+            if (CurrentTvPlacement != null
+                && CurrentTvPlacement.LocationKey == locationKey
+                && !string.IsNullOrEmpty(CurrentTvPlacement.Id))
+            {
+                return;
+            }
+
+            var roomTv = _roomTvPlacements.FirstOrDefault(t =>
+                t != null && t.LocationKey == locationKey && !string.IsNullOrEmpty(t.Id));
+            if (roomTv != null)
+            {
+                SelectTvForEditing(roomTv);
+            }
+        }
+
+        internal string ResolveTvIdForSync(string locationKey, bool createNewId)
+        {
+            if (createNewId)
+            {
+                return Guid.NewGuid().ToString();
+            }
+
+            if (CurrentTvPlacement != null
+                && CurrentTvPlacement.LocationKey == locationKey
+                && !string.IsNullOrEmpty(CurrentTvPlacement.Id))
+            {
+                return CurrentTvPlacement.Id;
+            }
+
+            var roomTv = _roomTvPlacements.FirstOrDefault(t =>
+                t != null && t.LocationKey == locationKey && !string.IsNullOrEmpty(t.Id));
+            if (roomTv != null)
+            {
+                return roomTv.Id;
+            }
+
+            return Guid.NewGuid().ToString();
+        }
+
         internal TvPlacement BuildTvPlacementFromWorkingTransform(string locationKey, bool createNewId)
         {
             var transform = _worldRenderer!.Transform;
             return new Networking.Models.TvPlacement
             {
-                Id = createNewId ? Guid.NewGuid().ToString() : (CurrentTvPlacement?.Id ?? Guid.NewGuid().ToString()),
+                Id = ResolveTvIdForSync(locationKey, createNewId),
                 LocationKey = locationKey,
                 PositionX = transform.Position.X,
                 PositionY = transform.Position.Y,
@@ -2997,6 +3052,9 @@ namespace XivMediaPlayer
                 ScreensaverColorB = transform.ScreensaverColor.Z,
                 ScreensaverStyle = transform.ScreensaverStyle,
                 IdleBrandingUrl = transform.IdleBrandingUrl ?? string.Empty,
+                VisualEffectMode = transform.VisualEffectMode,
+                EffectIntensity = transform.EffectIntensity,
+                EffectSpeed = transform.EffectSpeed,
                 OwnerId = _config.OwnerId,
                 IsLocked = CurrentTvPlacement?.IsLocked ?? (!locationKey.StartsWith("zone_") && !locationKey.StartsWith("island_")),
                 BypassLock = IsHousingMenuOpen || locationKey.StartsWith("zone_") || locationKey.StartsWith("island_")
@@ -3035,6 +3093,32 @@ namespace XivMediaPlayer
             return tv;
         }
 
+        internal static void CopyVisualFxFields(TvPlacement target, TvPlacement source)
+        {
+            target.VisualEffectMode = source.VisualEffectMode;
+            target.EffectIntensity = source.EffectIntensity;
+            target.EffectSpeed = source.EffectSpeed;
+        }
+
+        internal static void CopyVisualFxFields(BannerPlacement target, BannerPlacement source)
+        {
+            target.VisualEffectMode = source.VisualEffectMode;
+            target.EffectIntensity = source.EffectIntensity;
+            target.EffectSpeed = source.EffectSpeed;
+        }
+
+        internal static TvPlacement MergeTvPlacementFromServer(TvPlacement server, TvPlacement requested)
+        {
+            CopyVisualFxFields(server, requested);
+            return server;
+        }
+
+        internal static BannerPlacement MergeBannerPlacementFromServer(BannerPlacement server, BannerPlacement requested)
+        {
+            CopyVisualFxFields(server, requested);
+            return server;
+        }
+
         internal static TvPlacement CopyTvPlacementForSync(TvPlacement source)
         {
             return new TvPlacement
@@ -3057,6 +3141,9 @@ namespace XivMediaPlayer
                 ScreensaverColorB = source.ScreensaverColorB,
                 ScreensaverStyle = source.ScreensaverStyle,
                 IdleBrandingUrl = source.IdleBrandingUrl ?? string.Empty,
+                VisualEffectMode = source.VisualEffectMode,
+                EffectIntensity = source.EffectIntensity,
+                EffectSpeed = source.EffectSpeed,
                 OwnerId = source.OwnerId,
                 IsLocked = source.IsLocked,
                 BypassLock = source.BypassLock
@@ -3079,6 +3166,9 @@ namespace XivMediaPlayer
                 ScaleY = source.ScaleY,
                 ImageUrl = source.ImageUrl,
                 Opacity = source.Opacity,
+                VisualEffectMode = source.VisualEffectMode,
+                EffectIntensity = source.EffectIntensity,
+                EffectSpeed = source.EffectSpeed,
                 OwnerId = source.OwnerId,
                 BypassLock = source.BypassLock
             };
@@ -3106,6 +3196,9 @@ namespace XivMediaPlayer
                 ScreensaverColorB = source.ScreensaverColorB,
                 ScreensaverStyle = source.ScreensaverStyle,
                 IdleBrandingUrl = source.IdleBrandingUrl ?? string.Empty,
+                VisualEffectMode = source.VisualEffectMode,
+                EffectIntensity = source.EffectIntensity,
+                EffectSpeed = source.EffectSpeed,
                 OwnerId = source.OwnerId,
                 IsLocked = source.IsLocked,
                 BypassLock = source.BypassLock
@@ -3144,6 +3237,9 @@ namespace XivMediaPlayer
                 ScaleY = source.ScaleY,
                 Opacity = source.Opacity,
                 ImageUrl = imageUrlOverride ?? source.ImageUrl,
+                VisualEffectMode = source.VisualEffectMode,
+                EffectIntensity = source.EffectIntensity,
+                EffectSpeed = source.EffectSpeed,
                 OwnerId = source.OwnerId,
                 BypassLock = source.BypassLock
             };
@@ -3175,7 +3271,7 @@ namespace XivMediaPlayer
                     var result = await ServerClient.RegisterTvAsync(locationKey, tv, create: false);
                     if (result != null)
                     {
-                        syncedTvs.Add(result);
+                        syncedTvs.Add(MergeTvPlacementFromServer(result, tv));
                     }
                 }
                 catch (UnauthorizedAccessException)
@@ -3231,7 +3327,7 @@ namespace XivMediaPlayer
                     var result = await ServerClient.RegisterBannerAsync(locationKey, banner, create: false);
                     if (result != null)
                     {
-                        syncedBanners.Add(result);
+                        syncedBanners.Add(MergeBannerPlacementFromServer(result, banner));
                     }
                 }
                 catch (Exception ex)
@@ -3467,6 +3563,7 @@ namespace XivMediaPlayer
             ApplyTvPlacementToRenderer(tv);
             _screenSettingsWindow?.SyncFromTransform();
             _placementManipulator.SetSelection(Compositing.PlacementManipulator.TargetType.Tv, tv.Id, _worldRenderer!.Transform, notify: false);
+            _placementManipulator.SyncWorkingTransform(_worldRenderer.Transform);
         }
 
         internal void SelectBannerForEditing(BannerPlacement banner)
@@ -3477,7 +3574,8 @@ namespace XivMediaPlayer
             ApplyBannerPlacementToRenderer(banner);
             NormalizeBannerTransform(banner, _worldRenderer!.Transform);
             _screenSettingsWindow?.SyncFromTransform();
-            _placementManipulator.SetSelection(Compositing.PlacementManipulator.TargetType.Banner, banner.Id, BannerPlacementToTransform(banner), notify: false);
+            _placementManipulator.SetSelection(Compositing.PlacementManipulator.TargetType.Banner, banner.Id, _worldRenderer.Transform, notify: false);
+            _placementManipulator.SyncWorkingTransform(_worldRenderer.Transform);
         }
 
         private static void CopyTransformToTv(TvPlacement tv, WorldScreenTransform transform)
@@ -3498,6 +3596,9 @@ namespace XivMediaPlayer
             tv.ScreensaverColorB = transform.ScreensaverColor.Z;
             tv.ScreensaverStyle = transform.ScreensaverStyle;
             tv.IdleBrandingUrl = transform.IdleBrandingUrl ?? string.Empty;
+            tv.VisualEffectMode = transform.VisualEffectMode;
+            tv.EffectIntensity = transform.EffectIntensity;
+            tv.EffectSpeed = transform.EffectSpeed;
         }
 
         private static void CopyTransformToBanner(BannerPlacement banner, WorldScreenTransform transform)
@@ -3511,6 +3612,9 @@ namespace XivMediaPlayer
             banner.ScaleX = transform.Scale.X;
             banner.ScaleY = transform.Scale.Y;
             banner.Opacity = transform.Opacity;
+            banner.VisualEffectMode = transform.VisualEffectMode;
+            banner.EffectIntensity = transform.EffectIntensity;
+            banner.EffectSpeed = transform.EffectSpeed;
         }
 
         private void CopyTransformToBannerWithAspect(BannerPlacement banner, WorldScreenTransform transform)
@@ -3550,6 +3654,21 @@ namespace XivMediaPlayer
             }
         }
 
+        private void PreserveAppearanceFromRenderer(WorldScreenTransform transform)
+        {
+            if (_worldRenderer?.Transform == null || transform == null) return;
+
+            var source = _worldRenderer.Transform;
+            transform.VisualEffectMode = source.VisualEffectMode;
+            transform.EffectIntensity = source.EffectIntensity;
+            transform.EffectSpeed = source.EffectSpeed;
+            transform.Opacity = source.Opacity;
+            transform.IsProjectorMode = source.IsProjectorMode;
+            transform.ScreensaverColor = source.ScreensaverColor;
+            transform.ScreensaverStyle = source.ScreensaverStyle;
+            transform.IdleBrandingUrl = source.IdleBrandingUrl;
+        }
+
         private void OnPlacementSelectionChanged(Compositing.PlacementManipulator.TargetType type, string id, WorldScreenTransform transform)
         {
             ApplyWorkingTransformToCurrentSelection();
@@ -3561,7 +3680,8 @@ namespace XivMediaPlayer
                 {
                     CurrentTvPlacement = tv;
                     CurrentBannerPlacement = null;
-                    ApplyTransformToRenderer(_worldRenderer, transform);
+                    ApplyTvPlacementToRenderer(tv);
+                    _placementManipulator.SyncWorkingTransform(_worldRenderer!.Transform);
                     _screenSettingsWindow?.SyncFromTransform();
                 }
             }
@@ -3572,7 +3692,8 @@ namespace XivMediaPlayer
                 {
                     CurrentTvPlacement = null;
                     CurrentBannerPlacement = banner;
-                    ApplyTransformToRenderer(_worldRenderer, transform);
+                    ApplyBannerPlacementToRenderer(banner);
+                    _placementManipulator.SyncWorkingTransform(_worldRenderer!.Transform);
                     _screenSettingsWindow?.SyncFromTransform();
                 }
             }
@@ -3580,6 +3701,8 @@ namespace XivMediaPlayer
 
         private void OnPlacementTransformPreview(Compositing.PlacementManipulator.TargetType type, string id, WorldScreenTransform transform)
         {
+            PreserveAppearanceFromRenderer(transform);
+
             if (type == Compositing.PlacementManipulator.TargetType.Tv)
             {
                 var tv = _roomTvPlacements.FirstOrDefault(t => t.Id == id) ?? CurrentTvPlacement;
@@ -5241,6 +5364,7 @@ namespace XivMediaPlayer
 
                     _worldRenderer.EnableGlow = _config.DepthOcclusionEnabled && _config.TvGlowEnabled;
                     _worldRenderer.EnableUiCulling = _config.EnableUiCulling;
+                    _worldRenderer.SharedAudioVisuals = _mediaManager?.AudioVisuals;
                   
                     
                     if (IsMediaLoading)

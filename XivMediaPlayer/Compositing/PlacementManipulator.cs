@@ -693,6 +693,9 @@ namespace XivMediaPlayer.Compositing
             target.ScreensaverStyle = source.ScreensaverStyle;
             target.IdleBrandingUrl = source.IdleBrandingUrl;
             target.ScaleAspectMode = source.ScaleAspectMode;
+            target.VisualEffectMode = source.VisualEffectMode;
+            target.EffectIntensity = source.EffectIntensity;
+            target.EffectSpeed = source.EffectSpeed;
         }
 
         private bool TryPickFace(

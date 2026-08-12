@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Numerics;
 using System.Runtime.InteropServices;
+using MediaPlayerCore.Compositing;
 using Vortice.Direct3D11;
 using Vortice.DXGI;
 using Vortice.D3DCompiler;
@@ -24,6 +25,7 @@ namespace XivMediaPlayer.Compositing {
 
     // Buffers
     private ID3D11Buffer _constantBuffer;
+    private ID3D11Buffer _visualFxConstantBuffer;
     private ID3D11Buffer _uiRectBuffer;
 
     // Offscreen render target
@@ -102,6 +104,17 @@ namespace XivMediaPlayer.Compositing {
     }
 
     [StructLayout(LayoutKind.Sequential)]
+    private struct VisualFxConstants {
+      public float VisualEffectMode;
+      public float EffectIntensity;
+      public float EffectSpeed;
+      public float _pad0;
+      public Vector4 AudioLevels;
+      public Vector4 AudioBandsLow;
+      public Vector4 AudioBandsHigh;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
     private unsafe struct UIConstants {
       public fixed float UIRects[256]; // 64 * 4 (x, y, w, h)
       public fixed float UIRectTypes[64]; // 0 = standard, 1 = MJI
@@ -169,6 +182,16 @@ cbuffer Constants : register(b0) {
   float HasIdleBranding;
   float IdleBrandingAspect;
   float SurfaceOnly;
+};
+
+cbuffer VisualFxConsts : register(b2) {
+  float VisualEffectMode;
+  float EffectIntensity;
+  float EffectSpeed;
+  float _padFx0;
+  float4 AudioLevels;
+  float4 AudioBandsLow;
+  float4 AudioBandsHigh;
 };
   
   cbuffer UIConsts : register(b1) {
@@ -280,6 +303,95 @@ VS_OUT VS(uint id : SV_VertexID) {
   return o;
 }
 
+float fxHash21(float2 p) {
+  return frac(sin(dot(p, float2(127.1, 311.7))) * 43758.5453);
+}
+
+float2 ApplyVisualFxDistort(float2 uv) {
+  float mode = VisualEffectMode;
+  float intensity = clamp(EffectIntensity, 0.0, 2.0);
+  float speed = max(EffectSpeed, 0.05);
+  float2 centered = uv - 0.5;
+
+  if (mode > 0.5 && mode < 1.5) {
+    float r2 = dot(centered, centered);
+    centered *= 1.0 + intensity * 0.35 * r2;
+    uv = centered + 0.5;
+  } else if (mode > 1.5 && mode < 2.5) {
+    uv.x += sin(uv.y * 28.0 + Time * speed * 6.0) * 0.018 * intensity;
+    uv.y += cos(uv.x * 22.0 + Time * speed * 5.0) * 0.014 * intensity;
+  } else if (mode > 2.5 && mode < 3.5) {
+    float row = floor(uv.y * 56.0);
+    float tick = floor(Time * speed * 10.0);
+    float glitch = step(0.9, fxHash21(float2(row, tick)));
+    uv.x += (fxHash21(float2(row, tick + 19.0)) - 0.5) * glitch * intensity * 0.3;
+  } else if (mode > 3.5 && mode < 4.5) {
+    float viewShift = dot(normalize(CameraRight), float3(0, 0, 1));
+    uv.x += viewShift * intensity * 0.05;
+    uv.y += sin(uv.x * 12.0 + Time * speed) * intensity * 0.01;
+  } else if (mode > 4.5 && mode < 5.5) {
+    float pulse = 1.0 - AudioLevels.x * intensity * 0.18;
+    uv = (uv - 0.5) * pulse + 0.5;
+  } else if (mode > 6.5 && mode < 7.5) {
+    float angle = atan2(centered.y, centered.x);
+    float radius = length(centered);
+    angle = abs(fmod(angle, 3.14159265 / 3.0) - 3.14159265 / 6.0);
+    uv = float2(cos(angle), sin(angle)) * radius + 0.5;
+  }
+
+  return uv;
+}
+
+float4 SampleVideoWithFx(float2 uv) {
+  float mode = VisualEffectMode;
+  float intensity = clamp(EffectIntensity, 0.0, 2.0);
+  float2 fxUv = ApplyVisualFxDistort(uv);
+
+  if (mode > 0.5 && mode < 1.5 && intensity > 0.01) {
+    float2 off = (fxUv - 0.5) * intensity * 0.012;
+    float r = VideoTexture.Sample(VideoSampler, fxUv + off).r;
+    float g = VideoTexture.Sample(VideoSampler, fxUv).g;
+    float b = VideoTexture.Sample(VideoSampler, fxUv - off).b;
+    float a = VideoTexture.Sample(VideoSampler, fxUv).a;
+    float4 col = float4(r, g, b, a);
+    col.rgb *= 1.0 - 0.22 * intensity * (1.0 - cos(fxUv.y * 900.0));
+    return col;
+  }
+
+  return VideoTexture.Sample(VideoSampler, fxUv);
+}
+
+float GetAudioBand(int index) {
+  if (index == 0) return AudioBandsLow.x;
+  if (index == 1) return AudioBandsLow.y;
+  if (index == 2) return AudioBandsLow.z;
+  if (index == 3) return AudioBandsLow.w;
+  if (index == 4) return AudioBandsHigh.x;
+  if (index == 5) return AudioBandsHigh.y;
+  if (index == 6) return AudioBandsHigh.z;
+  return AudioBandsHigh.w;
+}
+
+float4 ApplyAudioSpectrumOverlay(float4 col, float2 uv) {
+  if (VisualEffectMode < 5.5 || VisualEffectMode > 6.5) return col;
+
+  float intensity = clamp(EffectIntensity, 0.0, 2.0);
+  float barH = 0.22 * intensity;
+  float y0 = 0.02;
+  [unroll]
+  for (int i = 0; i < 8; i++) {
+    float band = GetAudioBand(i);
+    float x0 = 0.04 + i * 0.115;
+    float x1 = x0 + 0.08;
+    float h = saturate(band * 1.8) * barH;
+    if (uv.x >= x0 && uv.x <= x1 && uv.y >= y0 && uv.y <= y0 + h) {
+      float3 barColor = lerp(float3(0.2, 0.9, 1.0), float3(1.0, 0.35, 0.9), i / 7.0);
+      col.rgb = lerp(col.rgb, barColor, 0.85);
+    }
+  }
+  return col;
+}
+
 
 
 float4 PS(VS_OUT input) : SV_TARGET {
@@ -387,7 +499,8 @@ float4 PS(VS_OUT input) : SV_TARGET {
       if (isOutOfBounds && ShowScreensaver < 0.5) {
           color = float4(0, 0, 0, IsProjectorMode > 0.5 ? 0.0 : 1.0);
       } else {
-          color = isOutOfBounds ? float4(0, 0, 0, 1.0) : VideoTexture.Sample(VideoSampler, sampleUV);
+          color = isOutOfBounds ? float4(0, 0, 0, 1.0) : SampleVideoWithFx(sampleUV);
+          color = ApplyAudioSpectrumOverlay(color, uv);
           
           // XMP Screensaver
           if (ShowScreensaver > 0.5) {
@@ -1350,14 +1463,22 @@ float4 PS(VS_OUT input) : SV_TARGET {
         _device = _context.Device;
 
         // Compile shaders
-        var vsBytecode = Compiler.Compile(ShaderCode, "VS", "", "vs_5_0");
+        if (!ShaderCompileHelper.TryCompile(ShaderCode, "VS", "DepthTestedRenderer.hlsl", "vs_5_0", out ReadOnlyMemory<byte> vsBytecode, out string vsError)) {
+          _initError = vsError;
+          return false;
+        }
         _vertexShader = _device.CreateVertexShader(vsBytecode.Span);
 
-        var psBytecode = Compiler.Compile(ShaderCode, "PS", "", "ps_5_0");
+        if (!ShaderCompileHelper.TryCompile(ShaderCode, "PS", "DepthTestedRenderer.hlsl", "ps_5_0", out ReadOnlyMemory<byte> psBytecode, out string psError)) {
+          _initError = psError;
+          return false;
+        }
         _pixelShader = _device.CreatePixelShader(psBytecode.Span);
 
         // Constant buffers (D3D11 requires constant buffer size be a multiple of 16 bytes)
         int constantBufferSize = (Marshal.SizeOf<PSConstants>() + 15) & ~15;
+        int visualFxBufferSize = (Marshal.SizeOf<VisualFxConstants>() + 15) & ~15;
+        int uiBufferSize = (Marshal.SizeOf<UIConstants>() + 15) & ~15;
         _constantBuffer = _device.CreateBuffer(new BufferDescription {
           ByteWidth = constantBufferSize,
           Usage = ResourceUsage.Default,
@@ -1365,8 +1486,15 @@ float4 PS(VS_OUT input) : SV_TARGET {
           CPUAccessFlags = CpuAccessFlags.None,
         });
 
+        _visualFxConstantBuffer = _device.CreateBuffer(new BufferDescription {
+          ByteWidth = visualFxBufferSize,
+          Usage = ResourceUsage.Default,
+          BindFlags = BindFlags.ConstantBuffer,
+          CPUAccessFlags = CpuAccessFlags.None,
+        });
+
         _uiRectBuffer = _device.CreateBuffer(new BufferDescription {
-          ByteWidth = Marshal.SizeOf<UIConstants>(),
+          ByteWidth = uiBufferSize,
           Usage = ResourceUsage.Default,
           BindFlags = BindFlags.ConstantBuffer,
           CPUAccessFlags = CpuAccessFlags.None,
@@ -1398,6 +1526,7 @@ float4 PS(VS_OUT input) : SV_TARGET {
         return true;
       } catch (Exception ex) {
         _initError = $"DepthTestedRenderer init failed: {ex.Message}";
+        ShaderCompileHelper.LogIssue?.Invoke(_initError + Environment.NewLine + ex);
         return false;
       }
     }
@@ -1445,7 +1574,8 @@ float4 PS(VS_OUT input) : SV_TARGET {
       float renderWidth, float renderHeight,
       List<(int X, int Y, int W, int H, string Name)> uiRects, IntPtr titleSrvPtr = default,
       bool isLooping = false, bool isShuffle = false, float time = 0, float showScreensaver = 0,
-      float videoAspectRatio = 0, IntPtr gbuffer2SrvPtr = default, IntPtr gbuffer3SrvPtr = default, IntPtr transparentUiSrvPtr = default, IntPtr vignetteExtrapolatedSrvPtr = default, bool useDifferenceFallback = false, float opacity = 1.0f, bool isProjectorMode = false, Vector3? screensaverColor = null, int screensaverStyle = 0, float uiBlendThreshold = 0.0f, float uvBottom = 1.0f, float uvRight = 1.0f, bool enableTvGlow = true, float loadingPulse = 0f, bool isLoadingOverlay = false, IntPtr idleBrandingSrvPtr = default, float idleBrandingAspect = 1.0f, bool surfaceOnly = false) {
+      float videoAspectRatio = 0, IntPtr gbuffer2SrvPtr = default, IntPtr gbuffer3SrvPtr = default, IntPtr transparentUiSrvPtr = default, IntPtr vignetteExtrapolatedSrvPtr = default, bool useDifferenceFallback = false, float opacity = 1.0f, bool isProjectorMode = false, Vector3? screensaverColor = null, int screensaverStyle = 0, float uiBlendThreshold = 0.0f, float uvBottom = 1.0f, float uvRight = 1.0f, bool enableTvGlow = true, float loadingPulse = 0f, bool isLoadingOverlay = false, IntPtr idleBrandingSrvPtr = default, float idleBrandingAspect = 1.0f, bool surfaceOnly = false,
+      int visualEffectMode = 0, float effectIntensity = 0.65f, float effectSpeed = 1.0f, AudioVisualState? audioVisuals = null) {
 
       if (!_initialized || _disposed || videoSrvPtr == IntPtr.Zero || depthSrv == null) return false;
 
@@ -1515,6 +1645,22 @@ float4 PS(VS_OUT input) : SV_TARGET {
         };
           _context.UpdateSubresource(constants, _constantBuffer);
 
+        var fxConstants = new VisualFxConstants {
+          VisualEffectMode = visualEffectMode,
+          EffectIntensity = effectIntensity,
+          EffectSpeed = effectSpeed,
+          AudioLevels = audioVisuals != null
+            ? new Vector4(audioVisuals.Rms, audioVisuals.Bass, audioVisuals.Mid, audioVisuals.Treble)
+            : Vector4.Zero,
+          AudioBandsLow = audioVisuals != null
+            ? new Vector4(audioVisuals.Band0, audioVisuals.Band1, audioVisuals.Band2, audioVisuals.Band3)
+            : Vector4.Zero,
+          AudioBandsHigh = audioVisuals != null
+            ? new Vector4(audioVisuals.Band4, audioVisuals.Band5, audioVisuals.Band6, audioVisuals.Band7)
+            : Vector4.Zero,
+        };
+        _context.UpdateSubresource(fxConstants, _visualFxConstantBuffer);
+
         var uiConsts = new UIConstants {
             UIRectCount = Math.Min(64, uiRects?.Count ?? 0)
         };
@@ -1548,6 +1694,7 @@ float4 PS(VS_OUT input) : SV_TARGET {
         _context.PSSetShader(_pixelShader);
         _context.PSSetConstantBuffer(0, _constantBuffer);
         _context.PSSetConstantBuffer(1, _uiRectBuffer);
+        _context.PSSetConstantBuffer(2, _visualFxConstantBuffer);
         var srvs = new ID3D11ShaderResourceView[9];
         ownedSrvs = srvs;
         if (videoSrvPtr != IntPtr.Zero) System.Runtime.InteropServices.Marshal.AddRef(videoSrvPtr);
@@ -1620,6 +1767,7 @@ float4 PS(VS_OUT input) : SV_TARGET {
       _videoSampler?.Dispose();
       _blendState?.Dispose();
       _constantBuffer?.Dispose();
+      _visualFxConstantBuffer?.Dispose();
       _uiRectBuffer?.Dispose();
       _pixelShader?.Dispose();
       _vertexShader?.Dispose();
