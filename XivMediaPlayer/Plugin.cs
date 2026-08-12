@@ -4471,10 +4471,7 @@ namespace XivMediaPlayer
 
                     _worldRenderer.EnableGlow = _config.DepthOcclusionEnabled && _config.TvGlowEnabled;
                     _worldRenderer.EnableUiCulling = _config.EnableUiCulling;
-                    
-                    // useDifferenceFallback is already calculated above when checking UI occlusion,
-                    // but we re-calculate it here in case the logic above was skipped.
-                    // (Actually we calculated it at the top of OnDraw, so we don't need to do it again here.)
+                  
                     
                     if (IsMediaLoading)
                     {
@@ -4488,13 +4485,22 @@ namespace XivMediaPlayer
                             ? new[] { Compositing.WorldTvRenderPass.GlowOnly, Compositing.WorldTvRenderPass.CompositeOnly }
                             : new[] { Compositing.WorldTvRenderPass.Full };
 
+                        WorldScreenTransform? liveEditTransform = roomTvsToRender.Any(IsLiveEditingTv)
+                            ? _worldRenderer.Transform.Clone()
+                            : null;
+                        string? liveEditTvId = liveEditTransform != null ? CurrentTvPlacement?.Id : null;
+
                         foreach (var pass in renderPasses)
                         {
                             foreach (var tv in roomTvsToRender)
                             {
                                 _worldRenderer.ResetCornerStabilization();
 
-                                if (!IsLiveEditingTv(tv))
+                                if (liveEditTransform != null && tv.Id == liveEditTvId)
+                                {
+                                    ApplyTransformToRenderer(_worldRenderer, liveEditTransform);
+                                }
+                                else
                                 {
                                     ApplyTvPlacementToRenderer(tv);
                                 }
