@@ -155,6 +155,127 @@ namespace XivMediaPlayer.Server.Controllers
             return NotFound();
         }
 
+        [HttpGet("{locationKey}/venue")]
+        public async Task<IActionResult> GetVenueSettings(string locationKey)
+        {
+            var settings = await _db.RoomVenueSettings.FindAsync(locationKey);
+            if (settings == null)
+            {
+                return Ok(new RoomVenueSettings { LocationKey = locationKey });
+            }
+
+            return Ok(settings);
+        }
+
+        [HttpPost("{locationKey}/venue")]
+        public async Task<IActionResult> UpdateVenueSettings(string locationKey, [FromBody] RoomVenueSettings settings)
+        {
+            settings.LocationKey = locationKey;
+            settings.LastUpdated = DateTime.UtcNow;
+
+            if (await IsRoomMediaLockedAsync(locationKey, settings.OwnerId, settings.BypassLock))
+            {
+                return StatusCode(403);
+            }
+
+            var existing = await _db.RoomVenueSettings.FindAsync(locationKey);
+            if (existing == null)
+            {
+                _db.RoomVenueSettings.Add(settings);
+            }
+            else
+            {
+                existing.IdleBrandingUrl = settings.IdleBrandingUrl ?? string.Empty;
+                existing.OwnerId = settings.OwnerId;
+                existing.LastUpdated = settings.LastUpdated;
+                _db.RoomVenueSettings.Update(existing);
+                settings = existing;
+            }
+
+            await _db.SaveChangesAsync();
+            return Ok(settings);
+        }
+
+        [HttpGet("{locationKey}/banners")]
+        public async Task<IActionResult> GetBanners(string locationKey)
+        {
+            var banners = await _db.BannerPlacements
+                .Where(b => b.LocationKey == locationKey)
+                .ToListAsync();
+
+            return Ok(banners);
+        }
+
+        [HttpPost("{locationKey}/banners")]
+        public async Task<IActionResult> RegisterBanner(string locationKey, [FromBody] BannerPlacement placement, [FromQuery] bool create = false)
+        {
+            placement.LocationKey = locationKey;
+            placement.LastUpdated = DateTime.UtcNow;
+
+            if (string.IsNullOrWhiteSpace(placement.Id))
+            {
+                placement.Id = Guid.NewGuid().ToString();
+            }
+
+            if (await IsRoomMediaLockedAsync(locationKey, placement.OwnerId, placement.BypassLock))
+            {
+                return StatusCode(403);
+            }
+
+            var existing = await _db.BannerPlacements.FirstOrDefaultAsync(
+                b => b.LocationKey == locationKey && b.Id == placement.Id);
+
+            if (existing != null && !create)
+            {
+                if (existing.OwnerId != placement.OwnerId && !placement.BypassLock)
+                {
+                    return Forbid();
+                }
+
+                ApplyBannerFields(existing, placement);
+                existing.LastUpdated = placement.LastUpdated;
+                _db.BannerPlacements.Update(existing);
+                await _db.SaveChangesAsync();
+                return Ok(existing);
+            }
+
+            _db.BannerPlacements.Add(placement);
+            await _db.SaveChangesAsync();
+            return Ok(placement);
+        }
+
+        [HttpDelete("{locationKey}/banners/{bannerId}")]
+        public async Task<IActionResult> RemoveBanner(string locationKey, string bannerId, [FromQuery] string ownerId, [FromQuery] bool bypassLock = false)
+        {
+            var banner = await _db.BannerPlacements.FirstOrDefaultAsync(
+                b => b.LocationKey == locationKey && b.Id == bannerId);
+            if (banner == null) return NotFound();
+
+            if (banner.OwnerId != ownerId && !bypassLock)
+            {
+                return StatusCode(403);
+            }
+
+            _db.BannerPlacements.Remove(banner);
+            await _db.SaveChangesAsync();
+            return Ok();
+        }
+
+        private static void ApplyBannerFields(BannerPlacement target, BannerPlacement source)
+        {
+            target.PositionX = source.PositionX;
+            target.PositionY = source.PositionY;
+            target.PositionZ = source.PositionZ;
+            target.RotationX = source.RotationX;
+            target.RotationY = source.RotationY;
+            target.RotationZ = source.RotationZ;
+            target.ScaleX = source.ScaleX;
+            target.ScaleY = source.ScaleY;
+            target.ImageUrl = source.ImageUrl;
+            target.Opacity = source.Opacity;
+            target.OwnerId = source.OwnerId;
+        }
+
         [HttpGet("{locationKey}/media")]
         public async Task<IActionResult> GetMediaState(string locationKey)
         {

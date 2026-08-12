@@ -36,6 +36,8 @@ namespace XivMediaPlayer.Windows {
     private bool _isProjectorMode = false;
     private Vector3 _screensaverColor = new Vector3(0.0f, 0.0f, 0.0f);
     private int _screensaverStyle = 0;
+    private string _idleBrandingUrl = "";
+    private string _bannerImageUrl = "";
 
     // Drag state for world-space interaction
     private bool _isDragging;
@@ -344,6 +346,10 @@ namespace XivMediaPlayer.Windows {
 
       ImGui.Spacing();
       ImGui.Separator();
+      DrawVenueBrandingSection(_plugin.LocationKey);
+
+      ImGui.Spacing();
+      ImGui.Separator();
 
       // Info 
       ImGui.TextColored(new Vector4(0.5f, 0.5f, 0.5f, 1f),
@@ -435,6 +441,186 @@ namespace XivMediaPlayer.Windows {
               ImGui.TextColored(_statusColor, L(_statusMessage));
           }
       }
+    }
+
+    private void DrawVenueBrandingSection(string locationKey)
+    {
+      ImGui.TextColored(new Vector4(0.7f, 0.9f, 1f, 1f), L("Venue Branding"));
+      ImGui.TextWrapped(L("When TVs are idle, show a custom image instead of the default XMP screensaver. Applies to the whole room."));
+
+      _idleBrandingUrl = _plugin.RoomVenueSettings?.IdleBrandingUrl ?? _idleBrandingUrl;
+      ImGui.InputText(L("Idle Branding Image URL"), ref _idleBrandingUrl, 512);
+      if (ImGui.Button(L("Save Venue Branding"))) {
+        SaveVenueBrandingAsync(locationKey);
+      }
+
+      ImGui.Spacing();
+      ImGui.TextColored(new Vector4(0.7f, 0.9f, 1f, 1f), L("Banner Props"));
+      ImGui.TextWrapped(L("Static image banners are separate from TVs. Place them in the world with the controls above, then add an image URL here."));
+
+      ImGui.InputText(L("Banner Image URL"), ref _bannerImageUrl, 512);
+      if (ImGui.Button(L("Add Banner Here"))) {
+        RegisterBannerAsync(locationKey);
+      }
+
+      var banners = _plugin.RoomBannerPlacements
+          .Where(b => b.LocationKey == locationKey)
+          .ToList();
+      if (banners.Count > 0) {
+        ImGui.Spacing();
+        ImGui.TextDisabled(string.Format(L("{0} banner(s) in this area"), banners.Count));
+        for (int i = 0; i < banners.Count; i++) {
+          var banner = banners[i];
+          ImGui.TextWrapped(string.Format(L("Banner {0}: {1}"), i + 1, banner.ImageUrl));
+          ImGui.SameLine();
+          if (ImGui.SmallButton($"{L("Edit")}##banner_{banner.Id}")) {
+            _plugin.CurrentBannerPlacement = banner;
+            _position = new Vector3(banner.PositionX, banner.PositionY, banner.PositionZ);
+            _rotation = new Vector2(banner.RotationY, banner.RotationX);
+            _scale = new Vector2(banner.ScaleX, banner.ScaleY);
+            _opacity = banner.Opacity;
+            _bannerImageUrl = banner.ImageUrl;
+            SyncToTransform();
+          }
+          ImGui.SameLine();
+          if (ImGui.SmallButton($"{L("Delete")}##del_banner_{banner.Id}")) {
+            _ = DeleteBannerAsync(locationKey, banner.Id);
+          }
+        }
+      }
+
+      if (_plugin.CurrentBannerPlacement != null && ImGui.Button(L("Update Selected Banner"))) {
+        UpdateBannerAsync(locationKey);
+      }
+    }
+
+    public async void SaveVenueBrandingAsync(string locationKey)
+    {
+      if (string.IsNullOrEmpty(locationKey)) return;
+
+      _statusMessage = "Saving venue branding...";
+      _statusColor = new Vector4(1, 1, 1, 1);
+
+      try {
+        bool isOutdoorsSync = locationKey.StartsWith("zone_");
+        bool isIslandSync = locationKey.StartsWith("island_");
+        var settings = new RoomVenueSettings {
+          LocationKey = locationKey,
+          IdleBrandingUrl = _idleBrandingUrl?.Trim() ?? string.Empty,
+          OwnerId = _plugin.Config.OwnerId,
+          BypassLock = _plugin.IsHousingMenuOpen || isOutdoorsSync || isIslandSync
+        };
+
+        var result = await _plugin.ServerClient.UpdateVenueSettingsAsync(locationKey, settings);
+        if (result != null) {
+          _plugin.ImageTextureCache.Invalidate(_plugin.RoomVenueSettings?.IdleBrandingUrl);
+          _plugin.UpsertRoomVenueSettings(result);
+          _statusMessage = "Venue branding saved for all visitors!";
+          _statusColor = new Vector4(0.3f, 1f, 0.3f, 1);
+        } else {
+          _statusMessage = "Failed to save venue branding.";
+          _statusColor = new Vector4(1, 0.3f, 0.3f, 1);
+        }
+      } catch (Exception) {
+        _statusMessage = "Failed to save venue branding.";
+        _statusColor = new Vector4(1, 0.3f, 0.3f, 1);
+      }
+    }
+
+    public async void RegisterBannerAsync(string locationKey)
+    {
+      if (string.IsNullOrEmpty(locationKey) || string.IsNullOrWhiteSpace(_bannerImageUrl)) return;
+
+      SyncToTransform();
+      var placement = BuildBannerFromTransform(locationKey, createNewId: true);
+      placement.ImageUrl = _bannerImageUrl.Trim();
+
+      _statusMessage = "Adding banner...";
+      _statusColor = new Vector4(1, 1, 1, 1);
+
+      try {
+        var result = await _plugin.ServerClient.RegisterBannerAsync(locationKey, placement, create: true);
+        if (result != null) {
+          _plugin.UpsertRoomBanner(result);
+          _plugin.CurrentBannerPlacement = result;
+          _statusMessage = "Banner added for all visitors!";
+          _statusColor = new Vector4(0.3f, 1f, 0.3f, 1);
+        } else {
+          _statusMessage = "Failed to add banner.";
+          _statusColor = new Vector4(1, 0.3f, 0.3f, 1);
+        }
+      } catch (Exception) {
+        _statusMessage = "Failed to add banner.";
+        _statusColor = new Vector4(1, 0.3f, 0.3f, 1);
+      }
+    }
+
+    public async void UpdateBannerAsync(string locationKey)
+    {
+      if (_plugin.CurrentBannerPlacement == null || string.IsNullOrEmpty(locationKey)) return;
+
+      SyncToTransform();
+      var placement = BuildBannerFromTransform(locationKey, createNewId: false);
+      placement.Id = _plugin.CurrentBannerPlacement.Id;
+      placement.ImageUrl = string.IsNullOrWhiteSpace(_bannerImageUrl)
+          ? _plugin.CurrentBannerPlacement.ImageUrl
+          : _bannerImageUrl.Trim();
+
+      try {
+        var result = await _plugin.ServerClient.RegisterBannerAsync(locationKey, placement, create: false);
+        if (result != null) {
+          _plugin.UpsertRoomBanner(result);
+          _statusMessage = "Banner updated!";
+          _statusColor = new Vector4(0.3f, 1f, 0.3f, 1);
+        }
+      } catch (Exception) {
+        _statusMessage = "Failed to update banner.";
+        _statusColor = new Vector4(1, 0.3f, 0.3f, 1);
+      }
+    }
+
+    public async System.Threading.Tasks.Task DeleteBannerAsync(string locationKey, string bannerId)
+    {
+      try {
+        bool isOutdoorsSync = locationKey.StartsWith("zone_");
+        bool isIslandSync = locationKey.StartsWith("island_");
+        bool success = await _plugin.ServerClient.DeleteBannerAsync(
+            locationKey, bannerId, _plugin.Config.OwnerId,
+            _plugin.IsHousingMenuOpen || isOutdoorsSync || isIslandSync);
+        if (success) {
+          _plugin.RemoveRoomBanner(bannerId);
+          if (_plugin.CurrentBannerPlacement?.Id == bannerId) {
+            _plugin.CurrentBannerPlacement = null;
+          }
+          _statusMessage = "Banner removed.";
+          _statusColor = new Vector4(0.3f, 1f, 0.3f, 1);
+        }
+      } catch (Exception) {
+        _statusMessage = "Failed to remove banner.";
+        _statusColor = new Vector4(1, 0.3f, 0.3f, 1);
+      }
+    }
+
+    private BannerPlacement BuildBannerFromTransform(string locationKey, bool createNewId)
+    {
+      bool isOutdoorsSync = locationKey.StartsWith("zone_");
+      bool isIslandSync = locationKey.StartsWith("island_");
+      return new BannerPlacement {
+        Id = createNewId ? Guid.NewGuid().ToString() : (_plugin.CurrentBannerPlacement?.Id ?? Guid.NewGuid().ToString()),
+        LocationKey = locationKey,
+        PositionX = _position.X,
+        PositionY = _position.Y,
+        PositionZ = _position.Z,
+        RotationX = _transform.RotationDegrees.X,
+        RotationY = _transform.RotationDegrees.Y,
+        RotationZ = _transform.RotationDegrees.Z,
+        ScaleX = _scale.X,
+        ScaleY = _scale.Y,
+        Opacity = _opacity,
+        ImageUrl = _bannerImageUrl?.Trim() ?? string.Empty,
+        OwnerId = _plugin.Config.OwnerId,
+        BypassLock = _plugin.IsHousingMenuOpen || isOutdoorsSync || isIslandSync
+      };
     }
 
     public async System.Threading.Tasks.Task<bool> DeleteTvAsync(string locationKey, bool restoreOnFailure = false) {

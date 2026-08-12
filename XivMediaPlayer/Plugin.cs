@@ -76,6 +76,7 @@ namespace XivMediaPlayer
         private bool _isHistoryMenuOpen = false;
         private Compositing.QueueMenuTextureManager _queueMenuTextureManager;
         private bool _isQueueMenuOpen = false;
+        private Compositing.ImageTextureCache _imageTextureCache;
 
         private MediaManager _mediaManager;
         public MediaManager MediaManager => _mediaManager;
@@ -512,6 +513,12 @@ namespace XivMediaPlayer
         public Networking.Models.TvPlacement? CurrentTvPlacement { get; internal set; }
         internal IReadOnlyList<Networking.Models.TvPlacement> RoomTvPlacements => _roomTvPlacements;
         private readonly List<Networking.Models.TvPlacement> _roomTvPlacements = new();
+        internal Networking.Models.RoomVenueSettings? RoomVenueSettings => _roomVenueSettings;
+        private Networking.Models.RoomVenueSettings? _roomVenueSettings;
+        internal IReadOnlyList<Networking.Models.BannerPlacement> RoomBannerPlacements => _roomBannerPlacements;
+        private readonly List<Networking.Models.BannerPlacement> _roomBannerPlacements = new();
+        public Networking.Models.BannerPlacement? CurrentBannerPlacement { get; internal set; }
+        internal Compositing.ImageTextureCache ImageTextureCache => _imageTextureCache;
         private List<Networking.Models.TvPlacement> _nearbyTvs = new();
         private string? _interactionTvId;
 
@@ -627,6 +634,7 @@ namespace XivMediaPlayer
             _titleTextureManager = new Compositing.TitleTextureManager(_textureProvider);
             _historyMenuTextureManager = new Compositing.HistoryMenuTextureManager(_textureProvider);
             _queueMenuTextureManager = new Compositing.QueueMenuTextureManager(_textureProvider);
+            _imageTextureCache = new Compositing.ImageTextureCache(_textureProvider, _pluginLog);
 
             // Create windows
             _windowSystem = new WindowSystem("XivMediaPlayer");
@@ -2527,6 +2535,67 @@ namespace XivMediaPlayer
             ApplyTransformToRenderer(_worldRenderer, TvPlacementToTransform(tv));
         }
 
+        private static MediaPlayerCore.Compositing.WorldScreenTransform BannerPlacementToTransform(BannerPlacement banner)
+        {
+            return new MediaPlayerCore.Compositing.WorldScreenTransform
+            {
+                Position = new System.Numerics.Vector3(banner.PositionX, banner.PositionY, banner.PositionZ),
+                RotationDegrees = new System.Numerics.Vector3(banner.RotationX, banner.RotationY, banner.RotationZ),
+                Scale = new System.Numerics.Vector2(banner.ScaleX, banner.ScaleY),
+                Enabled = true,
+                Opacity = banner.Opacity,
+                IsProjectorMode = false
+            };
+        }
+
+        private void ApplyBannerPlacementToRenderer(BannerPlacement banner)
+        {
+            ApplyTransformToRenderer(_worldRenderer, BannerPlacementToTransform(banner));
+        }
+
+        internal void UpsertRoomBanner(BannerPlacement banner)
+        {
+            int index = _roomBannerPlacements.FindIndex(b => b.Id == banner.Id);
+            if (index >= 0)
+            {
+                _roomBannerPlacements[index] = banner;
+            }
+            else
+            {
+                _roomBannerPlacements.Add(banner);
+            }
+
+            if (!string.IsNullOrWhiteSpace(banner.ImageUrl))
+            {
+                _imageTextureCache.RequestLoad(banner.ImageUrl);
+            }
+        }
+
+        internal void RemoveRoomBanner(string bannerId)
+        {
+            _roomBannerPlacements.RemoveAll(b => b.Id == bannerId);
+        }
+
+        internal void UpsertRoomVenueSettings(Networking.Models.RoomVenueSettings settings)
+        {
+            _roomVenueSettings = settings;
+            if (!string.IsNullOrWhiteSpace(settings.IdleBrandingUrl))
+            {
+                _imageTextureCache.RequestLoad(settings.IdleBrandingUrl);
+            }
+        }
+
+        private List<BannerPlacement> GetRoomBannersForPrimaryLocation()
+        {
+            string primaryKey = GetLocationKey();
+            if (string.IsNullOrEmpty(primaryKey)) return new List<BannerPlacement>();
+
+            return _roomBannerPlacements
+                .Where(b => b.LocationKey == primaryKey)
+                .OrderBy(b => b.LastUpdated)
+                .ToList();
+        }
+
         private void PersistTvPlacementLocally(TvPlacement tv)
         {
             var transform = TvPlacementToTransform(tv);
@@ -2718,6 +2787,24 @@ namespace XivMediaPlayer
                 if (!IsHousingMenuOpen)
                 {
                     RestoreScreenForCurrentLocation();
+                }
+            }
+
+            var venueSettings = await ServerClient.GetVenueSettingsAsync(primaryKey);
+            _roomVenueSettings = venueSettings ?? new Networking.Models.RoomVenueSettings { LocationKey = primaryKey };
+            if (!string.IsNullOrWhiteSpace(_roomVenueSettings.IdleBrandingUrl))
+            {
+                _imageTextureCache.RequestLoad(_roomVenueSettings.IdleBrandingUrl);
+            }
+
+            var banners = await ServerClient.GetBannersForRoomAsync(primaryKey);
+            _roomBannerPlacements.Clear();
+            _roomBannerPlacements.AddRange(banners);
+            foreach (var banner in banners)
+            {
+                if (!string.IsNullOrWhiteSpace(banner.ImageUrl))
+                {
+                    _imageTextureCache.RequestLoad(banner.ImageUrl);
                 }
             }
 
@@ -3466,8 +3553,9 @@ namespace XivMediaPlayer
             _windowSystem.Draw();
 
             var roomTvsToRender = GetRoomTvsForPrimaryLocation();
+            var roomBannersToRender = GetRoomBannersForPrimaryLocation();
             bool shouldRenderWorldVideo = _worldRenderer != null && _clientState.IsLoggedIn
-                && (roomTvsToRender.Count > 0 || _worldRenderer.Transform.Enabled);
+                && (roomTvsToRender.Count > 0 || _worldRenderer.Transform.Enabled || roomBannersToRender.Count > 0);
 
             // World-space video rendering
             if (shouldRenderWorldVideo)
@@ -3477,7 +3565,7 @@ namespace XivMediaPlayer
                     _depthCapture.ReadDepthEnabled = _worldRenderer.UseDepthOcclusion;
 
                 _videoWindow.GetCurrentVideoTexture(out IntPtr videoSrv, out int videoWidth, out int videoHeight, out int videoTrueWidth, out int videoTrueHeight);
-                if (videoSrv != IntPtr.Zero)
+                if (videoSrv != IntPtr.Zero || roomBannersToRender.Count > 0)
                 {
                     // Get camera info for depth occlusion
                     System.Numerics.Vector3? cameraPos = null;
@@ -3978,6 +4066,23 @@ namespace XivMediaPlayer
                     }
 
                     // Update dynamic 3D text texture
+                    IntPtr idleBrandingSrv = IntPtr.Zero;
+                    float idleBrandingAspect = 1.0f;
+                    string? idleBrandingUrl = _roomVenueSettings?.IdleBrandingUrl;
+                    if (!string.IsNullOrWhiteSpace(idleBrandingUrl))
+                    {
+                        _imageTextureCache.RequestLoad(idleBrandingUrl);
+                        if (_imageTextureCache.TryGetTexture(idleBrandingUrl, out idleBrandingSrv, out int brandingW, out int brandingH)
+                            && brandingH > 0)
+                        {
+                            idleBrandingAspect = (float)brandingW / brandingH;
+                        }
+                    }
+
+                    if (videoSrv != IntPtr.Zero)
+                    {
+                    var mainViewport = ImGui.GetMainViewport();
+
                     if (_titleTextureManager != null)
                     {
                         if (IsMediaLoading)
@@ -4014,8 +4119,6 @@ namespace XivMediaPlayer
                     // but we re-calculate it here in case the logic above was skipped.
                     // (Actually we calculated it at the top of OnDraw, so we don't need to do it again here.)
                     
-                    var mainViewport = ImGui.GetMainViewport();
-
                     if (IsMediaLoading)
                     {
                         hoverUV = new System.Numerics.Vector2(0.5f, 0.5f);
@@ -4036,7 +4139,8 @@ namespace XivMediaPlayer
                                 _prevCameraPos ?? cameraPos, _prevCameraForward ?? cameraForward, _prevCameraRight ?? cameraRight, _prevCameraUp ?? cameraUp,
                                 fovY, aspectRatio, _uiCapture, nearPlane, farPlane, screenHover, progress, bufferProgress, playbackState, lockState, volume, screenOverlay, _config.LoopEnabled, _config.ShuffleEnabled, timeSeconds, showScreensaver, useDifferenceFallback: useDifferenceFallback,
                                 viewProjMatrix: _prevViewProjMatrix ?? viewProjMatrix, viewportPos: mainViewport.Pos, viewportSize: mainViewport.Size, uiBlendThreshold: _config.UIBlendThreshold,
-                                loadingPulse: IsMediaLoading ? MediaLoadingPulse : 0f, isLoadingOverlay: IsMediaLoading);
+                                loadingPulse: IsMediaLoading ? MediaLoadingPulse : 0f, isLoadingOverlay: IsMediaLoading,
+                                idleBrandingSrvPtr: idleBrandingSrv, idleBrandingAspect: idleBrandingAspect);
                         }
                     }
                     else if (renderLocalLegacy)
@@ -4045,7 +4149,29 @@ namespace XivMediaPlayer
                             _prevCameraPos ?? cameraPos, _prevCameraForward ?? cameraForward, _prevCameraRight ?? cameraRight, _prevCameraUp ?? cameraUp,
                             fovY, aspectRatio, _uiCapture, nearPlane, farPlane, hoverUV, progress, bufferProgress, playbackState, lockState, volume, srvPtr, _config.LoopEnabled, _config.ShuffleEnabled, timeSeconds, showScreensaver, useDifferenceFallback: useDifferenceFallback,
                             viewProjMatrix: _prevViewProjMatrix ?? viewProjMatrix, viewportPos: mainViewport.Pos, viewportSize: mainViewport.Size, uiBlendThreshold: _config.UIBlendThreshold,
-                            loadingPulse: IsMediaLoading ? MediaLoadingPulse : 0f, isLoadingOverlay: IsMediaLoading);
+                            loadingPulse: IsMediaLoading ? MediaLoadingPulse : 0f, isLoadingOverlay: IsMediaLoading,
+                            idleBrandingSrvPtr: idleBrandingSrv, idleBrandingAspect: idleBrandingAspect);
+                    }
+                    }
+
+                    var mainViewport = ImGui.GetMainViewport();
+                    _worldRenderer.EnableGlow = _config.DepthOcclusionEnabled && _config.TvGlowEnabled;
+                    foreach (var banner in roomBannersToRender)
+                    {
+                        if (!_imageTextureCache.TryGetTexture(banner.ImageUrl, out IntPtr bannerSrv, out int bannerW, out int bannerH))
+                        {
+                            _imageTextureCache.RequestLoad(banner.ImageUrl);
+                            continue;
+                        }
+
+                        ApplyBannerPlacementToRenderer(banner);
+                        _worldRenderer.Render(
+                            bannerSrv, bannerW, bannerH, bannerW, bannerH, _depthCapture,
+                            _prevCameraPos ?? cameraPos, _prevCameraForward ?? cameraForward, _prevCameraRight ?? cameraRight, _prevCameraUp ?? cameraUp,
+                            fovY, aspectRatio, _uiCapture, nearPlane, farPlane,
+                            hoverUV: null, progress: 0f, bufferProgress: 1f, playbackState: 0f, lockState: 0f, volume: 0f,
+                            titleSrvPtr: IntPtr.Zero, showScreensaver: 0f, useDifferenceFallback: useDifferenceFallback,
+                            viewProjMatrix: _prevViewProjMatrix ?? viewProjMatrix, viewportPos: mainViewport.Pos, viewportSize: mainViewport.Size);
                     }
                         
                     _prevCameraPos = cameraPos;
@@ -5095,6 +5221,7 @@ namespace XivMediaPlayer
             _titleTextureManager?.Dispose();
             _historyMenuTextureManager?.Dispose();
             _queueMenuTextureManager?.Dispose();
+            _imageTextureCache?.Dispose();
             _worldRenderer?.Dispose();
             _depthCapture?.Dispose();
             _depthPreviewWindow?.Dispose();

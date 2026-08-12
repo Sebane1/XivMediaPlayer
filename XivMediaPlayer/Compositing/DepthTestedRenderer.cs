@@ -91,7 +91,8 @@ namespace XivMediaPlayer.Compositing {
       public float BufferProgress;
       public float LoadingPulse;
       public float IsLoadingOverlay;
-      public float _cbufferPad2;
+      public float HasIdleBranding;
+      public float IdleBrandingAspect;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -159,7 +160,8 @@ cbuffer Constants : register(b0) {
   float BufferProgress;
   float LoadingPulse;
   float IsLoadingOverlay;
-  float _cbufferPad2;
+  float HasIdleBranding;
+  float IdleBrandingAspect;
 };
   
   cbuffer UIConsts : register(b1) {
@@ -177,6 +179,7 @@ Texture2D PreUITexture : register(t4);
 Texture2D GBuffer2 : register(t5);
 Texture2D GBuffer3 : register(t6);
 Texture2D VignetteExtrapolatedTexture : register(t7);
+Texture2D IdleBrandingTexture : register(t8);
 SamplerState VideoSampler : register(s0);
 SamplerState DepthSampler : register(s1);
 
@@ -384,8 +387,18 @@ float4 PS(VS_OUT input) : SV_TARGET {
               color.rgb = ScreensaverColor; // Fill the backdrop
               float aspect = 16.0 / 9.0;
               if (RenderResolution.y > 0) aspect = RenderResolution.x / RenderResolution.y;
-              
-              if (ScreensaverStyle < 0.5) {
+
+              if (HasIdleBranding > 0.5) {
+                  float imgAspect = max(IdleBrandingAspect, 0.01);
+                  float2 scale = float2(1.0, 1.0);
+                  if (imgAspect > aspect) scale.y = aspect / imgAspect;
+                  else scale.x = imgAspect / aspect;
+                  float2 centered = (uv - 0.5) / scale + 0.5;
+                  if (centered.x >= 0.0 && centered.x <= 1.0 && centered.y >= 0.0 && centered.y <= 1.0) {
+                      float4 img = IdleBrandingTexture.Sample(VideoSampler, centered);
+                      color.rgb = lerp(color.rgb, img.rgb, img.a);
+                  }
+              } else if (ScreensaverStyle < 0.5) {
                   // Style 0: Bouncing Logo
                   float speedX = 0.1;
                   float speedY = 0.075;
@@ -1368,7 +1381,7 @@ float4 PS(VS_OUT input) : SV_TARGET {
       float renderWidth, float renderHeight,
       List<(int X, int Y, int W, int H, string Name)> uiRects, IntPtr titleSrvPtr = default,
       bool isLooping = false, bool isShuffle = false, float time = 0, float showScreensaver = 0,
-      float videoAspectRatio = 0, IntPtr gbuffer2SrvPtr = default, IntPtr gbuffer3SrvPtr = default, IntPtr transparentUiSrvPtr = default, IntPtr vignetteExtrapolatedSrvPtr = default, bool useDifferenceFallback = false, float opacity = 1.0f, bool isProjectorMode = false, Vector3? screensaverColor = null, int screensaverStyle = 0, float uiBlendThreshold = 0.0f, float uvBottom = 1.0f, float uvRight = 1.0f, bool enableTvGlow = true, float loadingPulse = 0f, bool isLoadingOverlay = false) {
+      float videoAspectRatio = 0, IntPtr gbuffer2SrvPtr = default, IntPtr gbuffer3SrvPtr = default, IntPtr transparentUiSrvPtr = default, IntPtr vignetteExtrapolatedSrvPtr = default, bool useDifferenceFallback = false, float opacity = 1.0f, bool isProjectorMode = false, Vector3? screensaverColor = null, int screensaverStyle = 0, float uiBlendThreshold = 0.0f, float uvBottom = 1.0f, float uvRight = 1.0f, bool enableTvGlow = true, float loadingPulse = 0f, bool isLoadingOverlay = false, IntPtr idleBrandingSrvPtr = default, float idleBrandingAspect = 1.0f) {
 
       if (!_initialized || _disposed || videoSrvPtr == IntPtr.Zero || depthSrv == null) return false;
 
@@ -1431,6 +1444,8 @@ float4 PS(VS_OUT input) : SV_TARGET {
           EnableTvGlow = enableTvGlow ? 1.0f : 0.0f,
           LoadingPulse = loadingPulse,
           IsLoadingOverlay = isLoadingOverlay ? 1.0f : 0.0f,
+          HasIdleBranding = idleBrandingSrvPtr != IntPtr.Zero ? 1.0f : 0.0f,
+          IdleBrandingAspect = idleBrandingAspect,
         };
           _context.UpdateSubresource(constants, _constantBuffer);
 
@@ -1467,7 +1482,7 @@ float4 PS(VS_OUT input) : SV_TARGET {
         _context.PSSetShader(_pixelShader);
         _context.PSSetConstantBuffer(0, _constantBuffer);
         _context.PSSetConstantBuffer(1, _uiRectBuffer);
-        var srvs = new ID3D11ShaderResourceView[8];
+        var srvs = new ID3D11ShaderResourceView[9];
         if (videoSrvPtr != IntPtr.Zero) System.Runtime.InteropServices.Marshal.AddRef(videoSrvPtr);
         srvs[0] = videoSrvPtr != IntPtr.Zero ? new ID3D11ShaderResourceView(videoSrvPtr) : null;
         srvs[1] = depthSrv;
@@ -1482,8 +1497,10 @@ float4 PS(VS_OUT input) : SV_TARGET {
         srvs[6] = gbuffer3SrvPtr != IntPtr.Zero ? new ID3D11ShaderResourceView(gbuffer3SrvPtr) : null;
         if (vignetteExtrapolatedSrvPtr != IntPtr.Zero) System.Runtime.InteropServices.Marshal.AddRef(vignetteExtrapolatedSrvPtr);
         srvs[7] = vignetteExtrapolatedSrvPtr != IntPtr.Zero ? new ID3D11ShaderResourceView(vignetteExtrapolatedSrvPtr) : null;
+        if (idleBrandingSrvPtr != IntPtr.Zero) System.Runtime.InteropServices.Marshal.AddRef(idleBrandingSrvPtr);
+        srvs[8] = idleBrandingSrvPtr != IntPtr.Zero ? new ID3D11ShaderResourceView(idleBrandingSrvPtr) : null;
         
-        _context.PSSetShaderResources(0, 8, srvs);
+        _context.PSSetShaderResources(0, 9, srvs);
         _context.PSSetSampler(0, _videoSampler);
         _context.PSSetSampler(1, _depthSampler);
 
@@ -1504,6 +1521,7 @@ float4 PS(VS_OUT input) : SV_TARGET {
         _context.PSSetShaderResource(5, (ID3D11ShaderResourceView)null);
         _context.PSSetShaderResource(6, (ID3D11ShaderResourceView)null);
         _context.PSSetShaderResource(7, (ID3D11ShaderResourceView)null);
+        _context.PSSetShaderResource(8, (ID3D11ShaderResourceView)null);
         
         savedRTVs[0]?.Dispose();
         savedDSV?.Dispose();
