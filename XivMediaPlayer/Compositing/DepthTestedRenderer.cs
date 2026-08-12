@@ -346,19 +346,18 @@ float4 SampleVideoWithFx(float2 uv) {
   float mode = VisualEffectMode;
   float intensity = clamp(EffectIntensity, 0.0, 2.0);
   float2 fxUv = ApplyVisualFxDistort(uv);
+  float4 col = VideoTexture.SampleLevel(VideoSampler, fxUv, 0.0);
 
   if (mode > 0.5 && mode < 1.5 && intensity > 0.01) {
     float2 off = (fxUv - 0.5) * intensity * 0.012;
-    float r = VideoTexture.Sample(VideoSampler, fxUv + off).r;
-    float g = VideoTexture.Sample(VideoSampler, fxUv).g;
-    float b = VideoTexture.Sample(VideoSampler, fxUv - off).b;
-    float a = VideoTexture.Sample(VideoSampler, fxUv).a;
-    float4 col = float4(r, g, b, a);
+    float r = VideoTexture.SampleLevel(VideoSampler, fxUv + off, 0.0).r;
+    float g = col.g;
+    float b = VideoTexture.SampleLevel(VideoSampler, fxUv - off, 0.0).b;
+    col = float4(r, g, b, col.a);
     col.rgb *= 1.0 - 0.22 * intensity * (1.0 - cos(fxUv.y * 900.0));
-    return col;
   }
 
-  return VideoTexture.Sample(VideoSampler, fxUv);
+  return col;
 }
 
 float GetAudioBand(int index) {
@@ -416,7 +415,7 @@ float4 PS(VS_OUT input) : SV_TARGET {
   float2 uv = float2(-1, -1);
   float t = -1.0;
 
-  float2 sampleUV = float2(-1, -1);
+  float2 sampleUV = float2(0.5, 0.5);
   if (abs(denom) > 1e-6) {
       t = dot(CornerTL3D - rayOrigin, tvNormal) / denom;
       float3 hitPoint = rayOrigin + rayDir * t;
@@ -542,14 +541,14 @@ float4 PS(VS_OUT input) : SV_TARGET {
                   bool draw = DrawXMPLogo(p);
                   
                   if (draw) {
-                      int colorIdx = (int(floor(bx)) + int(floor(by))) % 6;
+                      uint colorIdx = (uint(floor(bx)) + uint(floor(by))) % 6u;
                       float3 logoColor = float3(1, 1, 1);
-                      if (colorIdx == 0) logoColor = float3(1.0, 0.3, 0.3);
-                      else if (colorIdx == 1) logoColor = float3(0.3, 1.0, 0.3);
-                      else if (colorIdx == 2) logoColor = float3(0.3, 0.6, 1.0);
-                      else if (colorIdx == 3) logoColor = float3(1.0, 1.0, 0.3);
-                      else if (colorIdx == 4) logoColor = float3(1.0, 0.3, 1.0);
-                      else if (colorIdx == 5) logoColor = float3(0.3, 1.0, 1.0);
+                      if (colorIdx == 0u) logoColor = float3(1.0, 0.3, 0.3);
+                      else if (colorIdx == 1u) logoColor = float3(0.3, 1.0, 0.3);
+                      else if (colorIdx == 2u) logoColor = float3(0.3, 0.6, 1.0);
+                      else if (colorIdx == 3u) logoColor = float3(1.0, 1.0, 0.3);
+                      else if (colorIdx == 4u) logoColor = float3(1.0, 0.3, 1.0);
+                      else if (colorIdx == 5u) logoColor = float3(0.3, 1.0, 1.0);
                       
                       color.rgb = logoColor;
                   }
@@ -1003,9 +1002,12 @@ float4 PS(VS_OUT input) : SV_TARGET {
           // Use a 144-point (12x12 grid) average texture sample to stabilize the glow color
           // and mitigate potential flicker from on-screen movement.
           float3 prominentColor = float3(0, 0, 0);
-          for (float x = 0.05; x < 1.0; x += 0.0833) {
-              for (float y = 0.05; y < 1.0; y += 0.0833) {
-                  prominentColor += VideoTexture.Sample(VideoSampler, float2(x, y)).rgb;
+          [unroll]
+          for (int gx = 0; gx < 12; gx++) {
+              [unroll]
+              for (int gy = 0; gy < 12; gy++) {
+                  float2 samplePos = float2((gx + 0.5) / 12.0, (gy + 0.5) / 12.0);
+                  prominentColor += VideoTexture.SampleLevel(VideoSampler, samplePos, 0.0).rgb;
               }
           }
           prominentColor /= 144.0;
@@ -1265,8 +1267,9 @@ float4 PS(VS_OUT input) : SV_TARGET {
           pixelPos.y >= r.y && pixelPos.y <= r.y + r.w) {
           insideUI = true;
           
-          int vecIdx = i / 4;
-          int compIdx = i % 4;
+          uint uiIdx = uint(i);
+          uint vecIdx = uiIdx / 4u;
+          uint compIdx = uiIdx % 4u;
           float typeVal = UIRectTypes[vecIdx][compIdx];
           
           if (typeVal > 3.5) {
