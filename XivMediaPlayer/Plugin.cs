@@ -2820,6 +2820,35 @@ namespace XivMediaPlayer
             target.PositionZ += MathF.Sin(yawRad) * 2.0f;
         }
 
+        internal static void OffsetDuplicateBannerPlacement(BannerPlacement target, BannerPlacement anchor)
+        {
+            float yawRad = anchor.RotationY * (MathF.PI / 180f);
+            target.PositionX += MathF.Cos(yawRad) * 2.0f;
+            target.PositionY = anchor.PositionY;
+            target.PositionZ += MathF.Sin(yawRad) * 2.0f;
+        }
+
+        internal static BannerPlacement CloneBannerPlacement(BannerPlacement source, string locationKey, string? imageUrlOverride = null)
+        {
+            return new BannerPlacement
+            {
+                Id = Guid.NewGuid().ToString(),
+                LocationKey = locationKey,
+                PositionX = source.PositionX,
+                PositionY = source.PositionY,
+                PositionZ = source.PositionZ,
+                RotationX = source.RotationX,
+                RotationY = source.RotationY,
+                RotationZ = source.RotationZ,
+                ScaleX = source.ScaleX,
+                ScaleY = source.ScaleY,
+                Opacity = source.Opacity,
+                ImageUrl = imageUrlOverride ?? source.ImageUrl,
+                OwnerId = source.OwnerId,
+                BypassLock = source.BypassLock
+            };
+        }
+
         internal async Task SyncAllRoomTvsAsync(string locationKey)
         {
             if (string.IsNullOrEmpty(locationKey)) return;
@@ -2879,7 +2908,7 @@ namespace XivMediaPlayer
             });
         }
 
-        private bool IsBannerEditActive() =>
+        internal bool IsBannerEditActive() =>
             CurrentBannerPlacement != null && CurrentTvPlacement == null;
 
         private bool IsLiveEditingTv(TvPlacement tv)
