@@ -4743,7 +4743,7 @@ namespace XivMediaPlayer
 
                     if (IsHousingMenuOpen)
                     {
-                        _placementManipulator.DrawOverlay(_gameGui);
+                        _placementManipulator.DrawOverlay(_gameGui, cameraPos ?? _cachedLocalPlayerPosition ?? System.Numerics.Vector3.Zero);
                     }
                 }
                 
