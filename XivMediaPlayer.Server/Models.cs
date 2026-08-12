@@ -84,7 +84,7 @@ namespace XivMediaPlayer.Server.Models
         public bool BypassLock { get; set; } = false;
     }
 
-    /// <summary>Static image banner prop — not a TV; no playback.</summary>
+    /// <summary>Static image banner prop, not a TV; no playback.</summary>
     public class BannerPlacement
     {
         public string Id { get; set; } = Guid.NewGuid().ToString();

@@ -352,18 +352,17 @@ namespace XivMediaPlayer.Compositing {
       depthCapture.ScreenQuadCorners = (sTL, sTR, sBR, sBL);
       depthCapture.ScreenQuadDepths = cornerDepths;
 
-      // Average depth for glow visibility
       float centerDepth = (depthTL + depthTR + depthBR + depthBL) * 0.25f;
 
       var drawList = ImGui.GetBackgroundDrawList(ImGui.GetMainViewport());
 
-      // Draw glow behind the video
+      // Depth-tested halo behind the TV (drawn before the composited overlay).
       if (_enableGlow && allCornersInFront) {
         float visibility = ComputeVisibility(depthCapture, sTL, sTR, sBR, sBL, centerDepth);
-          if (visibility > 0.05f) {
-            RenderGlow(drawList, textureSrv, sTL, sTR, sBR, sBL, visibility);
-          }
+        if (visibility > 0.05f) {
+          RenderGlow(drawList, textureSrv, sTL, sTR, sBR, sBL, visibility);
         }
+      }
 
         // Render standard UI layer (non-occluded TV UI)
         // Ensure DepthTestedRenderer is initialized

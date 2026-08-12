@@ -98,7 +98,7 @@ namespace XivMediaPlayer.Server.Controllers
             {
                 if (roomTvs.Count > 0 && !create)
                 {
-                    // Ambiguous legacy request against a multi-TV room — require explicit create=true.
+                    // Ambiguous legacy request against a multi-TV room; require explicit create=true.
                     return BadRequest("Multiple TVs exist for this location. Pass create=true to add another screen.");
                 }
 

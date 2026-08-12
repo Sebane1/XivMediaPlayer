@@ -828,7 +828,13 @@ float4 PS(VS_OUT input) : SV_TARGET {
       
       // Apply soft occlusion mask
       color.a *= (1.0 - occlusion);
-  } else {
+  } else if (isInside && occlusion >= 0.999) {
+      // TV is fully hidden by geometry; show the scene, never bloom in front of the occluder.
+      if (HasBackBuffer > 0.5) {
+          color = float4(BackBufferTexture.Sample(VideoSampler, screenUV).rgb, 1.0);
+      }
+  } else if (!isInside) {
+      // Ambient glow on surrounding walls/geometry only, not on the TV surface or through occluders.
       float depthMask = 1.0;
       if (gameDepth < 0.0001) depthMask = 0; // Ignore skybox
       
@@ -837,6 +843,14 @@ float4 PS(VS_OUT input) : SV_TARGET {
       
       // Reconstruct the 3D world position of the game pixel
       float3 gameWorldPos = CameraPos + rayDir * (gameViewZ / dot(rayDir, -CameraForward));
+      
+      // Skip pixels in front of the TV plane (e.g. the player occluding the screen).
+      if (t > 0.0) {
+          float tvViewZ = dot(rayDir * t, -CameraForward);
+          if (gameViewZ < tvViewZ - 0.05) {
+              depthMask = 0.0;
+          }
+      }
       
       // Calculate TV dimensions in 3D world space
       float3 tvCenter3D = (CornerTR3D + CornerBL3D) * 0.5;

@@ -2564,7 +2564,9 @@ namespace XivMediaPlayer
 
         internal void UpsertRoomBanner(BannerPlacement banner)
         {
-            int index = _roomBannerPlacements.FindIndex(b => b.Id == banner.Id);
+            if (!IsValidBannerPlacement(banner)) return;
+
+            int index = _roomBannerPlacements.FindIndex(b => b != null && b.Id == banner.Id);
             if (index >= 0)
             {
                 _roomBannerPlacements[index] = banner;
@@ -2600,8 +2602,8 @@ namespace XivMediaPlayer
             if (string.IsNullOrEmpty(primaryKey)) return new List<BannerPlacement>();
 
             return _roomBannerPlacements
-                .Where(b => b.LocationKey == primaryKey)
-                .OrderBy(b => b.LastUpdated)
+                .Where(b => b != null && b.LocationKey == primaryKey)
+                .OrderBy(b => b!.LastUpdated)
                 .ToList();
         }
 
@@ -2639,7 +2641,9 @@ namespace XivMediaPlayer
 
         internal void UpsertRoomTv(TvPlacement tv)
         {
-            int index = _roomTvPlacements.FindIndex(t => t.Id == tv.Id);
+            if (!IsValidTvPlacement(tv)) return;
+
+            int index = _roomTvPlacements.FindIndex(t => t != null && t.Id == tv.Id);
             if (index >= 0)
             {
                 _roomTvPlacements[index] = tv;
@@ -2820,14 +2824,20 @@ namespace XivMediaPlayer
             }
         }
 
+        private static bool IsValidTvPlacement(TvPlacement? tv) =>
+            tv != null && !string.IsNullOrEmpty(tv.LocationKey);
+
+        private static bool IsValidBannerPlacement(BannerPlacement? banner) =>
+            banner != null && !string.IsNullOrEmpty(banner.LocationKey);
+
         private List<TvPlacement> GetRoomTvsForPrimaryLocation()
         {
             string primaryKey = GetLocationKey();
             if (string.IsNullOrEmpty(primaryKey)) return new List<TvPlacement>();
 
             var roomTvs = _roomTvPlacements
-                .Where(t => t.LocationKey == primaryKey)
-                .OrderBy(t => t.LastUpdated)
+                .Where(t => t != null && t.LocationKey == primaryKey)
+                .OrderBy(t => t!.LastUpdated)
                 .ToList();
 
             if (roomTvs.Count > 0) return roomTvs;
@@ -2927,18 +2937,19 @@ namespace XivMediaPlayer
             if (!IsMediaSyncLocation(primaryKey)) return;
 
             var tvs = await ServerClient.GetTvsBatchAsync(keys);
-            _nearbyTvs = tvs;
+            _nearbyTvs = tvs?.Where(t => t != null).ToList() ?? new List<TvPlacement>();
 
-            var roomTvs = tvs
+            var roomTvs = _nearbyTvs
                 .Where(t => t.LocationKey == primaryKey)
                 .OrderBy(t => t.LastUpdated)
                 .ToList();
 
-            if (roomTvs.Count == 0 && tvs.Count > 0)
+            if (roomTvs.Count == 0 && _nearbyTvs.Count > 0)
             {
                 var playerPos = _cachedLocalPlayerPosition;
-                roomTvs = tvs
-                    .OrderBy(t => t.LocationKey != primaryKey)
+                roomTvs = _nearbyTvs
+                    .Where(IsValidTvPlacement)
+                    .OrderBy(t => t!.LocationKey != primaryKey)
                     .ThenBy(t => playerPos == null
                         ? 0f
                         : System.Numerics.Vector3.Distance(
@@ -2949,7 +2960,8 @@ namespace XivMediaPlayer
             }
 
             _roomTvPlacements.Clear();
-            _roomTvPlacements.AddRange(roomTvs);
+            _roomTvPlacements.AddRange(roomTvs.Where(IsValidTvPlacement));
+            _roomTvPlacements.RemoveAll(t => t == null);
 
             if (roomTvs.Count > 0)
             {
