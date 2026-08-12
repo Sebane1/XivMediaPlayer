@@ -233,7 +233,8 @@ namespace MediaPlayerCore {
         || message.Contains("DEMUX_GET_LENGTH", StringComparison.OrdinalIgnoreCase)
         || message.Contains("DEMUX_GET_PTS", StringComparison.OrdinalIgnoreCase)
         || message.Contains("dav1d", StringComparison.OrdinalIgnoreCase)
-        || message.Contains("Decoder feed error", StringComparison.OrdinalIgnoreCase);
+        || message.Contains("Decoder feed error", StringComparison.OrdinalIgnoreCase)
+        || message.Contains("Failed to set on top", StringComparison.OrdinalIgnoreCase);
 
     public long Time {
       get {

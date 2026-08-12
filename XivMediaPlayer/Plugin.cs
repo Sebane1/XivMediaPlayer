@@ -2937,9 +2937,15 @@ namespace XivMediaPlayer
                     else if (!sync.IsPlaying && localIsPlaying)
                     {
                         bool isNewlyLoaded = (DateTime.UtcNow - _lastUrlLoadTime).TotalSeconds < 20;
+                        bool serverAndLocalAligned = Math.Abs(activeStream.Time - sync.TimecodeMs) <= 2500;
 
                         // Check sync staleness or new stream status
-                        if (sync.DataAgeMs < 15000 || isNewlyLoaded)
+                        if (!serverAndLocalAligned)
+                        {
+                            _pluginLog.Information(
+                                $"[Social] Ignoring server pause because timecodes differ (local={activeStream.Time}ms, server={sync.TimecodeMs}ms). Likely stale server state while DJ plays locally.");
+                        }
+                        else if (sync.DataAgeMs < 15000 || isNewlyLoaded)
                         {
                             if (IsLocalPlaybackSyncProtected())
                             {
@@ -3099,7 +3105,8 @@ namespace XivMediaPlayer
                 || errorMsg.Contains("DEMUX_GET_LENGTH", StringComparison.OrdinalIgnoreCase)
                 || errorMsg.Contains("Failed to create demuxer", StringComparison.OrdinalIgnoreCase)
                 || errorMsg.Contains("dav1d", StringComparison.OrdinalIgnoreCase)
-                || errorMsg.Contains("Decoder feed error", StringComparison.OrdinalIgnoreCase))
+                || errorMsg.Contains("Decoder feed error", StringComparison.OrdinalIgnoreCase)
+                || errorMsg.Contains("Failed to set on top", StringComparison.OrdinalIgnoreCase))
             {
                 return;
             }
