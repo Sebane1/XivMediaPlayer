@@ -200,18 +200,36 @@ namespace XivMediaPlayer.Networking
                 using var response = await _httpClient.SendAsync(request);
                 if (response.IsSuccessStatusCode)
                 {
-                    return await response.Content.ReadFromJsonAsync<DiagnosticLogSubmitResult>();
+                    DiagnosticLogSubmitResult? result = await response.Content.ReadFromJsonAsync<DiagnosticLogSubmitResult>();
+                    if (result != null)
+                    {
+                        result.Success = true;
+                    }
+
+                    return result;
                 }
 
                 string body = await response.Content.ReadAsStringAsync();
                 _log.Warning($"Diagnostic log upload failed ({(int)response.StatusCode}): {body}");
+
+                return new DiagnosticLogSubmitResult
+                {
+                    Success = false,
+                    ErrorMessage = string.IsNullOrWhiteSpace(body)
+                        ? "The server rejected the error report."
+                        : body,
+                };
             }
             catch (Exception ex)
             {
                 _log.Error(ex, "Failed to upload diagnostic logs");
             }
 
-            return null;
+            return new DiagnosticLogSubmitResult
+            {
+                Success = false,
+                ErrorMessage = "Could not send error report. Check your internet connection and try again.",
+            };
         }
 
         public void Dispose()

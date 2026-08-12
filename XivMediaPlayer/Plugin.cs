@@ -82,6 +82,10 @@ namespace XivMediaPlayer
         private YtDlpManager _ytDlpManager;
         private Task _ytDlpInitTask;
         private readonly DalamudLogMonitor _diagnosticLogMonitor = new();
+        private readonly DiagnosticReportPolicy _diagnosticReportPolicy = new();
+        private DiagnosticReportEligibility? _diagnosticEligibility;
+        private string? _diagnosticReportBlockReason;
+        private DateTime _diagnosticEligibilityCheckedUtc = DateTime.MinValue;
         private readonly string _pluginVersion;
         private DateTime _lastDiagnosticScanUtc = DateTime.MinValue;
         private DateTime _lastAutoDiagnosticSendUtc = DateTime.MinValue;
@@ -133,6 +137,36 @@ namespace XivMediaPlayer
         public bool IsSendingDiagnosticLogs => Interlocked.CompareExchange(ref _isSendingDiagnostics, 0, 0) != 0;
         public int DiagnosticPendingCount => _diagnosticLogMonitor.PendingLineCount;
         public string DiagnosticPendingSummary => _diagnosticLogMonitor.PendingSummary;
+        public bool CanSendDiagnosticReports => _diagnosticEligibility?.CanSend ?? false;
+        public string? DiagnosticReportBlockReason => _diagnosticReportBlockReason;
+
+        public void RefreshDiagnosticReportEligibility()
+        {
+            _ = Task.Run(async () =>
+            {
+                DiagnosticReportEligibility eligibility =
+                    await _diagnosticReportPolicy.EvaluateAsync(_pluginInterface).ConfigureAwait(false);
+                _diagnosticEligibility = eligibility;
+                _diagnosticReportBlockReason = eligibility.CanSend ? null : eligibility.BlockReason;
+                _diagnosticEligibilityCheckedUtc = DateTime.UtcNow;
+            });
+        }
+
+        private async Task<DiagnosticReportEligibility> GetDiagnosticReportEligibilityAsync()
+        {
+            if (_diagnosticEligibility != null
+                && (DateTime.UtcNow - _diagnosticEligibilityCheckedUtc).TotalMinutes < 10)
+            {
+                return _diagnosticEligibility;
+            }
+
+            DiagnosticReportEligibility eligibility =
+                await _diagnosticReportPolicy.EvaluateAsync(_pluginInterface).ConfigureAwait(false);
+            _diagnosticEligibility = eligibility;
+            _diagnosticReportBlockReason = eligibility.CanSend ? null : eligibility.BlockReason;
+            _diagnosticEligibilityCheckedUtc = DateTime.UtcNow;
+            return eligibility;
+        }
 
         public string Translate(string text) => Localization.Translation.Get(text);
 
@@ -203,7 +237,15 @@ namespace XivMediaPlayer
             {
                 try
                 {
-                    bool ok = await SendDiagnosticReportCoreAsync("manual", userNote).ConfigureAwait(false);
+                    DiagnosticReportEligibility eligibility = await GetDiagnosticReportEligibilityAsync().ConfigureAwait(false);
+                    if (!eligibility.CanSend)
+                    {
+                        string reason = eligibility.BlockReason;
+                        EnqueueFrameworkAction(() => PrintErrorChat("[Media Player] " + reason));
+                        return;
+                    }
+
+                    (bool ok, string? errorMessage) = await SendDiagnosticReportCoreAsync("manual", userNote).ConfigureAwait(false);
                     EnqueueFrameworkAction(() =>
                     {
                         if (ok)
@@ -213,7 +255,7 @@ namespace XivMediaPlayer
                         }
                         else
                         {
-                            PrintErrorChat("[Media Player] Could not send error report. Check your internet connection and try again.");
+                            PrintErrorChat("[Media Player] " + (errorMessage ?? "Could not send error report. Check your internet connection and try again."));
                         }
                     });
                 }
@@ -224,18 +266,31 @@ namespace XivMediaPlayer
             });
         }
 
-        private async Task<bool> SendDiagnosticReportCoreAsync(string trigger, string? userNote)
+        private async Task<(bool Success, string? ErrorMessage)> SendDiagnosticReportCoreAsync(string trigger, string? userNote)
         {
+            DiagnosticReportEligibility eligibility = await GetDiagnosticReportEligibilityAsync().ConfigureAwait(false);
+            if (!eligibility.CanSend)
+            {
+                _diagnosticReportBlockReason = eligibility.BlockReason;
+                return (false, eligibility.BlockReason);
+            }
+
             _diagnosticLogMonitor.ScanForNewIssues();
             List<string> lines = _diagnosticLogMonitor.GetPendingLinesSnapshot();
             if (lines.Count == 0)
             {
-                return false;
+                return (false, "No recent plugin errors were found to send.");
             }
 
+            var manifest = _pluginInterface.Manifest;
             var report = new DiagnosticLogReport
             {
-                PluginVersion = _pluginVersion,
+                PluginVersion = manifest.AssemblyVersion.ToString(),
+                PluginInternalName = manifest.InternalName,
+                PluginAuthor = manifest.Author,
+                PluginRepoUrl = manifest.RepoUrl,
+                PluginSource = _pluginInterface.SourceRepository ?? string.Empty,
+                IsTestingRelease = _pluginInterface.IsTesting,
                 OwnerId = _config.OwnerId,
                 Trigger = trigger,
                 UserNote = string.IsNullOrWhiteSpace(userNote) ? null : userNote.Trim(),
@@ -245,13 +300,18 @@ namespace XivMediaPlayer
             };
 
             DiagnosticLogSubmitResult? result = await ServerClient.SubmitDiagnosticLogsAsync(report).ConfigureAwait(false);
-            if (result == null)
+            if (result == null || !result.Success)
             {
-                return false;
+                if (!string.IsNullOrWhiteSpace(result?.ErrorMessage))
+                {
+                    _diagnosticReportBlockReason = result.ErrorMessage;
+                }
+
+                return (false, result?.ErrorMessage);
             }
 
             _diagnosticLogMonitor.ClearPending();
-            return true;
+            return (true, null);
         }
 
         private void TryPeriodicDiagnosticScan()
@@ -281,7 +341,7 @@ namespace XivMediaPlayer
 
                     try
                     {
-                        bool ok = await SendDiagnosticReportCoreAsync("auto", null).ConfigureAwait(false);
+                        (bool ok, _) = await SendDiagnosticReportCoreAsync("auto", null).ConfigureAwait(false);
                         if (ok)
                         {
                             EnqueueFrameworkAction(() =>
@@ -513,13 +573,14 @@ namespace XivMediaPlayer
             _config.Initialize(_pluginInterface);
             _config.Migrate();
             InitializeLocalization();
+            RefreshDiagnosticReportEligibility();
 
             // Initialize yt-dlp manager
             _ytDlpManager = new YtDlpManager(pluginDir, _config.PreferredQuality) { EnableSabrProxy = _config.EnableSabrProxy };
             _ytDlpManager.OnStatusUpdate += (s, msg) =>
             {
                 _pluginLog.Info("[yt-dlp] " + msg);
-                if (IsYtDlpLoadingMessage(msg) && !_playbackHasRenderedFrames)
+                if (IsYtDlpLoadingMessage(msg) && (!_playbackHasRenderedFrames || msg.StartsWith("SABR buffering", StringComparison.OrdinalIgnoreCase)))
                 {
                     _mediaLoadingMessage = msg;
                 }
@@ -1562,13 +1623,27 @@ namespace XivMediaPlayer
 
             if (msg.StartsWith("SABR buffering...", StringComparison.OrdinalIgnoreCase))
             {
-                var match = System.Text.RegularExpressions.Regex.Match(msg, @"\(([0-9.]+)\s*MB ready\)");
-                if (match.Success && double.TryParse(match.Groups[1].Value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double mb))
+                var match = System.Text.RegularExpressions.Regex.Match(
+                    msg,
+                    @"\(([0-9.]+)\s*MB ready(?:,\s*([0-9.]+)%)?\)");
+                if (match.Success
+                    && double.TryParse(match.Groups[1].Value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double mb))
                 {
+                    if (match.Groups[2].Success
+                        && double.TryParse(match.Groups[2].Value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double pct))
+                    {
+                        return string.Format(Translate("SABR buffering... ({0:0.#} MB ready, {1:0}%)"), mb, pct);
+                    }
+
                     return string.Format(Translate("SABR buffering... ({0:0.#} MB ready)"), mb);
                 }
 
-                return msg;
+                if (msg.Contains("starting download", StringComparison.OrdinalIgnoreCase))
+                {
+                    return Translate("SABR buffering... starting download");
+                }
+
+                return Translate("SABR buffering...");
             }
 
             return Translate(msg);
@@ -1581,21 +1656,16 @@ namespace XivMediaPlayer
                 return Translate("Buffering to resume position...");
             }
 
+            var path = _mediaManager?.ActiveStream?.SoundPath;
+            if (_ytDlpManager?.TryGetSabrBufferStatus(path, out var sabrStatus) == true
+                && (sabrStatus.IsDownloading || sabrStatus.BufferedBytes > 0))
+            {
+                return FormatSabrLoadingMessage(sabrStatus);
+            }
+
             if (!string.IsNullOrWhiteSpace(_mediaLoadingMessage))
             {
                 return TranslateLoadingStatus(_mediaLoadingMessage);
-            }
-
-            var path = _mediaManager?.ActiveStream?.SoundPath;
-            if (_ytDlpManager?.TryGetSabrBufferStatus(path, out var sabrStatus) == true)
-            {
-                double mb = sabrStatus.BufferedBytes / (1024.0 * 1024.0);
-                if (sabrStatus.IsDownloading)
-                {
-                    return mb > 0.01
-                        ? string.Format(Translate("Buffering video... {0:0.#} MB downloaded"), mb)
-                        : Translate("Buffering video... starting download");
-                }
             }
 
             if (_isResolvingMedia)
@@ -1604,6 +1674,27 @@ namespace XivMediaPlayer
             }
 
             return Translate("Loading video...");
+        }
+
+        private string FormatSabrLoadingMessage(YtDlpManager.SabrBufferStatus status)
+        {
+            double mb = status.BufferedBytes / (1024.0 * 1024.0);
+            if (status.DownloadPercent >= 0f)
+            {
+                return string.Format(
+                    Translate("SABR buffering... ({0:0.#} MB ready, {1:0}%)"),
+                    mb,
+                    status.DownloadPercent * 100f);
+            }
+
+            if (mb > 0.01)
+            {
+                return string.Format(Translate("SABR buffering... ({0:0.#} MB ready)"), mb);
+            }
+
+            return status.IsDownloading
+                ? Translate("SABR buffering... starting download")
+                : Translate("SABR buffering...");
         }
 
         private void ResetPlaybackEnsureState()

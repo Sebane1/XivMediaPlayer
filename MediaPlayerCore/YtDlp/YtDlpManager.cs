@@ -89,6 +89,7 @@ namespace MediaPlayerCore.YtDlp
         private readonly SemaphoreSlim _bgutilServerGate = new(1, 1);
         private Process? _bgutilServerProcess;
         private volatile bool _bgutilServerReady;
+        private readonly StringBuilder _bgutilServerLog = new();
         private int _youTubeSetupRunning;
 
         /// <summary>HTTP headers from the most recent yt-dlp format resolve (-j).</summary>
@@ -107,6 +108,9 @@ namespace MediaPlayerCore.YtDlp
             public volatile bool DownloadFinished;
             public volatile float DownloadPercent = -1f;
             public long EstimatedFinalBytes;
+            public long LastReportedBytes = -1;
+            public float LastReportedPercent = -1f;
+            public long LastStatusReportTick;
             public string? Error { get; set; }
             public int StreamConsumers;
             public DateTime LastAccessUtc { get; set; } = DateTime.UtcNow;
@@ -133,6 +137,7 @@ namespace MediaPlayerCore.YtDlp
         {
             public long BufferedBytes { get; init; }
             public bool IsDownloading { get; init; }
+            public float DownloadPercent { get; init; }
         }
 
         public bool TryGetSabrBufferStatus(string? mediaPath, out SabrBufferStatus status)
@@ -145,20 +150,80 @@ namespace MediaPlayerCore.YtDlp
 
             foreach (SabrSession session in _sabrSessions.Values)
             {
-                string? output = FindSabrOutputFile(session);
-                if (output != null
-                    && string.Equals(output, mediaPath, StringComparison.OrdinalIgnoreCase))
+                if (!SessionMatchesMediaPath(session, mediaPath))
                 {
-                    status = new SabrBufferStatus
-                    {
-                        BufferedBytes = GetSabrOutputLength(session),
-                        IsDownloading = IsDownloadStillRunning(session),
-                    };
-                    return true;
+                    continue;
                 }
+
+                status = new SabrBufferStatus
+                {
+                    BufferedBytes = GetSabrBufferedBytes(session),
+                    IsDownloading = IsDownloadStillRunning(session),
+                    DownloadPercent = session.DownloadPercent,
+                };
+                return true;
             }
 
             return false;
+        }
+
+        private static bool SessionMatchesMediaPath(SabrSession session, string mediaPath)
+        {
+            if (mediaPath.StartsWith(session.TempDir, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            string? output = FindSabrOutputFile(session);
+            return output != null
+                && string.Equals(output, mediaPath, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static long GetSabrBufferedBytes(SabrSession session)
+        {
+            long muxBytes = GetSabrOutputLength(session);
+            long dirBytes = GetDirectorySizeBytes(session.TempDir);
+            long best = Math.Max(muxBytes, dirBytes);
+
+            if (session.DownloadPercent >= 0f && session.EstimatedFinalBytes > 0)
+            {
+                long estimated = (long)(session.EstimatedFinalBytes * session.DownloadPercent);
+                best = Math.Max(best, estimated);
+            }
+
+            return best;
+        }
+
+        private void ReportSabrBufferProgress(SabrSession session, bool force = false)
+        {
+            long bytes = GetSabrBufferedBytes(session);
+            float pct = session.DownloadPercent;
+            long now = Environment.TickCount64;
+
+            bool bytesChanged = bytes != session.LastReportedBytes;
+            bool pctChanged = pct >= 0f && Math.Abs(pct - session.LastReportedPercent) > 0.01f;
+            bool timeElapsed = now - session.LastStatusReportTick > 2000;
+
+            if (!force && !bytesChanged && !pctChanged && !timeElapsed)
+            {
+                return;
+            }
+
+            session.LastReportedBytes = bytes;
+            session.LastReportedPercent = pct;
+            session.LastStatusReportTick = now;
+            OnStatusUpdate?.Invoke(this, FormatSabrBufferStatus(session, bytes));
+        }
+
+        private static string FormatSabrBufferStatus(SabrSession session, long bytes)
+        {
+            double mb = bytes / (1024.0 * 1024.0);
+            if (session.DownloadPercent >= 0f)
+            {
+                return $"SABR buffering... ({mb:0.#} MB ready, {session.DownloadPercent * 100f:0}%)";
+            }
+
+            return $"SABR buffering... ({mb:0.#} MB ready)";
         }
 
         /// <summary>
@@ -186,9 +251,7 @@ namespace MediaPlayerCore.YtDlp
         {
             foreach (SabrSession session in _sabrSessions.Values)
             {
-                string? output = FindSabrOutputFile(session);
-                if (output != null
-                    && string.Equals(output, mediaPath, StringComparison.OrdinalIgnoreCase))
+                if (SessionMatchesMediaPath(session, mediaPath))
                 {
                     return session;
                 }
@@ -492,6 +555,7 @@ namespace MediaPlayerCore.YtDlp
                 if (_bgutilServerProcess != null && !_bgutilServerProcess.HasExited)
                 {
                     _bgutilServerProcess.Kill(true);
+                    _bgutilServerProcess.WaitForExit(3000);
                 }
             }
             catch { }
@@ -499,43 +563,196 @@ namespace MediaPlayerCore.YtDlp
             _bgutilServerProcess = null;
         }
 
-        private async Task ResetYouTubeHelperAsync()
+        private void KillPluginDenoProcesses()
         {
-            await _bgutilServerGate.WaitAsync().ConfigureAwait(false);
-            try
+            StopBgutilServerProcess();
+
+            string denoExe = DenoExecutablePath;
+            if (!File.Exists(denoExe))
             {
-                _bgutilServerReady = false;
-                StopBgutilServerProcess();
-                TryClearBgutilInstallArtifacts();
+                return;
             }
-            finally
+
+            foreach (Process process in Process.GetProcessesByName("deno"))
             {
-                _bgutilServerGate.Release();
+                try
+                {
+                    if (process.HasExited)
+                    {
+                        continue;
+                    }
+
+                    string? processPath = process.MainModule?.FileName;
+                    if (processPath != null
+                        && string.Equals(processPath, denoExe, StringComparison.OrdinalIgnoreCase))
+                    {
+                        process.Kill(true);
+                        process.WaitForExit(3000);
+                    }
+                }
+                catch
+                {
+                }
+                finally
+                {
+                    process.Dispose();
+                }
             }
         }
 
-        private void TryClearBgutilInstallArtifacts()
+        private static async Task<bool> TryDeleteDirectoryRobustAsync(string path)
+        {
+            if (!Directory.Exists(path))
+            {
+                return true;
+            }
+
+            for (int attempt = 0; attempt < 5; attempt++)
+            {
+                try
+                {
+                    Directory.Delete(path, true);
+                    if (!Directory.Exists(path))
+                    {
+                        return true;
+                    }
+                }
+                catch (UnauthorizedAccessException)
+                {
+                }
+                catch (IOException)
+                {
+                }
+
+                await Task.Delay(400 * (attempt + 1)).ConfigureAwait(false);
+            }
+
+            if (OperatingSystem.IsWindows() && TryRobocopyMirrorDelete(path))
+            {
+                return true;
+            }
+
+            try
+            {
+                string trashPath = path + ".old." + DateTime.UtcNow.Ticks;
+                Directory.Move(path, trashPath);
+                _ = Task.Run(async () =>
+                {
+                    await Task.Delay(2000).ConfigureAwait(false);
+                    await TryDeleteDirectoryRobustAsync(trashPath).ConfigureAwait(false);
+                });
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static bool TryRobocopyMirrorDelete(string path)
+        {
+            string emptyDir = Path.Combine(Path.GetTempPath(), "xivmp-empty-" + Guid.NewGuid().ToString("N"));
+            try
+            {
+                Directory.CreateDirectory(emptyDir);
+                var psi = new ProcessStartInfo
+                {
+                    FileName = "robocopy",
+                    Arguments = $"\"{emptyDir}\" \"{path}\" /MIR /NFL /NDL /NJH /NJS /NC /NS /NP",
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                };
+                using Process? robocopy = Process.Start(psi);
+                robocopy?.WaitForExit(15000);
+                Directory.Delete(emptyDir, true);
+                if (Directory.Exists(path))
+                {
+                    Directory.Delete(path, true);
+                }
+
+                return !Directory.Exists(path);
+            }
+            catch
+            {
+                try
+                {
+                    if (Directory.Exists(emptyDir))
+                    {
+                        Directory.Delete(emptyDir, true);
+                    }
+                }
+                catch
+                {
+                }
+
+                return false;
+            }
+        }
+
+        private async Task CleanupStaleBgutilInstallDirsAsync()
+        {
+            if (!Directory.Exists(BgutilServerWorkDir))
+            {
+                return;
+            }
+
+            foreach (string staleDir in Directory.GetDirectories(BgutilServerWorkDir, "node_modules.old.*"))
+            {
+                await TryDeleteDirectoryRobustAsync(staleDir).ConfigureAwait(false);
+            }
+        }
+
+        private static Exception CreateBgutilResetFailedException(Exception inner)
+        {
+            return new Exception(
+                "Could not reset YouTube helper files (often 'css-calc' or another file in node_modules is locked). " +
+                "Fully close FFXIV, open Task Manager, end any 'deno' tasks, then click Fix YouTube setup again. " +
+                "If it still fails, delete the folder: bgutil-pot-provider/server/node_modules",
+                inner);
+        }
+
+        private async Task<bool> TryClearBgutilInstallArtifactsAsync()
         {
             if (File.Exists(BgutilReadyMarker))
             {
                 try { File.Delete(BgutilReadyMarker); } catch { }
             }
 
-            if (!Directory.Exists(BgutilNodeModulesDir))
+            string legacyMarker = Path.Combine(BgutilServerWorkDir, ".xivmp-deno-ready");
+            if (File.Exists(legacyMarker))
             {
-                return;
+                try { File.Delete(legacyMarker); } catch { }
             }
 
+            if (!Directory.Exists(BgutilNodeModulesDir))
+            {
+                return true;
+            }
+
+            KillPluginDenoProcesses();
+            await Task.Delay(500).ConfigureAwait(false);
+
+            if (await TryDeleteDirectoryRobustAsync(BgutilNodeModulesDir).ConfigureAwait(false))
+            {
+                return true;
+            }
+
+            OnError?.Invoke(this, CreateBgutilResetFailedException(
+                new IOException($"Access denied while deleting {BgutilNodeModulesDir}")));
+            return false;
+        }
+
+        private async Task<bool> ResetYouTubeHelperAsync()
+        {
+            await _bgutilServerGate.WaitAsync().ConfigureAwait(false);
             try
             {
-                Directory.Delete(BgutilNodeModulesDir, true);
+                _bgutilServerReady = false;
+                return await TryClearBgutilInstallArtifactsAsync().ConfigureAwait(false);
             }
-            catch (Exception ex)
+            finally
             {
-                OnError?.Invoke(this, new Exception(
-                    "Could not reset YouTube helper files. Close the game and try again, or delete the " +
-                    "'bgutil-pot-provider/server/node_modules' folder in the plugin directory.",
-                    ex));
+                _bgutilServerGate.Release();
             }
         }
 
@@ -577,7 +794,10 @@ namespace MediaPlayerCore.YtDlp
             try
             {
                 OnStatusUpdate?.Invoke(this, "Retrying YouTube helper setup...");
-                await ResetYouTubeHelperAsync().ConfigureAwait(false);
+                if (!await ResetYouTubeHelperAsync().ConfigureAwait(false))
+                {
+                    return false;
+                }
                 await EnsureDeno().ConfigureAwait(false);
                 await EnsureFfmpeg().ConfigureAwait(false);
                 await EnsurePotProvider().ConfigureAwait(false);
@@ -1457,7 +1677,7 @@ namespace MediaPlayerCore.YtDlp
         private string BgutilServerDir => Path.Combine(PluginDir, "bgutil-pot-provider");
         private string BgutilServerWorkDir => Path.Combine(BgutilServerDir, "server");
         private string BgutilNodeModulesDir => Path.Combine(BgutilServerWorkDir, "node_modules");
-        private string BgutilReadyMarker => Path.Combine(BgutilServerWorkDir, ".xivmp-deno-ready");
+        private string BgutilReadyMarker => Path.Combine(BgutilServerWorkDir, ".xivmp-deno-ready-v2");
 
         private bool HasYouTubeAuth => HasCookies || !string.IsNullOrEmpty(CookieBrowser);
 
@@ -1777,6 +1997,8 @@ namespace MediaPlayerCore.YtDlp
             if (tempLen > mergedLen) return tempLen > 0 ? temp : null;
             if (mergedLen > 0) return merged;
             if (tempLen > 0) return temp;
+            if (File.Exists(merged)) return merged;
+            if (File.Exists(temp)) return temp;
             return null;
         }
 
@@ -1847,6 +2069,7 @@ namespace MediaPlayerCore.YtDlp
 
             session.Process = process;
             _sabrSessions[session.Id] = session;
+            ReportSabrBufferProgress(session, force: true);
 
             var stderr = new StringBuilder();
             process.ErrorDataReceived += (_, e) =>
@@ -1855,6 +2078,7 @@ namespace MediaPlayerCore.YtDlp
                 stderr.AppendLine(e.Data);
                 if (IsBenignSabrFinalizeError(e.Data)) return;
                 TryParseDownloadPercent(e.Data, session);
+                ReportSabrBufferProgress(session);
                 if (e.Data.Contains("ERROR:", StringComparison.OrdinalIgnoreCase)
                     || e.Data.Contains("Requested format is not available", StringComparison.OrdinalIgnoreCase))
                 {
@@ -2025,11 +2249,11 @@ namespace MediaPlayerCore.YtDlp
             const long minMergedBytes = 262144; // wait for muxed mkv, not a video-only fragment
             long needBytes = requiredOffset > 0 ? requiredOffset + 1 : minMergedBytes;
             var deadline = Environment.TickCount64 + timeoutMs;
-            long lastStatusTick = 0;
 
             while (Environment.TickCount64 < deadline)
             {
                 long len = GetSabrOutputLength(session);
+                ReportSabrBufferProgress(session);
 
                 if (session.Failed)
                 {
@@ -2043,16 +2267,10 @@ namespace MediaPlayerCore.YtDlp
                     return requiredOffset > 0 ? len > requiredOffset : len > 0;
                 }
 
-                if (Environment.TickCount64 - lastStatusTick > 15000)
-                {
-                    lastStatusTick = Environment.TickCount64;
-                    string mb = (len / (1024.0 * 1024.0)).ToString("0.##");
-                    OnStatusUpdate?.Invoke(this, $"SABR buffering... ({mb} MB ready)");
-                }
-
                 Thread.Sleep(100);
             }
 
+            ReportSabrBufferProgress(session, force: true);
             long finalLen = GetSabrOutputLength(session);
             return requiredOffset > 0 ? finalLen > requiredOffset : finalLen >= minMergedBytes || finalLen > 0;
         }
@@ -2537,6 +2755,9 @@ namespace MediaPlayerCore.YtDlp
             try
             {
                 if (_bgutilServerReady) return;
+
+                await CleanupStaleBgutilInstallDirsAsync().ConfigureAwait(false);
+
                 if (await IsBgutilServerRespondingAsync())
                 {
                     _bgutilServerReady = true;
@@ -2571,10 +2792,12 @@ namespace MediaPlayerCore.YtDlp
                 }
                 else
                 {
+                    string detail = GetBgutilServerLogExcerpt();
                     OnError?.Invoke(this, new Exception(
                         "PO Token provider server failed to start on http://127.0.0.1:4416. " +
                         "Open Media Player Settings → Sources and click Fix YouTube setup. " +
-                        "If Windows asks to allow internet access, click Allow."));
+                        "If Windows asks to allow internet access, click Allow. " +
+                        (string.IsNullOrWhiteSpace(detail) ? "" : detail)));
                 }
             }
             finally
@@ -2617,16 +2840,11 @@ namespace MediaPlayerCore.YtDlp
                 }
 
                 // Partial install (e.g. user denied Deno network permission) — remove and retry.
-                try
+                KillPluginDenoProcesses();
+                if (!await TryDeleteDirectoryRobustAsync(BgutilNodeModulesDir).ConfigureAwait(false))
                 {
-                    Directory.Delete(BgutilNodeModulesDir, true);
-                }
-                catch (Exception ex)
-                {
-                    OnError?.Invoke(this, new Exception(
-                        "PO Token provider setup looks incomplete. Close the game, delete the " +
-                        "'bgutil-pot-provider/server/node_modules' folder in the plugin directory, then restart.",
-                        ex));
+                    OnError?.Invoke(this, CreateBgutilResetFailedException(
+                        new IOException($"Access denied while deleting {BgutilNodeModulesDir}")));
                     return false;
                 }
             }
@@ -2640,7 +2858,7 @@ namespace MediaPlayerCore.YtDlp
             OnStatusUpdate?.Invoke(this, "Setting up PO Token provider (first run may take 1-2 minutes)...");
             var (ok, output) = await RunProcessAsync(
                 DenoExecutablePath,
-                "install --allow-scripts --frozen",
+                "install --allow-scripts=npm:canvas --frozen",
                 BgutilServerWorkDir,
                 TimeSpan.FromMinutes(10));
 
@@ -2669,17 +2887,22 @@ namespace MediaPlayerCore.YtDlp
             {
                 try
                 {
-                    if (!_bgutilServerProcess.HasExited) return;
+                    if (!_bgutilServerProcess.HasExited)
+                    {
+                        _bgutilServerProcess.Kill(true);
+                    }
                 }
                 catch { }
                 _bgutilServerProcess.Dispose();
                 _bgutilServerProcess = null;
             }
 
+            _bgutilServerLog.Clear();
+
             var psi = new ProcessStartInfo
             {
                 FileName = DenoExecutablePath,
-                Arguments = "run --allow-env --allow-net --allow-ffi=. --allow-read=. ../src/main.ts",
+                Arguments = "run --allow-env --allow-net --allow-ffi=. --allow-read=. ../src/main.ts -p 4416",
                 WorkingDirectory = BgutilNodeModulesDir,
                 UseShellExecute = false,
                 CreateNoWindow = true,
@@ -2693,10 +2916,15 @@ namespace MediaPlayerCore.YtDlp
                 throw new Exception("Failed to start PO Token provider server process.");
             }
 
-            _bgutilServerProcess.OutputDataReceived += (_, e) => { /* discard */ };
+            _bgutilServerProcess.OutputDataReceived += (_, e) =>
+            {
+                if (string.IsNullOrEmpty(e.Data)) return;
+                AppendBgutilServerLog(e.Data);
+            };
             _bgutilServerProcess.ErrorDataReceived += (_, e) =>
             {
                 if (string.IsNullOrEmpty(e.Data)) return;
+                AppendBgutilServerLog(e.Data);
                 if (e.Data.Contains("EADDRINUSE", StringComparison.OrdinalIgnoreCase)
                     || e.Data.Contains("falling back", StringComparison.OrdinalIgnoreCase))
                 {
@@ -2708,28 +2936,112 @@ namespace MediaPlayerCore.YtDlp
             _bgutilServerProcess.BeginErrorReadLine();
         }
 
-        private static async Task<bool> IsBgutilServerRespondingAsync()
+        private void AppendBgutilServerLog(string line)
         {
-            try
+            lock (_bgutilServerLog)
             {
-                using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(2) };
-                using var response = await client.GetAsync("http://127.0.0.1:4416/ping");
-                return response.IsSuccessStatusCode;
+                if (_bgutilServerLog.Length > 0)
+                {
+                    _bgutilServerLog.AppendLine();
+                }
+
+                _bgutilServerLog.Append(line);
+                if (_bgutilServerLog.Length > 8000)
+                {
+                    _bgutilServerLog.Remove(0, _bgutilServerLog.Length - 8000);
+                }
             }
-            catch
+        }
+
+        private string GetBgutilServerLogExcerpt()
+        {
+            lock (_bgutilServerLog)
+            {
+                if (_bgutilServerLog.Length == 0)
+                {
+                    return string.Empty;
+                }
+
+                string text = _bgutilServerLog.ToString().Trim();
+                if (text.Length > 600)
+                {
+                    text = text[^600..];
+                }
+
+                return "Server log: " + text;
+            }
+        }
+
+        private bool TryGetBgutilProcessExitReason(out string reason)
+        {
+            reason = string.Empty;
+            if (_bgutilServerProcess == null)
             {
                 return false;
             }
+
+            try
+            {
+                if (_bgutilServerProcess.HasExited)
+                {
+                    reason = $"PO Token server process exited with code {_bgutilServerProcess.ExitCode}.";
+                    return true;
+                }
+            }
+            catch (InvalidOperationException)
+            {
+            }
+
+            return false;
+        }
+
+        private static readonly string[] BgutilPingUrls =
+        {
+            "http://127.0.0.1:4416/ping",
+            "http://localhost:4416/ping",
+            "http://[::1]:4416/ping",
+        };
+
+        private static async Task<bool> IsBgutilServerRespondingAsync()
+        {
+            using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(2) };
+            foreach (string url in BgutilPingUrls)
+            {
+                try
+                {
+                    using var response = await client.GetAsync(url);
+                    if (response.IsSuccessStatusCode)
+                    {
+                        return true;
+                    }
+                }
+                catch
+                {
+                }
+            }
+
+            return false;
         }
 
         private async Task<bool> WaitForBgutilServerReadyAsync()
         {
-            var deadline = DateTime.UtcNow.AddSeconds(45);
+            var deadline = DateTime.UtcNow.AddSeconds(90);
             while (DateTime.UtcNow < deadline)
             {
-                if (await IsBgutilServerRespondingAsync()) return true;
+                if (TryGetBgutilProcessExitReason(out string exitReason))
+                {
+                    AppendBgutilServerLog(exitReason);
+                    return false;
+                }
+
+                if (await IsBgutilServerRespondingAsync())
+                {
+                    return true;
+                }
+
                 await Task.Delay(500);
             }
+
             return false;
         }
 

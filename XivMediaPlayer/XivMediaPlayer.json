@@ -3,6 +3,6 @@
   "Name": "XivMediaPlayer",
   "Description": "Standalone media player plugin with Twitch, RTMP, and yt-dlp stream playback integrated into FFXIV.",
   "Punchline": "Watch Twitch streams and play media right inside FFXIV!",
-  "RepoUrl": "",
+  "RepoUrl": "https://github.com/Sebane1/XivMediaPlayer",
   "Tags": [ "media", "twitch", "stream", "video", "vlc" ]
 }

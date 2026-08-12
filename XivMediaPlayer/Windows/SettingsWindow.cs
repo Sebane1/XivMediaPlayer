@@ -10,6 +10,7 @@ namespace XivMediaPlayer.Windows {
     private Plugin _plugin;
     private Action _onVolumeFix;
     private string _diagnosticUserNote = string.Empty;
+    private DateTime _lastDiagnosticEligibilityRefreshUtc = DateTime.MinValue;
 
     public SettingsWindow(Plugin plugin, Action onVolumeFix = null) :
       base("Media Player Settings", ImGuiWindowFlags.NoCollapse, false) {
@@ -474,11 +475,22 @@ namespace XivMediaPlayer.Windows {
 
     private void DrawDiagnosticReportSection()
     {
+      if ((DateTime.UtcNow - _lastDiagnosticEligibilityRefreshUtc).TotalSeconds >= 60)
+      {
+        _lastDiagnosticEligibilityRefreshUtc = DateTime.UtcNow;
+        _plugin.RefreshDiagnosticReportEligibility();
+      }
+
       ImGui.Spacing();
       ImGui.TextColored(new Vector4(0.7f, 0.9f, 1.0f, 1.0f), Localize("Error reports"));
       ImGui.Separator();
       ImGui.TextWrapped(
         Localize("If something isn't working, you can send recent plugin warnings and errors from your Dalamud log. Only XivMediaPlayer messages are included, not your whole log file."));
+
+      if (!string.IsNullOrWhiteSpace(_plugin.DiagnosticReportBlockReason))
+      {
+        ImGui.TextColored(new Vector4(1f, 0.45f, 0.35f, 1f), _plugin.DiagnosticReportBlockReason);
+      }
 
       if (_plugin.HasPendingDiagnosticReports)
       {
@@ -491,6 +503,10 @@ namespace XivMediaPlayer.Windows {
       }
 
       bool autoSend = _plugin.Config.AutoSendDiagnosticLogs;
+      if (!_plugin.CanSendDiagnosticReports)
+      {
+        ImGui.BeginDisabled();
+      }
       if (ImGui.Checkbox(Localize("Automatically send error reports"), ref autoSend))
       {
         _plugin.Config.AutoSendDiagnosticLogs = autoSend;
@@ -500,20 +516,36 @@ namespace XivMediaPlayer.Windows {
       {
         ImGui.SetTooltip(Localize("When enabled, recent plugin errors are uploaded automatically (at most once every 10 minutes)."));
       }
+      if (!_plugin.CanSendDiagnosticReports)
+      {
+        ImGui.EndDisabled();
+      }
 
       ImGui.InputText(Localize("What went wrong? (optional)"), ref _diagnosticUserNote, 256);
 
+      bool canSend = _plugin.CanSendDiagnosticReports;
       if (_plugin.IsSendingDiagnosticLogs)
       {
         ImGui.BeginDisabled();
         ImGui.Button(Localize("Sending error report..."));
         ImGui.EndDisabled();
       }
-      else if (ImGui.Button(Localize("Send error report")))
+      else
       {
-        string note = _diagnosticUserNote;
-        _plugin.SendDiagnosticReport(note);
-        _diagnosticUserNote = string.Empty;
+        if (!canSend)
+        {
+          ImGui.BeginDisabled();
+        }
+        if (ImGui.Button(Localize("Send error report")))
+        {
+          string note = _diagnosticUserNote;
+          _plugin.SendDiagnosticReport(note);
+          _diagnosticUserNote = string.Empty;
+        }
+        if (!canSend)
+        {
+          ImGui.EndDisabled();
+        }
       }
     }
 
