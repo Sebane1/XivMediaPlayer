@@ -64,7 +64,20 @@ using (var scope = app.Services.CreateScope())
         if (idPkCols.Any() && idPkCols[0] == "Id" && !history.Contains("20260812030000_MultiTvPlacements"))
         {
             db.Database.ExecuteSqlRaw("INSERT INTO \"__EFMigrationsHistory\" (\"MigrationId\", \"ProductVersion\") VALUES ('20260812030000_MultiTvPlacements', '10.0.8');");
-        }    }
+        }
+
+        var venueTables = db.Database.SqlQueryRaw<string>("SELECT name FROM sqlite_master WHERE type='table' AND name='RoomVenueSettings'").ToList();
+        if (venueTables.Any() && !history.Contains("20260812040000_VenueBrandingAndBanners"))
+        {
+            db.Database.ExecuteSqlRaw("INSERT INTO \"__EFMigrationsHistory\" (\"MigrationId\", \"ProductVersion\") VALUES ('20260812040000_VenueBrandingAndBanners', '10.0.8');");
+        }
+
+        var scaleAspectCols = db.Database.SqlQueryRaw<string>("SELECT name FROM pragma_table_info('TvPlacements') WHERE name='ScaleAspectMode'").ToList();
+        if (scaleAspectCols.Any() && !history.Contains("20260812050000_TvScaleAspectMode"))
+        {
+            db.Database.ExecuteSqlRaw("INSERT INTO \"__EFMigrationsHistory\" (\"MigrationId\", \"ProductVersion\") VALUES ('20260812050000_TvScaleAspectMode', '10.0.8');");
+        }
+    }
 
     db.Database.Migrate();
 }

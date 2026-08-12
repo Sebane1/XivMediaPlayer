@@ -2800,6 +2800,27 @@ namespace XivMediaPlayer
             };
         }
 
+        internal static BannerPlacement CopyBannerPlacementForSync(BannerPlacement source)
+        {
+            return new BannerPlacement
+            {
+                Id = source.Id,
+                LocationKey = source.LocationKey,
+                PositionX = source.PositionX,
+                PositionY = source.PositionY,
+                PositionZ = source.PositionZ,
+                RotationX = source.RotationX,
+                RotationY = source.RotationY,
+                RotationZ = source.RotationZ,
+                ScaleX = source.ScaleX,
+                ScaleY = source.ScaleY,
+                ImageUrl = source.ImageUrl,
+                Opacity = source.Opacity,
+                OwnerId = source.OwnerId,
+                BypassLock = source.BypassLock
+            };
+        }
+
         internal static TvPlacement CloneTvPlacement(TvPlacement source, string locationKey)
         {
             return new TvPlacement
@@ -3413,6 +3434,11 @@ namespace XivMediaPlayer
                 .Select(CopyTvPlacementForSync)
                 .ToList();
 
+            var pendingBannerSnapshot = _roomBannerPlacements
+                .Where(b => IsValidBannerPlacement(b) && b.LocationKey == primaryKey)
+                .Select(CopyBannerPlacementForSync)
+                .ToList();
+
             var tvs = await ServerClient.GetTvsBatchAsync(keys);
             var nearbySnapshot = tvs?.Where(t => t != null).ToList() ?? new List<TvPlacement>();
 
@@ -3465,6 +3491,21 @@ namespace XivMediaPlayer
 
             var venueSettings = await ServerClient.GetVenueSettingsAsync(primaryKey);
             var banners = await ServerClient.GetBannersForRoomAsync(primaryKey);
+
+            var serverBannerIds = new HashSet<string>(banners.Select(b => b.Id));
+            var pendingLocalBanners = pendingBannerSnapshot
+                .Where(b => !serverBannerIds.Contains(b.Id))
+                .ToList();
+
+            var mergedBanners = new List<BannerPlacement>(banners);
+            foreach (var localBanner in pendingLocalBanners)
+            {
+                if (!mergedBanners.Any(b => b.Id == localBanner.Id))
+                {
+                    mergedBanners.Add(localBanner);
+                }
+            }
+
             var roomTvsSnapshot = roomTvs.ToList();
             var nearbyCopy = nearbySnapshot.ToList();
 
@@ -3513,8 +3554,8 @@ namespace XivMediaPlayer
                 }
 
                 _roomBannerPlacements.Clear();
-                _roomBannerPlacements.AddRange(banners);
-                foreach (var banner in banners)
+                _roomBannerPlacements.AddRange(mergedBanners);
+                foreach (var banner in mergedBanners)
                 {
                     if (!string.IsNullOrWhiteSpace(banner.ImageUrl))
                     {

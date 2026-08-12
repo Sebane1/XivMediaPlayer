@@ -279,6 +279,9 @@ namespace XivMediaPlayer.Networking
                 {
                     return await response.Content.ReadFromJsonAsync<BannerPlacement>();
                 }
+
+                var errorBody = await response.Content.ReadAsStringAsync();
+                _log.Error($"Failed to register banner for room {locationKey} ({(int)response.StatusCode}): {errorBody}");
             }
             catch (UnauthorizedAccessException) { throw; }
             catch (Exception ex)

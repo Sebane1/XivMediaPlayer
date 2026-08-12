@@ -226,7 +226,7 @@ namespace XivMediaPlayer.Server.Controllers
             var existing = await _db.BannerPlacements.FirstOrDefaultAsync(
                 b => b.LocationKey == locationKey && b.Id == placement.Id);
 
-            if (existing != null && !create)
+            if (existing != null)
             {
                 if (existing.OwnerId != placement.OwnerId && !placement.BypassLock)
                 {
