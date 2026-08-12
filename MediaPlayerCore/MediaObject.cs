@@ -7,6 +7,7 @@ using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.Advanced;
 using SixLabors.ImageSharp.PixelFormats;
 using System.Diagnostics;
+using System.IO;
 using System.IO.MemoryMappedFiles;
 using System.Numerics;
 using System.Runtime.InteropServices;
@@ -380,6 +381,21 @@ namespace MediaPlayerCore {
         || mediaPath.StartsWith("rtmp", StringComparison.OrdinalIgnoreCase)
         || mediaPath.StartsWith("rtsp", StringComparison.OrdinalIgnoreCase);
 
+    private bool TryResolvePlaybackPath(ref string mediaPath)
+    {
+      mediaPath = _parent.ResolvePlaybackPath(mediaPath);
+      if (!YtDlpManager.IsSabrLocalFile(mediaPath) || File.Exists(mediaPath))
+      {
+        return true;
+      }
+
+      OnErrorReceived?.Invoke(this, new MediaError()
+      {
+        Exception = new FileNotFoundException($"SABR file not ready: {mediaPath}"),
+      });
+      return false;
+    }
+
     private static bool IsHlsMediaPath(string mediaPath)
       => YtDlpManager.IsHlsStreamUrl(mediaPath)
         || mediaPath.Contains("/stream.m3u8", StringComparison.OrdinalIgnoreCase);
@@ -421,6 +437,11 @@ namespace MediaPlayerCore {
               } else {
                 startTimeMs = PrepareSabrResumeSeek(mediaPath, startTimeMs);
               }
+              if (!TryResolvePlaybackPath(ref mediaPath))
+              {
+                return;
+              }
+              _soundPath = mediaPath;
               lock (_parent.FrameLock) {
                 _parent.LastFrame = Array.Empty<byte>();
                 _parent.LastFrameWidth = 0;
@@ -615,6 +636,11 @@ namespace MediaPlayerCore {
             } else {
               startTimeMs = PrepareSabrResumeSeek(soundPath, startTimeMs);
             }
+            if (!TryResolvePlaybackPath(ref soundPath))
+            {
+              return;
+            }
+            _soundPath = soundPath;
             var media = new Media(libVLC, soundPath, IsNetworkMediaPath(soundPath)
                      ? FromType.FromLocation : FromType.FromPath);
             

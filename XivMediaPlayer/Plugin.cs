@@ -1110,6 +1110,7 @@ namespace XivMediaPlayer
             _mediaManager = new MediaManager(_playerObject, _playerCamera, _dependencyManager.DependenciesDir);
             _mediaManager.SeekTimeClamper = ClampSeekTimeMs;
             _mediaManager.IsSabrDownloadActive = path => _ytDlpManager?.IsSabrDownloadActiveForPath(path) == true;
+            _mediaManager.ResolveSabrPlayPath = path => _ytDlpManager?.ResolveSabrPlayPathForVlc(path);
             _mediaManager.OnErrorReceived += OnMediaError;
             _mediaManager.OnNewMediaTriggered += _mediaManager_OnNewMediaTriggered;
             _mediaManager.OnPlaybackFinished += _mediaManager_OnPlaybackFinished;

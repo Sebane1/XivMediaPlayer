@@ -859,7 +859,7 @@ namespace MediaPlayerCore.YtDlp
             }
 
             bool ready = await Task.Run(() => WaitForSabrData(session));
-            string? localPath = FindSabrOutputFile(session);
+            string? localPath = ResolveSabrPlayPathForVlc(session);
             if (localPath == null || !ready)
             {
                 return null;
@@ -867,6 +867,64 @@ namespace MediaPlayerCore.YtDlp
 
             OnStatusUpdate?.Invoke(this, "SABR buffer ready. Playing from local file.");
             return new string[] { localPath };
+        }
+
+        /// <summary>
+        /// Resolves the on-disk path VLC should open, handling temp→final rename races and failed mux cleanup.
+        /// </summary>
+        public string? ResolveSabrPlayPathForVlc(string? mediaPath)
+        {
+            if (string.IsNullOrEmpty(mediaPath) || !IsSabrLocalFile(mediaPath))
+            {
+                return mediaPath;
+            }
+
+            SabrSession? session = FindSabrSessionForPath(mediaPath);
+            if (session == null)
+            {
+                return File.Exists(mediaPath) ? mediaPath : null;
+            }
+
+            return ResolveSabrPlayPathForVlc(session);
+        }
+
+        private static string? ResolveSabrPlayPathForVlc(SabrSession session)
+        {
+            const long minPlayableBytes = 262144;
+            for (int attempt = 0; attempt < 40; attempt++)
+            {
+                string? path = FindSabrOutputFile(session);
+                if (path != null && File.Exists(path))
+                {
+                    long len = TryGetFileLength(path);
+                    if (len >= minPlayableBytes)
+                    {
+                        if (session.Failed
+                            && path.EndsWith(".temp.mkv", StringComparison.OrdinalIgnoreCase)
+                            && !IsDownloadStillRunning(session))
+                        {
+                            string merged = GetSabrMergedOutputPath(session);
+                            if (File.Exists(merged) && TryGetFileLength(merged) >= minPlayableBytes)
+                            {
+                                return merged;
+                            }
+
+                            return null;
+                        }
+
+                        return path;
+                    }
+                }
+
+                if (session.Failed && !IsDownloadStillRunning(session))
+                {
+                    break;
+                }
+
+                Thread.Sleep(100);
+            }
+
+            return null;
         }
 
         /// <summary>
@@ -2410,14 +2468,16 @@ namespace MediaPlayerCore.YtDlp
 
                 if (session.Failed)
                 {
-                    return len >= needBytes || (requiredOffset == 0 && len > 0);
+                    return len >= needBytes;
                 }
 
                 if (len >= needBytes) return true;
 
                 if (session.Process?.HasExited == true || session.DownloadFinished)
                 {
-                    return requiredOffset > 0 ? len > requiredOffset : len > 0;
+                    if (len >= needBytes) return true;
+                    if (requiredOffset > 0) return len > requiredOffset;
+                    return len >= minMergedBytes && !session.Failed;
                 }
 
                 Thread.Sleep(100);
@@ -2425,7 +2485,12 @@ namespace MediaPlayerCore.YtDlp
 
             ReportSabrBufferProgress(session, force: true);
             long finalLen = GetSabrOutputLength(session);
-            return requiredOffset > 0 ? finalLen > requiredOffset : finalLen >= minMergedBytes || finalLen > 0;
+            if (requiredOffset > 0)
+            {
+                return finalLen > requiredOffset;
+            }
+
+            return finalLen >= minMergedBytes && !session.Failed;
         }
 
         private static bool TryParseRangeHeader(string? rangeHeader, out long start, out long? end)

@@ -38,6 +38,15 @@ namespace MediaPlayerCore {
 
     /// <summary>Returns true while a SABR local file is still downloading.</summary>
     public Func<string, bool>? IsSabrDownloadActive { get; set; }
+
+    /// <summary>Re-resolves a SABR temp path to the current on-disk file (handles temp→final rename).</summary>
+    public Func<string, string?>? ResolveSabrPlayPath { get; set; }
+
+    public string ResolvePlaybackPath(string mediaPath)
+    {
+      string? resolved = ResolveSabrPlayPath?.Invoke(mediaPath);
+      return string.IsNullOrEmpty(resolved) ? mediaPath : resolved;
+    }
     
     public MediaObject? ActiveStream {
       get {
