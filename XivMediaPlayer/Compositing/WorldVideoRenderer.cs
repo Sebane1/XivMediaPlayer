@@ -7,6 +7,12 @@ using Dalamud.Plugin.Services;
 using System.Runtime.CompilerServices;
 
 namespace XivMediaPlayer.Compositing {
+  internal enum WorldTvRenderPass {
+    Full,
+    GlowOnly,
+    CompositeOnly
+  }
+
   /// <summary>
   /// Renders the VLC video frame as a textured quad in 3D world space.
   /// Supports two render modes:
@@ -41,6 +47,11 @@ namespace XivMediaPlayer.Compositing {
     public bool EnableGlow { get => _enableGlow; set => _enableGlow = value; }
 
     public bool EnableUiCulling { get => _enableUiCulling; set => _enableUiCulling = value; }
+
+    /// <summary>Clears shared corner jitter state before rendering another TV in the same frame.</summary>
+    public void ResetCornerStabilization() {
+      _lastCorners = null;
+    }
 
     public WorldScreenTransform Transform => _transform;
 
@@ -84,12 +95,14 @@ namespace XivMediaPlayer.Compositing {
       Vector3? cameraPos = null, Vector3? cameraForward = null, Vector3? cameraRight = null, Vector3? cameraUp = null,
       float fovY = MathF.PI / 4, float aspectRatio = 1.0f, UILayerCapture uiCapture = null, float nearPlane = 0.1f, float farPlane = 10000f,
       Vector2? hoverUV = null, float progress = 0f, float bufferProgress = 1f, float playbackState = 0f, float lockState = 1.0f, float volume = 1.0f, IntPtr titleSrvPtr = default, bool isLooping = false, bool isShuffle = false, float time = 0f, float showScreensaver = 0f, bool useDifferenceFallback = false,
-      Matrix4x4? viewProjMatrix = null, Vector2? viewportPos = null, Vector2? viewportSize = null, float uiBlendThreshold = 0.0f, float loadingPulse = 0f, bool isLoadingOverlay = false, IntPtr idleBrandingSrvPtr = default, float idleBrandingAspect = 1.0f) {
+      Matrix4x4? viewProjMatrix = null, Vector2? viewportPos = null, Vector2? viewportSize = null, float uiBlendThreshold = 0.0f, float loadingPulse = 0f, bool isLoadingOverlay = false, IntPtr idleBrandingSrvPtr = default, float idleBrandingAspect = 1.0f,
+      WorldTvRenderPass renderPass = WorldTvRenderPass.Full) {
 
       if (_disposed || !IsActive || textureSrv == IntPtr.Zero) return;
       
       var drawList = Dalamud.Bindings.ImGui.ImGui.GetBackgroundDrawList(ImGui.GetMainViewport());
       int initialCmdSize = drawList.CmdBuffer.Size;
+      bool pushCompositeToFront = renderPass != WorldTvRenderPass.GlowOnly;
 
       float trueVidHeight = textureTrueHeight > 0 ? textureTrueHeight : 0;
       float trueVidWidth = textureTrueWidth > 0 ? textureTrueWidth : 0;
@@ -130,12 +143,14 @@ namespace XivMediaPlayer.Compositing {
         bool allCornersInFront = zTL > 0.1f && zTR > 0.1f && zBR > 0.1f && zBL > 0.1f;
 
         RenderWithOcclusion(textureSrv, depthCapture, cameraPos.Value,
-          cameraForward.Value, cameraRight.Value, cameraUp.Value, fovY, aspectRatio, uiCapture, nearPlane, farPlane, hoverUV, progress, bufferProgress, playbackState, lockState, volume, titleSrvPtr, isLooping, isShuffle, time, showScreensaver, videoAspect, allCornersInFront, useDifferenceFallback, viewProjMatrix, viewportPos, viewportSize, uiBlendThreshold, uvBottom, uvRight, loadingPulse, isLoadingOverlay, idleBrandingSrvPtr, idleBrandingAspect);
-      } else {
-        RenderScreenSpace(textureSrv, videoAspect, viewProjMatrix, viewportPos, viewportSize, uvBottom, uvRight);
+          cameraForward.Value, cameraRight.Value, cameraUp.Value, fovY, aspectRatio, uiCapture, nearPlane, farPlane, hoverUV, progress, bufferProgress, playbackState, lockState, volume, titleSrvPtr, isLooping, isShuffle, time, showScreensaver, videoAspect, allCornersInFront, useDifferenceFallback, viewProjMatrix, viewportPos, viewportSize, uiBlendThreshold, uvBottom, uvRight, loadingPulse, isLoadingOverlay, idleBrandingSrvPtr, idleBrandingAspect, renderPass);
+      } else if (renderPass != WorldTvRenderPass.CompositeOnly) {
+        RenderScreenSpace(textureSrv, videoAspect, viewProjMatrix, viewportPos, viewportSize, uvBottom, uvRight, renderPass);
       }
       
-      PushCommandsToFront(drawList, initialCmdSize);
+      if (pushCompositeToFront) {
+        PushCommandsToFront(drawList, initialCmdSize);
+      }
     }
 
     private unsafe void PushCommandsToFront(Dalamud.Bindings.ImGui.ImDrawListPtr drawList, int startIndex) {
@@ -300,7 +315,10 @@ namespace XivMediaPlayer.Compositing {
     private unsafe void RenderWithOcclusion(IntPtr textureSrv, DepthBufferCapture depthCapture,
       Vector3 cameraPos, Vector3 cameraForward, Vector3 cameraRight, Vector3 cameraUp, float fovY, float aspectRatio, UILayerCapture uiCapture,
       float nearPlane, float farPlane, Vector2? hoverUV, float progress, float bufferProgress, float playbackState, float lockState, float volume, IntPtr titleSrvPtr, bool isLooping, bool isShuffle, float time, float showScreensaver, float videoAspectRatio, bool allCornersInFront, bool useDifferenceFallback,
-      Matrix4x4? viewProjMatrix, Vector2? viewportPos, Vector2? viewportSize, float uiBlendThreshold, float uvBottom, float uvRight, float loadingPulse = 0f, bool isLoadingOverlay = false, IntPtr idleBrandingSrvPtr = default, float idleBrandingAspect = 1.0f) {
+      Matrix4x4? viewProjMatrix, Vector2? viewportPos, Vector2? viewportSize, float uiBlendThreshold, float uvBottom, float uvRight, float loadingPulse = 0f, bool isLoadingOverlay = false, IntPtr idleBrandingSrvPtr = default, float idleBrandingAspect = 1.0f,
+      WorldTvRenderPass renderPass = WorldTvRenderPass.Full) {
+      bool renderGlow = renderPass != WorldTvRenderPass.CompositeOnly;
+      bool renderComposite = renderPass != WorldTvRenderPass.GlowOnly;
       var (tl, tr, br, bl) = _transform.Corners;
       
       var rtm = FFXIVClientStructs.FFXIV.Client.Graphics.Render.RenderTargetManager.Instance();
@@ -357,11 +375,15 @@ namespace XivMediaPlayer.Compositing {
       var drawList = ImGui.GetBackgroundDrawList(ImGui.GetMainViewport());
 
       // Depth-tested halo behind the TV (drawn before the composited overlay).
-      if (_enableGlow && allCornersInFront) {
+      if (renderGlow && _enableGlow && allCornersInFront) {
         float visibility = ComputeVisibility(depthCapture, sTL, sTR, sBR, sBL, centerDepth);
         if (visibility > 0.05f) {
           RenderGlow(drawList, textureSrv, sTL, sTR, sBR, sBL, visibility);
         }
+      }
+
+      if (!renderComposite) {
+        return;
       }
 
         // Render standard UI layer (non-occluded TV UI)
@@ -497,7 +519,9 @@ namespace XivMediaPlayer.Compositing {
     /// <summary>
     /// Renders using ImGui screen-space projection (no occlusion).
     /// </summary>
-    private void RenderScreenSpace(IntPtr textureSrv, float videoAspect, Matrix4x4? viewProjMatrix, Vector2? viewportPos, Vector2? viewportSize, float uvBottom = 1.0f, float uvRight = 1.0f) {
+    private void RenderScreenSpace(IntPtr textureSrv, float videoAspect, Matrix4x4? viewProjMatrix, Vector2? viewportPos, Vector2? viewportSize, float uvBottom = 1.0f, float uvRight = 1.0f, WorldTvRenderPass renderPass = WorldTvRenderPass.Full) {
+      bool renderGlow = renderPass != WorldTvRenderPass.CompositeOnly;
+      bool renderComposite = renderPass != WorldTvRenderPass.GlowOnly;
       var (tl, tr, br, bl) = _transform.Corners;
 
       WorldToScreenClamped(tl, out var sTL, out _, viewProjMatrix, viewportPos, viewportSize);
@@ -510,8 +534,12 @@ namespace XivMediaPlayer.Compositing {
       var drawList = ImGui.GetBackgroundDrawList(ImGui.GetMainViewport());
 
       // Draw backlit glow layers behind the video
-      if (_enableGlow) {
+      if (renderGlow && _enableGlow) {
         RenderGlow(drawList, textureSrv, sTL, sTR, sBR, sBL, 1f); // no occlusion = full glow
+      }
+
+      if (!renderComposite) {
+        return;
       }
 
       // Build the TV texture coordinates based on aspect ratio

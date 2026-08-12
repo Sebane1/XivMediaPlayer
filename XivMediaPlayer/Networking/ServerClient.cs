@@ -77,6 +77,9 @@ namespace XivMediaPlayer.Networking
                 {
                     return await response.Content.ReadFromJsonAsync<TvPlacement>();
                 }
+
+                var errorBody = await response.Content.ReadAsStringAsync();
+                _log.Error($"Failed to register TV for room {locationKey} ({(int)response.StatusCode}): {errorBody}");
             }
             catch (Exception ex)
             {

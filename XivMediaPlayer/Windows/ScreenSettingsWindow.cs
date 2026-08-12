@@ -726,6 +726,7 @@ namespace XivMediaPlayer.Windows {
     }
 
     private DateTime _lastRegistrationTime = DateTime.MinValue;
+    private DateTime _lastAddScreenTime = DateTime.MinValue;
 
     private void DrawTvSelector(string locationKey) {
       var roomTvs = _plugin.RoomTvPlacements
@@ -787,20 +788,34 @@ namespace XivMediaPlayer.Windows {
     }
 
     public async void RegisterAdditionalTvAsync(string locationKey) {
-      if (!_enabled) return;
+      if (!_enabled) {
+        _statusMessage = "Enable Render in World before adding another screen.";
+        _statusColor = new Vector4(1, 0.3f, 0.3f, 1);
+        return;
+      }
 
-      if ((DateTime.UtcNow - _lastRegistrationTime).TotalSeconds < 2) return;
-      _lastRegistrationTime = DateTime.UtcNow;
+      if ((DateTime.UtcNow - _lastAddScreenTime).TotalSeconds < 1) return;
+      _lastAddScreenTime = DateTime.UtcNow;
 
       SyncToTransform();
       _plugin.ApplyWorkingTransformToCurrentSelection();
-      var placement = BuildPlacementFromTransform(locationKey, createNewId: true);
-      placement.PositionX += 2.0f;
 
       _statusMessage = "Adding another screen to this area...";
       _statusColor = new Vector4(1, 1, 1, 1);
 
       try {
+        var firstTv = _plugin.EnsureCurrentTvMaterialized(locationKey);
+        var syncedFirst = await _plugin.ServerClient.RegisterTvAsync(locationKey, firstTv, create: false);
+        if (syncedFirst == null) {
+          syncedFirst = await _plugin.ServerClient.RegisterTvAsync(locationKey, firstTv, create: true);
+        }
+        if (syncedFirst != null) {
+          _plugin.UpsertRoomTv(syncedFirst);
+        }
+
+        var placement = BuildPlacementFromTransform(locationKey, createNewId: true);
+        placement.PositionX += 2.0f;
+
         var result = await _plugin.ServerClient.RegisterTvAsync(locationKey, placement, create: true);
         if (result != null) {
           _plugin.UpsertRoomTv(result);
@@ -810,9 +825,17 @@ namespace XivMediaPlayer.Windows {
           _statusColor = new Vector4(0.3f, 1f, 0.3f, 1);
           PrintStatus("Added another screen for all visitors!");
         } else {
-          _statusMessage = "Saved locally, but failed to reach the sync server.";
+          _plugin.UpsertRoomTv(placement);
+          _plugin.SelectTvForEditing(placement);
+          SyncFromTransform();
+          _statusMessage = "Added screen locally, but the sync server rejected it. Is the server updated for multi-TV?";
           _statusColor = new Vector4(1, 0.6f, 0.2f, 1);
+          PrintStatusError("Added screen locally, but the sync server rejected it. Is the server updated for multi-TV?");
         }
+      } catch (UnauthorizedAccessException) {
+        _statusMessage = "Cannot add screen: the current TV is locked by its owner.";
+        _statusColor = new Vector4(1, 0.3f, 0.3f, 1);
+        PrintStatusError("Cannot add screen: the current TV is locked by its owner.");
       } catch (Exception) {
         _statusMessage = "Network error while adding screen.";
         _statusColor = new Vector4(1, 0.3f, 0.3f, 1);

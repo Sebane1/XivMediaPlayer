@@ -890,10 +890,10 @@ namespace XivMediaPlayer
                     _ = CommitManipulatorPlacementAsync();
                     _placementManipulator.ClearSelection();
 
-                    // Auto-save and register TV when closing the menu
+                    // Auto-save and register all TVs when closing the menu
                     if (!string.IsNullOrEmpty(LocationKey) && LocationKey.StartsWith("house_"))
                     {
-                        _screenSettingsWindow.RegisterTvAsync(LocationKey);
+                        _ = SyncAllRoomTvsAsync(LocationKey);
                     }
                 }
                 else
@@ -2624,6 +2624,113 @@ namespace XivMediaPlayer
             }
         }
 
+        internal TvPlacement BuildTvPlacementFromWorkingTransform(string locationKey, bool createNewId)
+        {
+            var transform = _worldRenderer!.Transform;
+            return new Networking.Models.TvPlacement
+            {
+                Id = createNewId ? Guid.NewGuid().ToString() : (CurrentTvPlacement?.Id ?? Guid.NewGuid().ToString()),
+                LocationKey = locationKey,
+                PositionX = transform.Position.X,
+                PositionY = transform.Position.Y,
+                PositionZ = transform.Position.Z,
+                RotationX = transform.RotationDegrees.X,
+                RotationY = transform.RotationDegrees.Y,
+                RotationZ = transform.RotationDegrees.Z,
+                ScaleX = transform.Scale.X,
+                ScaleY = transform.Scale.Y,
+                Opacity = transform.Opacity,
+                IsProjectorMode = transform.IsProjectorMode,
+                ScreensaverColorR = transform.ScreensaverColor.X,
+                ScreensaverColorG = transform.ScreensaverColor.Y,
+                ScreensaverColorB = transform.ScreensaverColor.Z,
+                ScreensaverStyle = transform.ScreensaverStyle,
+                OwnerId = _config.OwnerId,
+                IsLocked = CurrentTvPlacement?.IsLocked ?? (!locationKey.StartsWith("zone_") && !locationKey.StartsWith("island_")),
+                BypassLock = IsHousingMenuOpen || locationKey.StartsWith("zone_") || locationKey.StartsWith("island_")
+            };
+        }
+
+        internal TvPlacement EnsureCurrentTvMaterialized(string locationKey)
+        {
+            ApplyWorkingTransformToCurrentSelection();
+
+            var roomTvs = _roomTvPlacements
+                .Where(t => t != null && t.LocationKey == locationKey)
+                .ToList();
+
+            if (roomTvs.Count > 0)
+            {
+                if (CurrentTvPlacement == null || CurrentTvPlacement.LocationKey != locationKey)
+                {
+                    SelectTvForEditing(roomTvs[0]);
+                }
+
+                return CurrentTvPlacement!;
+            }
+
+            var tv = CurrentTvPlacement;
+            if (tv == null || string.IsNullOrEmpty(tv.Id) || tv.LocationKey != locationKey)
+            {
+                tv = BuildTvPlacementFromWorkingTransform(locationKey, createNewId: true);
+                CurrentTvPlacement = tv;
+            }
+            else
+            {
+                CopyTransformToTv(tv, _worldRenderer!.Transform);
+            }
+
+            UpsertRoomTv(tv);
+            return tv;
+        }
+
+        internal async Task SyncAllRoomTvsAsync(string locationKey)
+        {
+            if (string.IsNullOrEmpty(locationKey)) return;
+
+            ApplyWorkingTransformToCurrentSelection();
+            if (_worldRenderer?.Transform.Enabled == true)
+            {
+                EnsureCurrentTvMaterialized(locationKey);
+            }
+
+            var tvs = GetRoomTvsForPrimaryLocation();
+            if (tvs.Count == 0) return;
+
+            bool bypassLock = IsHousingMenuOpen || locationKey.StartsWith("zone_") || locationKey.StartsWith("island_");
+
+            foreach (var tv in tvs)
+            {
+                tv.BypassLock = bypassLock;
+                try
+                {
+                    var result = await ServerClient.RegisterTvAsync(locationKey, tv, create: false);
+                    if (result == null)
+                    {
+                        result = await ServerClient.RegisterTvAsync(locationKey, tv, create: true);
+                    }
+
+                    if (result != null)
+                    {
+                        UpsertRoomTv(result);
+                    }
+                }
+                catch (UnauthorizedAccessException)
+                {
+                    _pluginLog.Warning($"[Social] Skipped syncing locked TV {tv.Id} in {locationKey}.");
+                }
+                catch (Exception ex)
+                {
+                    _pluginLog.Warning(ex, $"[Social] Failed to sync TV {tv.Id} in {locationKey}.");
+                }
+            }
+
+            if (CurrentTvPlacement != null && tvs.Any(t => t.Id == CurrentTvPlacement.Id))
+            {
+                ApplyTvPlacementToRenderer(CurrentTvPlacement);
+            }
+        }
+
         private bool IsLiveEditingTv(TvPlacement tv)
         {
             return CurrentTvPlacement != null
@@ -2722,8 +2829,14 @@ namespace XivMediaPlayer
             _placementPickables.Clear();
             foreach (var tv in tvs)
             {
+                var transform = TvPlacementToTransform(tv);
+                if (IsLiveEditingTv(tv))
+                {
+                    transform = _worldRenderer!.Transform.Clone();
+                }
+
                 _placementPickables.Add(new Compositing.PlacementManipulator.Pickable(
-                    Compositing.PlacementManipulator.TargetType.Tv, tv.Id, TvPlacementToTransform(tv)));
+                    Compositing.PlacementManipulator.TargetType.Tv, tv.Id, transform));
             }
 
             foreach (var banner in banners)
@@ -2740,8 +2853,7 @@ namespace XivMediaPlayer
                 var tv = _roomTvPlacements.FirstOrDefault(t => t.Id == id);
                 if (tv != null)
                 {
-                    CurrentTvPlacement = tv;
-                    CurrentBannerPlacement = null;
+                    SelectTvForEditing(tv);
                 }
             }
             else if (type == Compositing.PlacementManipulator.TargetType.Banner)
@@ -2749,12 +2861,9 @@ namespace XivMediaPlayer
                 var banner = _roomBannerPlacements.FirstOrDefault(b => b.Id == id);
                 if (banner != null)
                 {
-                    CurrentBannerPlacement = banner;
+                    SelectBannerForEditing(banner);
                 }
             }
-
-            ApplyTransformToRenderer(_worldRenderer, transform);
-            _screenSettingsWindow?.SyncFromTransform();
         }
 
         private void OnPlacementTransformPreview(Compositing.PlacementManipulator.TargetType type, string id, WorldScreenTransform transform)
@@ -2959,9 +3068,32 @@ namespace XivMediaPlayer
                     .ToList();
             }
 
+            var serverRoomTvs = roomTvs.Where(IsValidTvPlacement).ToList();
+            var serverIds = new HashSet<string>(serverRoomTvs.Select(t => t.Id));
+            var pendingLocalTvs = _roomTvPlacements
+                .Where(t => IsValidTvPlacement(t)
+                    && t!.LocationKey == primaryKey
+                    && !serverIds.Contains(t.Id))
+                .ToList();
+
             _roomTvPlacements.Clear();
-            _roomTvPlacements.AddRange(roomTvs.Where(IsValidTvPlacement));
+            _roomTvPlacements.AddRange(serverRoomTvs);
+            foreach (var localTv in pendingLocalTvs)
+            {
+                if (!_roomTvPlacements.Any(t => t.Id == localTv.Id))
+                {
+                    _roomTvPlacements.Add(localTv);
+                }
+            }
+
             _roomTvPlacements.RemoveAll(t => t == null);
+            if (_roomTvPlacements.Count > serverRoomTvs.Count)
+            {
+                roomTvs = _roomTvPlacements
+                    .Where(t => t.LocationKey == primaryKey)
+                    .OrderBy(t => t.LastUpdated)
+                    .ToList();
+            }
 
             if (roomTvs.Count > 0)
             {
@@ -4351,25 +4483,36 @@ namespace XivMediaPlayer
 
                     if (roomTvsToRender.Count > 0)
                     {
-                        foreach (var tv in roomTvsToRender)
+                        bool multiTv = roomTvsToRender.Count > 1;
+                        var renderPasses = multiTv
+                            ? new[] { Compositing.WorldTvRenderPass.GlowOnly, Compositing.WorldTvRenderPass.CompositeOnly }
+                            : new[] { Compositing.WorldTvRenderPass.Full };
+
+                        foreach (var pass in renderPasses)
                         {
-                            if (!IsLiveEditingTv(tv))
+                            foreach (var tv in roomTvsToRender)
                             {
-                                ApplyTvPlacementToRenderer(tv);
+                                _worldRenderer.ResetCornerStabilization();
+
+                                if (!IsLiveEditingTv(tv))
+                                {
+                                    ApplyTvPlacementToRenderer(tv);
+                                }
+
+                                bool showOverlay = roomTvsToRender.Count == 1
+                                    || (!string.IsNullOrEmpty(_interactionTvId) && tv.Id == _interactionTvId)
+                                    || (hoveredTv != null && tv.Id == hoveredTv.Id);
+                                var screenHover = showOverlay ? hoverUV : new System.Numerics.Vector2(-1, -1);
+                                var screenOverlay = showOverlay ? srvPtr : IntPtr.Zero;
+
+                                _worldRenderer.Render(videoSrv, videoWidth, videoHeight, videoTrueWidth, videoTrueHeight, _depthCapture,
+                                    _prevCameraPos ?? cameraPos, _prevCameraForward ?? cameraForward, _prevCameraRight ?? cameraRight, _prevCameraUp ?? cameraUp,
+                                    fovY, aspectRatio, _uiCapture, nearPlane, farPlane, screenHover, progress, bufferProgress, playbackState, lockState, volume, screenOverlay, _config.LoopEnabled, _config.ShuffleEnabled, timeSeconds, showScreensaver, useDifferenceFallback: useDifferenceFallback,
+                                    viewProjMatrix: _prevViewProjMatrix ?? viewProjMatrix, viewportPos: mainViewport.Pos, viewportSize: mainViewport.Size, uiBlendThreshold: _config.UIBlendThreshold,
+                                    loadingPulse: IsMediaLoading ? MediaLoadingPulse : 0f, isLoadingOverlay: IsMediaLoading,
+                                    idleBrandingSrvPtr: idleBrandingSrv, idleBrandingAspect: idleBrandingAspect,
+                                    renderPass: pass);
                             }
-
-                            bool showOverlay = roomTvsToRender.Count == 1
-                                || (!string.IsNullOrEmpty(_interactionTvId) && tv.Id == _interactionTvId)
-                                || (hoveredTv != null && tv.Id == hoveredTv.Id);
-                            var screenHover = showOverlay ? hoverUV : new System.Numerics.Vector2(-1, -1);
-                            var screenOverlay = showOverlay ? srvPtr : IntPtr.Zero;
-
-                            _worldRenderer.Render(videoSrv, videoWidth, videoHeight, videoTrueWidth, videoTrueHeight, _depthCapture,
-                                _prevCameraPos ?? cameraPos, _prevCameraForward ?? cameraForward, _prevCameraRight ?? cameraRight, _prevCameraUp ?? cameraUp,
-                                fovY, aspectRatio, _uiCapture, nearPlane, farPlane, screenHover, progress, bufferProgress, playbackState, lockState, volume, screenOverlay, _config.LoopEnabled, _config.ShuffleEnabled, timeSeconds, showScreensaver, useDifferenceFallback: useDifferenceFallback,
-                                viewProjMatrix: _prevViewProjMatrix ?? viewProjMatrix, viewportPos: mainViewport.Pos, viewportSize: mainViewport.Size, uiBlendThreshold: _config.UIBlendThreshold,
-                                loadingPulse: IsMediaLoading ? MediaLoadingPulse : 0f, isLoadingOverlay: IsMediaLoading,
-                                idleBrandingSrvPtr: idleBrandingSrv, idleBrandingAspect: idleBrandingAspect);
                         }
                     }
                     else if (renderLocalLegacy)
