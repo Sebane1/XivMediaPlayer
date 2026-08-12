@@ -14,34 +14,27 @@ namespace XivMediaPlayer.Compositing
     {
         private readonly ITextureProvider _textureProvider;
         private IDalamudTextureWrap _titleTextureWrap;
-        private IDalamudTextureWrap[] _loadingFrameCache;
+        private IDalamudTextureWrap _loadingCompositeWrap;
         private string _lastTitle = "";
         private string _lastStreamer = "";
-        private string _cachedLoadingMessage = "";
+        private string _lastCompositeStatusMessage = "";
+        private long _lastStatusUploadTick;
         private int _cachedTranslationRevision = -1;
-        private int _loadingFrameIndex;
         private bool _showingLoadingOverlay;
         private bool _disposed = false;
 
-        private const int LoadingOverlayWidth = 960;
-        private const int LoadingOverlayHeight = 540;
-        /// <summary>Matches <c>(int)(pulse * 20)</c> steps from 0 through 20.</summary>
-        private const int LoadingFrameCount = 21;
+        // Half-res overlay keeps GPU uploads small; the panel is only a small centered HUD.
+        private const int LoadingOverlayWidth = 480;
+        private const int LoadingOverlayHeight = 270;
+        private const int MinStatusUploadIntervalMs = 750;
 
         public unsafe IntPtr TextureHandle
         {
             get
             {
-                IDalamudTextureWrap wrap;
-                if (_showingLoadingOverlay && _loadingFrameCache != null)
-                {
-                    int idx = Math.Clamp(_loadingFrameIndex, 0, _loadingFrameCache.Length - 1);
-                    wrap = _loadingFrameCache[idx];
-                }
-                else
-                {
-                    wrap = _titleTextureWrap;
-                }
+                IDalamudTextureWrap wrap = _showingLoadingOverlay
+                    ? _loadingCompositeWrap ?? _titleTextureWrap
+                    : _titleTextureWrap;
 
                 if (wrap == null) return IntPtr.Zero;
                 var handle = wrap.Handle;
@@ -75,156 +68,139 @@ namespace XivMediaPlayer.Compositing
                 displayText += $" - {_lastStreamer}";
             }
 
-            // We render to a 1920x1080 canvas to match standard 16:9 ratio. 
-            // This ensures it maps perfectly 1:1 with the VideoTexture UVs!
-            int width = 1920;
-            int height = 1080;
+            const int width = 1920;
+            const int height = 1080;
 
-            using var bmp = new Bitmap(width, height, PixelFormat.Format32bppArgb);
-            using var gfx = Graphics.FromImage(bmp);
-            
-            // High quality text rendering
-            gfx.SmoothingMode = SmoothingMode.HighQuality;
-            gfx.PixelOffsetMode = PixelOffsetMode.HighQuality;
-            gfx.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
-            
-            // Fully transparent background
-            gfx.Clear(Color.Transparent);
-
-            // Use a clean, modern font
-            using var font = new Font("Arial", 48, FontStyle.Bold, GraphicsUnit.Pixel);
-            using var brush = new SolidBrush(Color.White);
-            using var shadowBrush = new SolidBrush(Color.FromArgb(200, 0, 0, 0));
-
-            // Measure text to center it at the top
-            var stringFormat = new StringFormat
-            {
-                Alignment = StringAlignment.Center,
-                LineAlignment = StringAlignment.Near
-            };
-
-            // Draw at the top, slightly padded
-            var rect = new RectangleF(0, 40, width, height);
-            
-            // Draw a subtle dark shadow/outline for readability against bright videos
-            gfx.DrawString(displayText, font, shadowBrush, new RectangleF(2, 42, width, height), stringFormat);
-            gfx.DrawString(displayText, font, shadowBrush, new RectangleF(-2, 38, width, height), stringFormat);
-            gfx.DrawString(displayText, font, shadowBrush, new RectangleF(2, 38, width, height), stringFormat);
-            gfx.DrawString(displayText, font, shadowBrush, new RectangleF(-2, 42, width, height), stringFormat);
-            
-            // Draw the white text
-            gfx.DrawString(displayText, font, brush, rect, stringFormat);
-
-            // Extract the BGRA bytes
-            var bmpData = bmp.LockBits(new Rectangle(0, 0, width, height), ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
             try
             {
-                int bytes = Math.Abs(bmpData.Stride) * bmp.Height;
-                byte[] rawData = new byte[bytes];
-                Marshal.Copy(bmpData.Scan0, rawData, 0, bytes);
+                using var bmp = new Bitmap(width, height, PixelFormat.Format32bppArgb);
+                using (var gfx = Graphics.FromImage(bmp))
+                {
+                    gfx.SmoothingMode = SmoothingMode.HighQuality;
+                    gfx.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                    gfx.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
+                    gfx.Clear(Color.Transparent);
 
-                _titleTextureWrap = _textureProvider.CreateFromRaw(
-                    Dalamud.Interface.Textures.RawImageSpecification.Bgra32(width, height),
-                    rawData);
+                    using var font = new Font("Arial", 48, FontStyle.Bold, GraphicsUnit.Pixel);
+                    using var brush = new SolidBrush(Color.White);
+                    using var shadowBrush = new SolidBrush(Color.FromArgb(200, 0, 0, 0));
+
+                    var stringFormat = new StringFormat
+                    {
+                        Alignment = StringAlignment.Center,
+                        LineAlignment = StringAlignment.Near
+                    };
+
+                    var rect = new RectangleF(0, 40, width, height);
+
+                    gfx.DrawString(displayText, font, shadowBrush, new RectangleF(2, 42, width, height), stringFormat);
+                    gfx.DrawString(displayText, font, shadowBrush, new RectangleF(-2, 38, width, height), stringFormat);
+                    gfx.DrawString(displayText, font, shadowBrush, new RectangleF(2, 38, width, height), stringFormat);
+                    gfx.DrawString(displayText, font, shadowBrush, new RectangleF(-2, 42, width, height), stringFormat);
+                    gfx.DrawString(displayText, font, brush, rect, stringFormat);
+                }
+
+                _titleTextureWrap = CreateTextureFromBitmap(bmp, width, height);
             }
-            finally
+            catch (Exception)
             {
-                bmp.UnlockBits(bmpData);
             }
         }
 
         public void InvalidateLoadingCache()
         {
-            _cachedLoadingMessage = "";
+            _lastCompositeStatusMessage = "";
+            _lastStatusUploadTick = 0;
             _cachedTranslationRevision = -1;
+            _loadingCompositeWrap?.Dispose();
+            _loadingCompositeWrap = null;
         }
 
         /// <summary>
-        /// Selects a pre-baked loading overlay frame. The animation cycle is cached once per message.
+        /// Shows the 3D TV loading HUD. Uploads one small GPU texture when the status text changes.
+        /// Bar animation stays on the 2D player window (ImGui); this path avoids per-frame uploads.
         /// </summary>
-        public void UpdateLoadingOverlay(string message, float pulse, int translationRevision = 0)
+        public void UpdateLoadingOverlay(string message, int translationRevision = 0)
         {
             if (_disposed) return;
 
             if (translationRevision != _cachedTranslationRevision)
             {
                 _cachedTranslationRevision = translationRevision;
-                _cachedLoadingMessage = "";
+                _lastCompositeStatusMessage = "";
+                _lastStatusUploadTick = 0;
             }
 
             message = string.IsNullOrWhiteSpace(message) ? Translation.Get("Loading video...") : message;
-            int pulseStep = Math.Clamp((int)(pulse * 20), 0, LoadingFrameCount - 1);
 
-            if (message != _cachedLoadingMessage || _loadingFrameCache == null)
+            if (_loadingCompositeWrap != null && message == _lastCompositeStatusMessage)
             {
-                RebuildLoadingFrameCache(message);
-            }
-
-            if (_loadingFrameCache == null)
-            {
+                _showingLoadingOverlay = true;
+                _lastTitle = "";
+                _lastStreamer = "";
                 return;
             }
 
-            _showingLoadingOverlay = true;
-            _loadingFrameIndex = pulseStep;
-            _lastTitle = "";
-            _lastStreamer = "";
+            long now = Environment.TickCount64;
+            if (_loadingCompositeWrap != null
+                && now - _lastStatusUploadTick < MinStatusUploadIntervalMs)
+            {
+                _showingLoadingOverlay = true;
+                return;
+            }
 
-            _titleTextureWrap?.Dispose();
-            _titleTextureWrap = null;
-        }
-
-        private void RebuildLoadingFrameCache(string message)
-        {
-            DisposeLoadingFrameCache();
-            _cachedLoadingMessage = message;
-
-            var frames = new IDalamudTextureWrap[LoadingFrameCount];
             try
             {
-                for (int i = 0; i < LoadingFrameCount; i++)
+                IDalamudTextureWrap? composite = CreateLoadingCompositeTexture(message);
+                if (composite == null)
                 {
-                    float framePulse = i / (float)(LoadingFrameCount - 1);
-                    frames[i] = CreateLoadingFrameTexture(message, framePulse);
-                    if (frames[i] == null)
-                    {
-                        DisposeLoadingFrames(frames, i);
-                        _cachedLoadingMessage = "";
-                        return;
-                    }
+                    return;
                 }
 
-                _loadingFrameCache = frames;
+                _loadingCompositeWrap?.Dispose();
+                _loadingCompositeWrap = composite;
+                _lastCompositeStatusMessage = message;
+                _lastStatusUploadTick = now;
+                _showingLoadingOverlay = true;
+                _lastTitle = "";
+                _lastStreamer = "";
+                _titleTextureWrap?.Dispose();
+                _titleTextureWrap = null;
             }
-            catch (OutOfMemoryException)
+            catch (Exception)
             {
-                DisposeLoadingFrames(frames, frames.Length);
-                _cachedLoadingMessage = "";
+                _showingLoadingOverlay = _loadingCompositeWrap != null;
             }
         }
 
-        private IDalamudTextureWrap CreateLoadingFrameTexture(string message, float pulse)
+        private IDalamudTextureWrap? CreateLoadingCompositeTexture(string statusMessage)
         {
-            const int width = LoadingOverlayWidth;
-            const int height = LoadingOverlayHeight;
+            using var bmp = new Bitmap(LoadingOverlayWidth, LoadingOverlayHeight, PixelFormat.Format32bppArgb);
+            using (var gfx = Graphics.FromImage(bmp))
+            {
+                gfx.SmoothingMode = SmoothingMode.HighQuality;
+                gfx.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                gfx.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
+                gfx.Clear(Color.Transparent);
 
-            using var bmp = new Bitmap(width, height, PixelFormat.Format32bppArgb);
-            using var gfx = Graphics.FromImage(bmp);
+                DrawLoadingOverlayChrome(gfx, LoadingOverlayWidth, LoadingOverlayHeight);
+                DrawLoadingOverlayStatus(gfx, LoadingOverlayWidth, LoadingOverlayHeight, statusMessage);
+            }
 
-            gfx.SmoothingMode = SmoothingMode.HighQuality;
-            gfx.PixelOffsetMode = PixelOffsetMode.HighQuality;
-            gfx.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
-            gfx.Clear(Color.Transparent);
+            return CreateTextureFromBitmap(bmp, LoadingOverlayWidth, LoadingOverlayHeight);
+        }
 
+        private static void DrawLoadingOverlayChrome(Graphics gfx, int width, int height)
+        {
             using (var dimBrush = new SolidBrush(Color.FromArgb(170, 0, 0, 0)))
             {
                 gfx.FillRectangle(dimBrush, 0, 0, width, height);
             }
 
-            float panelWidth = 460;
-            float panelHeight = 110;
+            float panelWidth = 460f * width / 960f;
+            float panelHeight = 110f * height / 540f;
             float panelX = (width - panelWidth) * 0.5f;
-            float panelY = (height - panelHeight) * 0.5f - 10;
+            float panelY = (height - panelHeight) * 0.5f - (10f * height / 540f);
             using (var panelBrush = new SolidBrush(Color.FromArgb(210, 24, 24, 28)))
             using (var panelPen = new Pen(Color.FromArgb(180, 255, 255, 255), 1))
             {
@@ -232,39 +208,59 @@ namespace XivMediaPlayer.Compositing
                 gfx.DrawRectangle(panelPen, panelX, panelY, panelWidth, panelHeight);
             }
 
-            using var titleFont = new Font("Arial", 27, FontStyle.Bold, GraphicsUnit.Pixel);
-            using var subFont = new Font("Arial", 14, FontStyle.Regular, GraphicsUnit.Pixel);
+            using var titleFont = new Font("Arial", 14, FontStyle.Bold, GraphicsUnit.Pixel);
             using var textBrush = new SolidBrush(Color.White);
-            using var subBrush = new SolidBrush(Color.FromArgb(220, 210, 210, 210));
             var centerFormat = new StringFormat
             {
                 Alignment = StringAlignment.Center,
                 LineAlignment = StringAlignment.Center,
             };
 
-            var titleRect = new RectangleF(panelX + 12, panelY + 14, panelWidth - 24, 36);
-            var subRect = new RectangleF(panelX + 12, panelY + 48, panelWidth - 24, 20);
+            var titleRect = new RectangleF(panelX + 6, panelY + 7, panelWidth - 12, 18);
             gfx.DrawString(Translation.Get("Loading"), titleFont, textBrush, titleRect, centerFormat);
-            gfx.DrawString(message, subFont, subBrush, subRect, centerFormat);
 
-            float barX = panelX + 40;
-            float barY = panelY + panelHeight - 26;
-            float barW = panelWidth - 80;
-            float barH = 6;
+            float barX = panelX + 20;
+            float barY = panelY + panelHeight - 13;
+            float barW = panelWidth - 40;
+            float barH = 3;
             using (var trackBrush = new SolidBrush(Color.FromArgb(120, 255, 255, 255)))
             {
                 gfx.FillRectangle(trackBrush, barX, barY, barW, barH);
             }
+        }
 
-            float segmentW = barW * 0.35f;
-            float travel = barW - segmentW;
-            float segX = barX + travel * pulse;
-            using (var fillBrush = new SolidBrush(Color.FromArgb(255, 79, 195, 247)))
+        private static void DrawLoadingOverlayStatus(Graphics gfx, int width, int height, string statusMessage)
+        {
+            if (string.IsNullOrWhiteSpace(statusMessage))
             {
-                gfx.FillRectangle(fillBrush, segX, barY, segmentW, barH);
+                return;
             }
 
-            var bmpData = bmp.LockBits(new Rectangle(0, 0, width, height), ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+            float panelWidth = 460f * width / 960f;
+            float panelHeight = 110f * height / 540f;
+            float panelX = (width - panelWidth) * 0.5f;
+            float panelY = (height - panelHeight) * 0.5f - (10f * height / 540f);
+
+            using var subFont = new Font("Arial", 9, FontStyle.Regular, GraphicsUnit.Pixel);
+            using var subBrush = new SolidBrush(Color.FromArgb(220, 210, 210, 210));
+            var centerFormat = new StringFormat
+            {
+                Alignment = StringAlignment.Center,
+                LineAlignment = StringAlignment.Center,
+                Trimming = StringTrimming.EllipsisCharacter,
+                FormatFlags = StringFormatFlags.NoWrap,
+            };
+
+            var subRect = new RectangleF(panelX + 6, panelY + 24, panelWidth - 12, 10);
+            gfx.DrawString(statusMessage, subFont, subBrush, subRect, centerFormat);
+        }
+
+        private IDalamudTextureWrap? CreateTextureFromBitmap(Bitmap bmp, int width, int height)
+        {
+            var bmpData = bmp.LockBits(
+                new Rectangle(0, 0, width, height),
+                ImageLockMode.ReadOnly,
+                PixelFormat.Format32bppArgb);
             try
             {
                 int bytes = Math.Abs(bmpData.Stride) * bmp.Height;
@@ -284,24 +280,10 @@ namespace XivMediaPlayer.Compositing
         private void ClearLoadingOverlay()
         {
             _showingLoadingOverlay = false;
-            _loadingFrameIndex = 0;
-            _cachedLoadingMessage = "";
-            DisposeLoadingFrameCache();
-        }
-
-        private void DisposeLoadingFrameCache()
-        {
-            if (_loadingFrameCache == null) return;
-            DisposeLoadingFrames(_loadingFrameCache, _loadingFrameCache.Length);
-            _loadingFrameCache = null;
-        }
-
-        private static void DisposeLoadingFrames(IDalamudTextureWrap[] frames, int count)
-        {
-            for (int i = 0; i < count; i++)
-            {
-                frames[i]?.Dispose();
-            }
+            _lastCompositeStatusMessage = "";
+            _lastStatusUploadTick = 0;
+            _loadingCompositeWrap?.Dispose();
+            _loadingCompositeWrap = null;
         }
 
         public void Dispose()

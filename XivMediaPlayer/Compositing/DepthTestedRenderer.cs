@@ -89,8 +89,8 @@ namespace XivMediaPlayer.Compositing {
       public float UVRightEdge;
       public float EnableTvGlow;
       public float BufferProgress;
-      public float _cbufferPad0;
-      public float _cbufferPad1;
+      public float LoadingPulse;
+      public float IsLoadingOverlay;
       public float _cbufferPad2;
     }
 
@@ -157,8 +157,8 @@ cbuffer Constants : register(b0) {
   float UVRightEdge;
   float EnableTvGlow;
   float BufferProgress;
-  float _cbufferPad0;
-  float _cbufferPad1;
+  float LoadingPulse;
+  float IsLoadingOverlay;
   float _cbufferPad2;
 };
   
@@ -791,7 +791,25 @@ float4 PS(VS_OUT input) : SV_TARGET {
       // Blend title / loading texture flush onto the TV frame.
       if (HasTitleTexture > 0.5 && HoverUV.x >= 0.0 && HoverUV.y >= 0.0) {
           float4 titleColor = TitleTexture.Sample(VideoSampler, uv);
-          // Standard alpha blend
+
+          // Animated loading bar (matches 480x270 loading overlay layout; no per-frame texture uploads).
+          if (IsLoadingOverlay > 0.5) {
+              float barLeft = 0.302;
+              float barRight = 0.698;
+              float barTop = 0.535;
+              float barBottom = 0.546;
+              if (uv.x >= barLeft && uv.x <= barRight && uv.y >= barTop && uv.y <= barBottom) {
+                  float barW = barRight - barLeft;
+                  float segW = barW * 0.35;
+                  float travel = barW - segW;
+                  float segLeft = barLeft + travel * LoadingPulse;
+                  if (uv.x >= segLeft && uv.x <= segLeft + segW) {
+                      titleColor.rgb = float3(0.31, 0.76, 0.97);
+                      titleColor.a = max(titleColor.a, 0.95);
+                  }
+              }
+          }
+
           color.rgb = lerp(color.rgb, titleColor.rgb, titleColor.a);
       }
       
@@ -1350,7 +1368,7 @@ float4 PS(VS_OUT input) : SV_TARGET {
       float renderWidth, float renderHeight,
       List<(int X, int Y, int W, int H, string Name)> uiRects, IntPtr titleSrvPtr = default,
       bool isLooping = false, bool isShuffle = false, float time = 0, float showScreensaver = 0,
-      float videoAspectRatio = 0, IntPtr gbuffer2SrvPtr = default, IntPtr gbuffer3SrvPtr = default, IntPtr transparentUiSrvPtr = default, IntPtr vignetteExtrapolatedSrvPtr = default, bool useDifferenceFallback = false, float opacity = 1.0f, bool isProjectorMode = false, Vector3? screensaverColor = null, int screensaverStyle = 0, float uiBlendThreshold = 0.0f, float uvBottom = 1.0f, float uvRight = 1.0f, bool enableTvGlow = true) {
+      float videoAspectRatio = 0, IntPtr gbuffer2SrvPtr = default, IntPtr gbuffer3SrvPtr = default, IntPtr transparentUiSrvPtr = default, IntPtr vignetteExtrapolatedSrvPtr = default, bool useDifferenceFallback = false, float opacity = 1.0f, bool isProjectorMode = false, Vector3? screensaverColor = null, int screensaverStyle = 0, float uiBlendThreshold = 0.0f, float uvBottom = 1.0f, float uvRight = 1.0f, bool enableTvGlow = true, float loadingPulse = 0f, bool isLoadingOverlay = false) {
 
       if (!_initialized || _disposed || videoSrvPtr == IntPtr.Zero || depthSrv == null) return false;
 
@@ -1410,7 +1428,9 @@ float4 PS(VS_OUT input) : SV_TARGET {
           UIBlendThreshold = uiBlendThreshold,
           UVBottomEdge = uvBottom,
           UVRightEdge = uvRight,
-          EnableTvGlow = enableTvGlow ? 1.0f : 0.0f
+          EnableTvGlow = enableTvGlow ? 1.0f : 0.0f,
+          LoadingPulse = loadingPulse,
+          IsLoadingOverlay = isLoadingOverlay ? 1.0f : 0.0f,
         };
           _context.UpdateSubresource(constants, _constantBuffer);
 

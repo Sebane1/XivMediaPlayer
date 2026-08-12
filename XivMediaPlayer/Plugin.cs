@@ -1515,6 +1515,15 @@ namespace XivMediaPlayer
         /// </summary>
         public bool IsMediaLoading => ComputeIsMediaLoading();
 
+        private string _cachedMediaLoadingMessage = string.Empty;
+        private long _cachedMediaLoadingMessageTick;
+        private int _cachedMediaLoadingMessageRevision = -1;
+        private string? _sabrLoadingFormatWithPct;
+        private string? _sabrLoadingFormatMbOnly;
+        private string? _sabrLoadingFormatStarting;
+        private string? _sabrLoadingFormatPlain;
+        private int _sabrLoadingFormatRevision = -1;
+
         /// <summary>
         /// Human-readable buffering status for the loading overlay.
         /// </summary>
@@ -1651,6 +1660,23 @@ namespace XivMediaPlayer
 
         private string GetMediaLoadingMessage()
         {
+            long now = Environment.TickCount64;
+            if (_translationRevision == _cachedMediaLoadingMessageRevision
+                && now - _cachedMediaLoadingMessageTick < 250
+                && !string.IsNullOrEmpty(_cachedMediaLoadingMessage))
+            {
+                return _cachedMediaLoadingMessage;
+            }
+
+            string message = BuildMediaLoadingMessage();
+            _cachedMediaLoadingMessage = message;
+            _cachedMediaLoadingMessageTick = now;
+            _cachedMediaLoadingMessageRevision = _translationRevision;
+            return message;
+        }
+
+        private string BuildMediaLoadingMessage()
+        {
             if (_mediaManager?.ActiveStream?.IsPendingResumeSeek == true)
             {
                 return Translate("Buffering to resume position...");
@@ -1676,25 +1702,40 @@ namespace XivMediaPlayer
             return Translate("Loading video...");
         }
 
-        private string FormatSabrLoadingMessage(YtDlpManager.SabrBufferStatus status)
+        private void EnsureSabrLoadingFormats()
         {
-            double mb = status.BufferedBytes / (1024.0 * 1024.0);
-            if (status.DownloadPercent >= 0f)
+            if (_translationRevision == _sabrLoadingFormatRevision)
             {
-                return string.Format(
-                    Translate("SABR buffering... ({0:0.#} MB ready, {1:0}%)"),
-                    mb,
-                    status.DownloadPercent * 100f);
+                return;
             }
 
-            if (mb > 0.01)
+            _sabrLoadingFormatWithPct = Translate("SABR buffering... ({0:0.#} MB ready, {1:0}%)");
+            _sabrLoadingFormatMbOnly = Translate("SABR buffering... ({0:0.#} MB ready)");
+            _sabrLoadingFormatStarting = Translate("SABR buffering... starting download");
+            _sabrLoadingFormatPlain = Translate("SABR buffering...");
+            _sabrLoadingFormatRevision = _translationRevision;
+        }
+
+        private string FormatSabrLoadingMessage(YtDlpManager.SabrBufferStatus status)
+        {
+            EnsureSabrLoadingFormats();
+
+            double mb = status.BufferedBytes / (1024.0 * 1024.0);
+            double mbDisplay = Math.Floor(mb * 2.0) / 2.0;
+            if (status.DownloadPercent >= 0f)
             {
-                return string.Format(Translate("SABR buffering... ({0:0.#} MB ready)"), mb);
+                float pctDisplay = (float)(Math.Floor(status.DownloadPercent * 100f / 5f) * 5f);
+                return string.Format(_sabrLoadingFormatWithPct!, mbDisplay, pctDisplay);
+            }
+
+            if (mbDisplay > 0.01)
+            {
+                return string.Format(_sabrLoadingFormatMbOnly!, mbDisplay);
             }
 
             return status.IsDownloading
-                ? Translate("SABR buffering... starting download")
-                : Translate("SABR buffering...");
+                ? _sabrLoadingFormatStarting!
+                : _sabrLoadingFormatPlain!;
         }
 
         private void ResetPlaybackEnsureState()
@@ -3720,7 +3761,7 @@ namespace XivMediaPlayer
                     {
                         if (IsMediaLoading)
                         {
-                            _titleTextureManager.UpdateLoadingOverlay(MediaLoadingMessage, MediaLoadingPulse, _translationRevision);
+                            _titleTextureManager.UpdateLoadingOverlay(MediaLoadingMessage, _translationRevision);
                         }
                         else
                         {
@@ -3762,7 +3803,8 @@ namespace XivMediaPlayer
                     _worldRenderer.Render(videoSrv, videoWidth, videoHeight, videoTrueWidth, videoTrueHeight, _depthCapture, 
                         _prevCameraPos ?? cameraPos, _prevCameraForward ?? cameraForward, _prevCameraRight ?? cameraRight, _prevCameraUp ?? cameraUp, 
                         fovY, aspectRatio, _uiCapture, nearPlane, farPlane, hoverUV, progress, bufferProgress, playbackState, lockState, volume, srvPtr, _config.LoopEnabled, _config.ShuffleEnabled, timeSeconds, showScreensaver, useDifferenceFallback: useDifferenceFallback, 
-                        viewProjMatrix: _prevViewProjMatrix ?? viewProjMatrix, viewportPos: mainViewport.Pos, viewportSize: mainViewport.Size, uiBlendThreshold: _config.UIBlendThreshold);
+                        viewProjMatrix: _prevViewProjMatrix ?? viewProjMatrix, viewportPos: mainViewport.Pos, viewportSize: mainViewport.Size, uiBlendThreshold: _config.UIBlendThreshold,
+                        loadingPulse: IsMediaLoading ? MediaLoadingPulse : 0f, isLoadingOverlay: IsMediaLoading);
                         
                     _prevCameraPos = cameraPos;
                     _prevCameraForward = cameraForward;

@@ -111,6 +111,8 @@ namespace MediaPlayerCore.YtDlp
             public long LastReportedBytes = -1;
             public float LastReportedPercent = -1f;
             public long LastStatusReportTick;
+            public long LastDirectoryScanTick;
+            public long CachedBufferedBytes;
             public string? Error { get; set; }
             public int StreamConsumers;
             public DateTime LastAccessUtc { get; set; } = DateTime.UtcNow;
@@ -157,7 +159,7 @@ namespace MediaPlayerCore.YtDlp
 
                 status = new SabrBufferStatus
                 {
-                    BufferedBytes = GetSabrBufferedBytes(session),
+                    BufferedBytes = GetCachedSabrBufferedBytes(session),
                     IsDownloading = IsDownloadStillRunning(session),
                     DownloadPercent = session.DownloadPercent,
                 };
@@ -165,6 +167,21 @@ namespace MediaPlayerCore.YtDlp
             }
 
             return false;
+        }
+
+        private static long GetCachedSabrBufferedBytes(SabrSession session)
+        {
+            if (session.CachedBufferedBytes > 0)
+            {
+                return session.CachedBufferedBytes;
+            }
+
+            if (session.LastReportedBytes > 0)
+            {
+                return session.LastReportedBytes;
+            }
+
+            return GetSabrOutputLength(session);
         }
 
         private static bool SessionMatchesMediaPath(SabrSession session, string mediaPath)
@@ -179,11 +196,20 @@ namespace MediaPlayerCore.YtDlp
                 && string.Equals(output, mediaPath, StringComparison.OrdinalIgnoreCase);
         }
 
-        private static long GetSabrBufferedBytes(SabrSession session)
+        private long GetSabrBufferedBytes(SabrSession session, bool allowDirectoryScan = false)
         {
             long muxBytes = GetSabrOutputLength(session);
-            long dirBytes = GetDirectorySizeBytes(session.TempDir);
-            long best = Math.Max(muxBytes, dirBytes);
+            long best = muxBytes;
+            long now = Environment.TickCount64;
+
+            if (allowDirectoryScan
+                && muxBytes < 262144
+                && now - session.LastDirectoryScanTick > 2000)
+            {
+                session.LastDirectoryScanTick = now;
+                long dirBytes = GetDirectorySizeBytes(session.TempDir);
+                best = Math.Max(best, dirBytes);
+            }
 
             if (session.DownloadPercent >= 0f && session.EstimatedFinalBytes > 0)
             {
@@ -191,18 +217,25 @@ namespace MediaPlayerCore.YtDlp
                 best = Math.Max(best, estimated);
             }
 
+            if (best > 0)
+            {
+                session.CachedBufferedBytes = best;
+            }
+
             return best;
         }
 
         private void ReportSabrBufferProgress(SabrSession session, bool force = false)
         {
-            long bytes = GetSabrBufferedBytes(session);
-            float pct = session.DownloadPercent;
             long now = Environment.TickCount64;
-
-            bool bytesChanged = bytes != session.LastReportedBytes;
-            bool pctChanged = pct >= 0f && Math.Abs(pct - session.LastReportedPercent) > 0.01f;
             bool timeElapsed = now - session.LastStatusReportTick > 2000;
+            long bytes = GetSabrBufferedBytes(session, allowDirectoryScan: force || timeElapsed);
+            float pct = session.DownloadPercent;
+
+            const long minByteDelta = 512 * 1024;
+            bool bytesChanged = session.LastReportedBytes < 0
+                || bytes - session.LastReportedBytes >= minByteDelta;
+            bool pctChanged = pct >= 0f && Math.Abs(pct - session.LastReportedPercent) > 0.05f;
 
             if (!force && !bytesChanged && !pctChanged && !timeElapsed)
             {
@@ -212,6 +245,7 @@ namespace MediaPlayerCore.YtDlp
             session.LastReportedBytes = bytes;
             session.LastReportedPercent = pct;
             session.LastStatusReportTick = now;
+            session.CachedBufferedBytes = bytes;
             OnStatusUpdate?.Invoke(this, FormatSabrBufferStatus(session, bytes));
         }
 
