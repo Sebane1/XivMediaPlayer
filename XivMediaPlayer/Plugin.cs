@@ -914,6 +914,9 @@ namespace XivMediaPlayer
                 if (isHousingMenuOpen && !_wasHousingMenuOpen)
                 {
                     _wasHousingMenuOpen = isHousingMenuOpen;
+                    _clickStartedOnTv = false;
+                    _isQueueMenuOpen = false;
+                    _isHistoryMenuOpen = false;
                     _screenSettingsWindow.IsOpen = true;
                     _screenSettingsWindow.SyncFromTransform();
 
@@ -3370,8 +3373,10 @@ namespace XivMediaPlayer
         internal bool IsBannerEditActive() =>
             CurrentBannerPlacement != null && CurrentTvPlacement == null;
 
-        private bool ShouldPreferLocalPlacementEdits() =>
+        private bool IsScreenPlacementEditingActive() =>
             IsHousingMenuOpen || _screenSettingsWindow?.IsOpen == true;
+
+        private bool ShouldPreferLocalPlacementEdits() => IsScreenPlacementEditingActive();
 
         private void ApplyRoomBannersPreferringLocal(string primaryKey, IEnumerable<BannerPlacement> serverBanners)
         {
@@ -4934,6 +4939,8 @@ namespace XivMediaPlayer
                         || IsMediaLoading) ? 1.0f : 0.0f;
                     float timeSeconds = (float)(((DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + _serverTimeOffsetMs) / 1000.0) % 864000.0);
 
+                    bool screenPlacementEditing = IsScreenPlacementEditingActive();
+
                     var mousePos = ImGui.GetIO().MousePos;
                     System.Numerics.Vector2 uv = new System.Numerics.Vector2(-1, -1);
                     TvPlacement? hoveredTv = null;
@@ -4987,7 +4994,7 @@ namespace XivMediaPlayer
                     bool imguiWantsMouse = ImGui.GetIO().WantCaptureMouse;
 
                     bool housingPlacementEdit = false;
-                    bool placementEditActive = (IsHousingMenuOpen || _screenSettingsWindow.IsOpen)
+                    bool placementEditActive = screenPlacementEditing
                         && cameraPos.HasValue && cameraForward.HasValue;
                     if (placementEditActive)
                     {
@@ -5013,8 +5020,9 @@ namespace XivMediaPlayer
                                 _placementPickables) || _placementManipulator.IsDragging;
                         }
 
-                        if (housingPlacementEdit)
+                        if (housingPlacementEdit || _placementManipulator.IsDragging)
                         {
+                            _clickStartedOnTv = false;
                             ImGui.GetIO().WantCaptureMouse = true;
                         }
                     }
@@ -5022,7 +5030,7 @@ namespace XivMediaPlayer
                     bool isOnTv = uv.X >= 0 && uv.X <= 1 && uv.Y >= 0 && uv.Y <= 1;
                     if (isMouseClicked)
                     {
-                        _clickStartedOnTv = isOnTv && !imguiWantsMouse;
+                        _clickStartedOnTv = isOnTv && !imguiWantsMouse && !screenPlacementEditing;
                     }
 
                     if (imguiWantsMouse)
@@ -5030,12 +5038,12 @@ namespace XivMediaPlayer
                         _clickStartedOnTv = false;
                     }
 
-                    if (_clickStartedOnTv && isLeftMousePressed && !housingPlacementEdit && !imguiWantsMouse)
+                    if (_clickStartedOnTv && isLeftMousePressed && !screenPlacementEditing && !imguiWantsMouse)
                     {
                         ImGui.GetIO().WantCaptureMouse = true;
                     }
 
-                    if (isOnTv && !housingPlacementEdit && !imguiWantsMouse)
+                    if (isOnTv && !screenPlacementEditing && !imguiWantsMouse)
                     {
                         hoverUV = uv;
                         float scroll = ImGui.GetIO().MouseWheel;
@@ -5440,9 +5448,10 @@ namespace XivMediaPlayer
                                     _worldRenderer.ResetCornerStabilization();
                                     var tvTransform = ResolveTvRenderTransform(tv);
 
-                                    bool showOverlay = roomTvsToRender.Count == 1
+                                    bool showOverlay = !screenPlacementEditing
+                                        && (roomTvsToRender.Count == 1
                                         || (!string.IsNullOrEmpty(_interactionTvId) && tv.Id == _interactionTvId)
-                                        || (hoveredTv != null && tv.Id == hoveredTv.Id);
+                                        || (hoveredTv != null && tv.Id == hoveredTv.Id));
                                     var screenHover = showOverlay ? hoverUV : new System.Numerics.Vector2(-1, -1);
                                     var screenOverlay = showOverlay ? srvPtr : IntPtr.Zero;
 
@@ -5493,7 +5502,7 @@ namespace XivMediaPlayer
                     _prevCameraUp = cameraUp;
                     _prevViewProjMatrix = viewProjMatrix;
 
-                    if (IsHousingMenuOpen || _screenSettingsWindow.IsOpen)
+                    if (screenPlacementEditing)
                     {
                         _placementManipulator.DrawOverlay(_gameGui, cameraPos ?? _cachedLocalPlayerPosition ?? System.Numerics.Vector3.Zero);
                     }
