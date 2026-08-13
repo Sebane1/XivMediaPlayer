@@ -1270,7 +1270,7 @@ namespace XivMediaPlayer
                     _mediaManager?.StopStream();
                     RestoreBgm();
                     ResetStreamValues();
-                    PrintChat("[Media Player] Stream stopped.");
+                    PrintVerbose("[Media Player] Stream stopped.");
                     break;
 
                 case "fixaudio":
@@ -1339,7 +1339,7 @@ namespace XivMediaPlayer
 
         private async Task ConnectEmulationAsync(string ip, string session)
         {
-            PrintChatFormat("[Media Player] Connecting to emulation server at {0}...", ip);
+            PrintVerboseFormat("[Media Player] Connecting to emulation server at {0}...", ip);
             string rtsp = await Networking.EmulationClient.GetRtspUrlAsync(ip, session);
             if (string.IsNullOrEmpty(rtsp))
             {
@@ -2039,7 +2039,7 @@ namespace XivMediaPlayer
                         _currentStreamer = "Direct Stream";
                         _currentMediaTitle = "Direct Stream";
 
-                        PrintChat("[Media Player] Playing direct stream!\r\nUse \"/media video\" to toggle the video feed.\r\nUse \"/media stop\" to stop.");
+                        PrintVerbose("[Media Player] Playing direct stream!\r\nUse \"/media video\" to toggle the video feed.\r\nUse \"/media stop\" to stop.");
 
                         if (!isAutoSync)
                         {
@@ -2061,7 +2061,7 @@ namespace XivMediaPlayer
             {
                 if (_ytDlpInitTask != null && !_ytDlpInitTask.IsCompleted)
                 {
-                    EnqueueFrameworkAction(() => PrintChat("[Media Player] Waiting for yt-dlp download/update to finish..."));
+                    EnqueueFrameworkAction(() => PrintVerbose("[Media Player] Waiting for yt-dlp download/update to finish..."));
                     await _ytDlpInitTask;
                 }
                 if (resolutionId != _currentResolutionId) return;
@@ -2165,7 +2165,7 @@ namespace XivMediaPlayer
                     if (streamUrls == null || streamUrls.Length == 0 || string.IsNullOrEmpty(streamUrls[0]))
                         {
                             // Fallback to CefSharp for heavily protected sites
-                            EnqueueFrameworkAction(() => PrintChat("[Media Player] yt-dlp failed. Falling back to embedded browser resolver..."));
+                            EnqueueFrameworkAction(() => PrintVerbose("[Media Player] yt-dlp failed. Falling back to embedded browser resolver..."));
 
                         MediaPlayerCore.Resolvers.CefSharpResolverResult? cefResult = null;
                         try
@@ -2196,7 +2196,7 @@ namespace XivMediaPlayer
                                 });
                             }
 
-                            EnqueueFrameworkAction(() => PrintChat("[Media Player] Embedded browser successfully found stream URL."));
+                            EnqueueFrameworkAction(() => PrintVerbose("[Media Player] Embedded browser successfully found stream URL."));
 
                             // Merge headers
                             if (metadata == null) metadata = new MediaPlayerCore.YtDlp.YtDlpMetadata();
@@ -2297,7 +2297,7 @@ namespace XivMediaPlayer
                         _currentStreamer = !string.IsNullOrEmpty(uploader) ? uploader : title;
                         _currentMediaTitle = title;
 
-                        PrintChatFormat("[Media Player] Now playing: {0}{1}{2}\r\nUse \"/media video\" to toggle the video feed.\r\nUse \"/media stop\" to stop.",
+                        PrintVerboseFormat("[Media Player] Now playing: {0}{1}{2}\r\nUse \"/media video\" to toggle the video feed.\r\nUse \"/media stop\" to stop.",
                             title,
                             !string.IsNullOrEmpty(uploader) ? string.Format(Translate(" by {0}"), uploader) : "",
                             !string.IsNullOrEmpty(statusMsg) ? string.Format(Translate(" [{0}]"), statusMsg) : "");
@@ -2481,6 +2481,14 @@ namespace XivMediaPlayer
             if (_config.VerboseChatLogging)
             {
                 PrintChat(message);
+            }
+        }
+
+        private void PrintVerboseFormat(string format, params object[] args)
+        {
+            if (_config.VerboseChatLogging)
+            {
+                PrintChatFormat(format, args);
             }
         }
 
@@ -4167,7 +4175,7 @@ namespace XivMediaPlayer
                         return;
                     }
 
-                    PrintChat("[Media Player] Resuming playback in this room...");
+                    PrintVerbose("[Media Player] Resuming playback in this room...");
                     _lastStreamObject = CurrentAudioSource;
                     PlayRouted(state.CurrentUrl, CurrentAudioSource, (int)state.TimecodeMs, isAutoSync: true);
                 }
@@ -4241,7 +4249,7 @@ namespace XivMediaPlayer
                     // If we successfully pushed a foreground sync, we are definitely the DJ now.
                     if (!isBackgroundSync)
                     {
-                        PrintChat("[Media Player] Server push successful!");
+                        PrintVerbose("[Media Player] Server push successful!");
                         _isLocalDj = true;
                         _currentMediaOwnerId = _config.OwnerId;
                     }
@@ -4408,7 +4416,7 @@ namespace XivMediaPlayer
                             return;
                         }
 
-                        PrintChat("[Media Player] Server Sync: Now playing media loaded by the room owner.");
+                        PrintVerbose("[Media Player] Server Sync: Now playing media loaded by the room owner.");
 
                         _mediaQueue.Clear();
                         foreach (var url in state.Playlist) _mediaQueue.Enqueue(url);
@@ -5103,7 +5111,7 @@ namespace XivMediaPlayer
                                             EnqueueFrameworkAction(() =>
                                             {
                                                 _mediaQueue.Enqueue(clip);
-                                                PrintChatFormat("[Media Player] Queued ({0}): {1}", _mediaQueue.Count, clip);
+                                                PrintVerboseFormat("[Media Player] Queued ({0}): {1}", _mediaQueue.Count, clip);
                                                 if (_mediaManager?.ActiveStream == null || _mediaManager.ActiveStream.PlaybackState == NAudio.Wave.PlaybackState.Stopped)
                                                 {
                                                     if (_playerObject != null) PlayRouted(_mediaQueue.Dequeue(), CurrentAudioSource);
@@ -6233,7 +6241,7 @@ namespace XivMediaPlayer
         /// </summary>
         public void Stop()
         {
-            PrintChat("[Media Player] Stopping media and clearing queue...");
+            PrintVerbose("[Media Player] Stopping media and clearing queue...");
             _mediaManager?.StopStream();
             _mediaQueue.Clear();
             ResetStreamValues(true);
@@ -6325,7 +6333,7 @@ namespace XivMediaPlayer
                 nextUrl = _mediaQueue.Dequeue();
             }
 
-            PrintChatFormat("[Media Player] Playing next: {0}", nextUrl);
+            PrintVerboseFormat("[Media Player] Playing next: {0}", nextUrl);
             PlayRouted(nextUrl, CurrentAudioSource);
         }
 
@@ -6346,7 +6354,7 @@ namespace XivMediaPlayer
             }
 
             string prevUrl = _mediaHistory.Pop();
-            PrintChatFormat("[Media Player] Playing previous: {0}", prevUrl);
+            PrintVerboseFormat("[Media Player] Playing previous: {0}", prevUrl);
             PlayRouted(prevUrl, CurrentAudioSource);
         }
 
@@ -6467,7 +6475,7 @@ namespace XivMediaPlayer
             // Resume playback
             if (!string.IsNullOrEmpty(savedUrl) && _playerObject != null)
             {
-                PrintChat("[Media Player] Resuming playback...");
+                PrintVerbose("[Media Player] Resuming playback...");
                 PlayRouted(savedUrl, CurrentAudioSource, savedTimeMs);
             }
             else

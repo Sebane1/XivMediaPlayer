@@ -381,21 +381,22 @@ float3 SampleSoftLightColor(float2 center, float spread) {
 }
 
 float3 GetProminentLightColor() {
+  float3 result = float3(0, 0, 0);
   if (StaticLightSource > 0.5) {
     // Static banner art is sharp; blur the tint so cast light on characters stays soft.
-    return SampleSoftLightColor(float2(0.5, 0.5), 0.11);
-  }
-
-  float3 prominentColor = float3(0, 0, 0);
-  [unroll]
-  for (int gx = 0; gx < 12; gx++) {
+    result = SampleSoftLightColor(float2(0.5, 0.5), 0.11);
+  } else {
     [unroll]
-    for (int gy = 0; gy < 12; gy++) {
-      float2 samplePos = float2((gx + 0.5) / 12.0, (gy + 0.5) / 12.0);
-      prominentColor += VideoTexture.SampleLevel(VideoSampler, samplePos, 0.0).rgb;
+    for (int gx = 0; gx < 12; gx++) {
+      [unroll]
+      for (int gy = 0; gy < 12; gy++) {
+        float2 samplePos = float2((gx + 0.5) / 12.0, (gy + 0.5) / 12.0);
+        result += VideoTexture.SampleLevel(VideoSampler, samplePos, 0.0).rgb;
+      }
     }
+    result /= 144.0;
   }
-  return prominentColor / 144.0;
+  return result;
 }
 
 float GetAudioBand(int index) {

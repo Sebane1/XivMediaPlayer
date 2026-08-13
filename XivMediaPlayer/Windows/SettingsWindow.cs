@@ -418,7 +418,7 @@ namespace XivMediaPlayer.Windows {
         _plugin.Config.Save();
       }
       if (ImGui.IsItemHovered()) {
-        ImGui.SetTooltip(Localize("Shows detailed plugin status messages in the chat."));
+        ImGui.SetTooltip(Localize("Shows playback progress in chat (now playing, loading, queue, etc.). Normally the TV screen shows this instead."));
       }
 
       bool devMode = _plugin.Config.DevMode;
