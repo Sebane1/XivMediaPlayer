@@ -1046,6 +1046,11 @@ namespace MediaPlayerCore.YtDlp
                     }
                 }
 
+                if (IsYouTubeUrl(url))
+                {
+                    await EnsureBgutilServerAsync().ConfigureAwait(false);
+                }
+
                 OnStatusUpdate?.Invoke(this, "Resolving stream URL...");
 
                 string formatArg;
@@ -1774,8 +1779,12 @@ namespace MediaPlayerCore.YtDlp
                 return null;
             }
 
-            OnStatusUpdate?.Invoke(this, "Retrying stream resolution with YouTube tv client...");
-            return await TryGetStreamUrlsAsync(url, formatArg, isLiveYouTube: false, forceYouTubeClient: "tv");
+            // Separate bv+ba streams often 403 when PO tokens are missing; try a single combined format.
+            string combinedFormat = _preferredMaxHeight > 0
+                ? $"b[height<={_preferredMaxHeight}]/b"
+                : "b";
+            OnStatusUpdate?.Invoke(this, "Retrying stream resolution with combined format...");
+            return await TryGetStreamUrlsAsync(url, combinedFormat, isLiveYouTube: false, forceYouTubeClient: null);
         }
 
         private async Task<string[]?> TryGetStreamUrlsAsync(
@@ -1885,15 +1894,15 @@ namespace MediaPlayerCore.YtDlp
 
         private string BuildYouTubeExtractorArgs(bool isLive, bool includeSabrFormats, string? forceClient = null)
         {
-            // web/mweb need PO tokens from bgutil; tv works with cookies without tokens.
-            // android often exposes m3u8_native for YouTube live streams.
+            // Avoid the tv client: some YouTube sessions return DRM-only formats there (yt-dlp #12563).
+            // web/mweb need PO tokens from bgutil; web_embedded/android work without tokens.
             string clients = forceClient ?? (isLive && !includeSabrFormats
                 ? (HasYouTubeAuth
-                    ? (_bgutilServerReady ? "android,web,tv" : "android,tv")
-                    : "android,tv,web_embedded")
+                    ? (_bgutilServerReady ? "android,web,mweb" : "android,web_embedded")
+                    : "android,web_embedded")
                 : (HasYouTubeAuth
-                    ? (_bgutilServerReady ? "web,mweb,tv" : "tv")
-                    : (_bgutilServerReady ? "tv,mweb,web_embedded" : "tv,web_embedded")));
+                    ? (_bgutilServerReady ? "web,mweb" : "web_embedded,android")
+                    : (_bgutilServerReady ? "mweb,web_embedded" : "web_embedded,android")));
 
             var parts = new List<string>
             {
@@ -1901,6 +1910,11 @@ namespace MediaPlayerCore.YtDlp
                 "player_js_version=actual",
                 "player_js_variant=main",
             };
+
+            if (_bgutilServerReady)
+            {
+                parts.Add("fetch_pot=always");
+            }
 
             if (includeSabrFormats)
             {
@@ -1913,8 +1927,7 @@ namespace MediaPlayerCore.YtDlp
 
         private string BuildSabrYouTubeExtractorArgs(bool isLive)
         {
-            // web/mweb need PO tokens (bgutil server). tv is the no-token fallback.
-            string clients = _bgutilServerReady ? "web,mweb,tv" : "tv";
+            string clients = _bgutilServerReady ? "web,mweb" : "web_embedded,android";
 
             var parts = new List<string>
             {
@@ -1922,6 +1935,11 @@ namespace MediaPlayerCore.YtDlp
                 "player_js_version=actual",
                 "player_js_variant=main",
             };
+
+            if (_bgutilServerReady)
+            {
+                parts.Add("fetch_pot=always");
+            }
 
             if (isLive)
             {

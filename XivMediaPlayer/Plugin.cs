@@ -1910,7 +1910,7 @@ namespace XivMediaPlayer
 
         private void StartTwitchViewerPresence(string pageUrl, string? channelLoginHint = null)
         {
-            if (!_config.EnableTwitchViewerPresence || !TwitchViewerSession.IsTwitchLiveChannelUrl(pageUrl))
+            if (!TwitchViewerSession.IsTwitchLiveChannelUrl(pageUrl))
             {
                 return;
             }
