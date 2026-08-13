@@ -63,6 +63,10 @@ namespace MediaPlayerCore.Compositing {
     [JsonProperty("effectSpeed")]
     public float EffectSpeed { get; set; } = 1.0f;
 
+    /// <summary>Banner/static image sources use softer cast-light falloff than video TVs.</summary>
+    [JsonIgnore]
+    public bool IsStaticLightSource { get; set; }
+
     /// <summary>
     /// Returns the four corners of the screen quad in world space.
     /// Order: TopLeft, TopRight, BottomRight, BottomLeft (when facing the screen).
@@ -138,6 +142,7 @@ namespace MediaPlayerCore.Compositing {
         VisualEffectMode = VisualEffectMode,
         EffectIntensity = EffectIntensity,
         EffectSpeed = EffectSpeed,
+        IsStaticLightSource = IsStaticLightSource,
       };
     }
   }

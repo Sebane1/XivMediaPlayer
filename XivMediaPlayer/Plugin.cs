@@ -2683,6 +2683,7 @@ namespace XivMediaPlayer
                 VisualEffectMode = banner.VisualEffectMode,
                 EffectIntensity = banner.EffectIntensity,
                 EffectSpeed = banner.EffectSpeed,
+                IsStaticLightSource = true,
             };
         }
 
@@ -5373,13 +5374,18 @@ namespace XivMediaPlayer
                         hoverUV = new System.Numerics.Vector2(0.5f, 0.5f);
                     }
 
-                    if (roomTvsToRender.Count > 0)
+                    if (roomTvsToRender.Count > 0 || roomBannersToRender.Count > 0)
                     {
                         int totalQuads = roomTvsToRender.Count + roomBannersToRender.Count;
                         bool multiQuad = totalQuads > 1;
-                        bool multiTv = roomTvsToRender.Count > 1;
-                        var renderPasses = multiTv
-                            ? new[] { Compositing.WorldTvRenderPass.GlowOnly, Compositing.WorldTvRenderPass.CompositeOnly }
+                        // Single screen: one Full pass (matches pre-multi-TV reference at 4843c12).
+                        // Multi screen: split the same Full pass into glow, wall lighting, then surface composite.
+                        var renderPasses = multiQuad
+                            ? new[] {
+                                Compositing.WorldTvRenderPass.GlowOnly,
+                                Compositing.WorldTvRenderPass.RoomLightingOnly,
+                                Compositing.WorldTvRenderPass.CompositeOnly
+                              }
                             : new[] { Compositing.WorldTvRenderPass.Full };
 
                         if (multiQuad)
@@ -5401,9 +5407,7 @@ namespace XivMediaPlayer
 
                         foreach (var pass in renderPasses)
                         {
-                            bool includeTvs = true;
-                            bool includeBanners = pass != Compositing.WorldTvRenderPass.GlowOnly;
-                            bool useSortedDrawOrder = canSortByDepth && multiQuad;
+                            bool useSortedDrawOrder = canSortByDepth;
 
                             if (useSortedDrawOrder)
                             {
@@ -5412,8 +5416,8 @@ namespace XivMediaPlayer
                                     sortCameraForward!.Value,
                                     roomTvsToRender,
                                     roomBannersToRender,
-                                    includeTvs,
-                                    includeBanners);
+                                    includeTvs: true,
+                                    includeBanners: true);
                             }
 
                             IEnumerable<WorldQuadDrawItem> drawItems = useSortedDrawOrder
@@ -5434,7 +5438,7 @@ namespace XivMediaPlayer
                                     var screenHover = showOverlay ? hoverUV : new System.Numerics.Vector2(-1, -1);
                                     var screenOverlay = showOverlay ? srvPtr : IntPtr.Zero;
 
-                                    bool isolateComposite = multiQuad && pass != Compositing.WorldTvRenderPass.GlowOnly;
+                                    bool isolateComposite = multiQuad && pass == Compositing.WorldTvRenderPass.CompositeOnly;
 
                                     TryResolveTvBrandingTexture(tv, tvTransform, out IntPtr tvBrandingSrv, out float tvBrandingAspect);
                                     float tvShowScreensaver = ShouldPreviewTvScreensaver(tv, tvTransform, showScreensaver, isPlaying)
@@ -5452,7 +5456,7 @@ namespace XivMediaPlayer
                                         renderPass: pass,
                                         preserveSortedDrawOrder: useSortedDrawOrder);
                                 }
-                                else if (includeBanners)
+                                else
                                 {
                                     _worldRenderer.ResetCornerStabilization();
 
@@ -5464,55 +5468,15 @@ namespace XivMediaPlayer
                                         hoverUV: null, progress: 0f, bufferProgress: 1f, playbackState: 0f, lockState: 0f, volume: 0f,
                                         titleSrvPtr: IntPtr.Zero, showScreensaver: 0f, useDifferenceFallback: useDifferenceFallback,
                                         viewProjMatrix: _prevViewProjMatrix ?? viewProjMatrix, viewportPos: mainViewport.Pos, viewportSize: mainViewport.Size,
+                                        uiBlendThreshold: _config.UIBlendThreshold,
                                         screenTransform: ResolveBannerRenderTransform(item.Banner),
-                                        isolateCompositeOutput: multiQuad && pass != Compositing.WorldTvRenderPass.GlowOnly,
+                                        isolateCompositeOutput: multiQuad && pass == Compositing.WorldTvRenderPass.CompositeOnly,
                                         renderPass: pass,
                                         preserveSortedDrawOrder: useSortedDrawOrder);
                                 }
                             }
                         }
                     }
-                    }
-
-                    if (roomTvsToRender.Count == 0 && roomBannersToRender.Count > 0)
-                    {
-                        bool multiBanner = roomBannersToRender.Count > 1;
-                        if (multiBanner)
-                        {
-                            _worldRenderer.BeginMultiTvCompositeFrame();
-                        }
-
-                        var sortCameraPos = _prevCameraPos ?? cameraPos;
-                        var sortCameraForward = _prevCameraForward ?? cameraForward;
-                        if (sortCameraPos.HasValue && sortCameraForward.HasValue)
-                        {
-                            BuildWorldQuadDrawOrder(
-                                sortCameraPos.Value,
-                                sortCameraForward.Value,
-                                roomTvsToRender,
-                                roomBannersToRender,
-                                includeTvs: false,
-                                includeBanners: true);
-
-                            foreach (var item in _worldQuadDrawOrder)
-                            {
-                                if (item.Kind != WorldQuadDrawKind.Banner) continue;
-
-                                _worldRenderer.ResetCornerStabilization();
-
-                                _worldRenderer.Render(
-                                    item.BannerTextureSrv, item.BannerTextureWidth, item.BannerTextureHeight,
-                                    item.BannerTextureWidth, item.BannerTextureHeight, _depthCapture,
-                                    _prevCameraPos ?? cameraPos, _prevCameraForward ?? cameraForward, _prevCameraRight ?? cameraRight, _prevCameraUp ?? cameraUp,
-                                    fovY, aspectRatio, _uiCapture, nearPlane, farPlane,
-                                    hoverUV: null, progress: 0f, bufferProgress: 1f, playbackState: 0f, lockState: 0f, volume: 0f,
-                                    titleSrvPtr: IntPtr.Zero, showScreensaver: 0f, useDifferenceFallback: useDifferenceFallback,
-                                    viewProjMatrix: _prevViewProjMatrix ?? viewProjMatrix, viewportPos: mainViewport.Pos, viewportSize: mainViewport.Size,
-                                    screenTransform: ResolveBannerRenderTransform(item.Banner),
-                                    isolateCompositeOutput: multiBanner,
-                                    preserveSortedDrawOrder: true);
-                            }
-                        }
                     }
                         
                     _prevCameraPos = cameraPos;

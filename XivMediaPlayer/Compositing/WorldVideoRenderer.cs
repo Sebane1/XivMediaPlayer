@@ -10,7 +10,8 @@ namespace XivMediaPlayer.Compositing {
   internal enum WorldTvRenderPass {
     Full,
     GlowOnly,
-    CompositeOnly
+    CompositeOnly,
+    RoomLightingOnly
   }
 
   /// <summary>
@@ -335,8 +336,12 @@ namespace XivMediaPlayer.Compositing {
       float nearPlane, float farPlane, Vector2? hoverUV, float progress, float bufferProgress, float playbackState, float lockState, float volume, IntPtr titleSrvPtr, bool isLooping, bool isShuffle, float time, float showScreensaver, float videoAspectRatio, bool allCornersInFront, bool useDifferenceFallback,
       Matrix4x4? viewProjMatrix, Vector2? viewportPos, Vector2? viewportSize, float uiBlendThreshold, float uvBottom, float uvRight, float loadingPulse = 0f, bool isLoadingOverlay = false, IntPtr idleBrandingSrvPtr = default, float idleBrandingAspect = 1.0f,
       WorldTvRenderPass renderPass = WorldTvRenderPass.Full, bool isolateCompositeOutput = false) {
-      bool renderGlow = renderPass != WorldTvRenderPass.CompositeOnly;
+      bool renderGlow = renderPass == WorldTvRenderPass.GlowOnly || renderPass == WorldTvRenderPass.Full;
       bool renderComposite = renderPass != WorldTvRenderPass.GlowOnly;
+      bool lightingOnly = renderPass == WorldTvRenderPass.RoomLightingOnly;
+      // Reference (single screen): one Full pass with EnableTvGlow drove depth-tested room lighting.
+      // Multi screen splits that into RoomLightingOnly + CompositeOnly; lighting must stay enabled there.
+      bool enableShaderRoomLighting = _enableGlow && (renderPass == WorldTvRenderPass.Full || lightingOnly);
       var (tl, tr, br, bl) = placement.Corners;
       
       var rtm = FFXIVClientStructs.FFXIV.Client.Graphics.Render.RenderTargetManager.Instance();
@@ -473,8 +478,10 @@ namespace XivMediaPlayer.Compositing {
           placement.IsProjectorMode,
           placement.ScreensaverColor,
           placement.ScreensaverStyle,
-          uiBlendThreshold, uvBottom, uvRight, _enableGlow && renderGlow, loadingPulse, isLoadingOverlay, idleBrandingSrvPtr, idleBrandingAspect,
-          surfaceOnly: isolateCompositeOutput,
+          uiBlendThreshold, uvBottom, uvRight, enableShaderRoomLighting, loadingPulse, isLoadingOverlay, idleBrandingSrvPtr, idleBrandingAspect,
+          surfaceOnly: isolateCompositeOutput && !lightingOnly,
+          lightingOnly: lightingOnly,
+          staticLightSource: placement.IsStaticLightSource,
           visualEffectMode: placement.VisualEffectMode,
           effectIntensity: placement.EffectIntensity,
           effectSpeed: placement.EffectSpeed,
@@ -492,7 +499,7 @@ namespace XivMediaPlayer.Compositing {
           var outputPtr = snapshotSrv.NativePointer;
           var outputId = Unsafe.As<IntPtr, ImTextureID>(ref outputPtr);
 
-          if (isolateCompositeOutput) {
+          if (isolateCompositeOutput && !lightingOnly) {
             float invW = screenW > 0 ? 1f / screenW : 1f;
             float invH = screenH > 0 ? 1f / screenH : 1f;
             var uvTL = new Vector2(localTL.X * invW, localTL.Y * invH);

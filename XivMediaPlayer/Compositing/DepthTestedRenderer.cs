@@ -101,6 +101,8 @@ namespace XivMediaPlayer.Compositing {
       public float HasIdleBranding;
       public float IdleBrandingAspect;
       public float SurfaceOnly;
+      public float LightingOnly;
+      public float StaticLightSource;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -182,6 +184,8 @@ cbuffer Constants : register(b0) {
   float HasIdleBranding;
   float IdleBrandingAspect;
   float SurfaceOnly;
+  float LightingOnly;
+  float StaticLightSource;
 };
 
 cbuffer VisualFxConsts : register(b2) {
@@ -360,6 +364,40 @@ float4 SampleVideoWithFx(float2 uv) {
   return col;
 }
 
+float3 SampleSoftLightColor(float2 center, float spread) {
+  float3 sum = float3(0, 0, 0);
+  float weightSum = 0.0;
+  [unroll]
+  for (int j = -2; j <= 2; j++) {
+    [unroll]
+    for (int i = -2; i <= 2; i++) {
+      float weight = exp(-0.2 * float(i * i + j * j));
+      float2 samplePos = center + float2(i, j) * spread;
+      sum += VideoTexture.SampleLevel(VideoSampler, samplePos, 0.0).rgb * weight;
+      weightSum += weight;
+    }
+  }
+  return sum / max(weightSum, 0.001);
+}
+
+float3 GetProminentLightColor() {
+  if (StaticLightSource > 0.5) {
+    // Static banner art is sharp; blur the tint so cast light on characters stays soft.
+    return SampleSoftLightColor(float2(0.5, 0.5), 0.11);
+  }
+
+  float3 prominentColor = float3(0, 0, 0);
+  [unroll]
+  for (int gx = 0; gx < 12; gx++) {
+    [unroll]
+    for (int gy = 0; gy < 12; gy++) {
+      float2 samplePos = float2((gx + 0.5) / 12.0, (gy + 0.5) / 12.0);
+      prominentColor += VideoTexture.SampleLevel(VideoSampler, samplePos, 0.0).rgb;
+    }
+  }
+  return prominentColor / 144.0;
+}
+
 float GetAudioBand(int index) {
   if (index == 0) return AudioBandsLow.x;
   if (index == 1) return AudioBandsLow.y;
@@ -491,7 +529,7 @@ float4 PS(VS_OUT input) : SV_TARGET {
       occlusion = smoothstep(0.55, 0.95, occlusion);
   }
 
-  if (isInside && occlusion < 0.999) {
+  if (isInside && occlusion < 0.999 && LightingOnly < 0.5) {
       // Draw unoccluded TV
       bool isOutOfBounds = (sampleUV.x < 0 || sampleUV.x > 1 || sampleUV.y < 0 || sampleUV.y > 1);
       
@@ -950,13 +988,16 @@ float4 PS(VS_OUT input) : SV_TARGET {
       
       // Apply soft occlusion mask
       color.a *= (1.0 - occlusion);
-  } else if (isInside && occlusion >= 0.999) {
-      // TV is fully hidden by geometry; show the scene, never bloom in front of the occluder.
-      if (HasBackBuffer > 0.5) {
-          color = float4(BackBufferTexture.Sample(VideoSampler, screenUV).rgb, 1.0);
-      }
-  } else if (!isInside && SurfaceOnly < 0.5) {
-      // Ambient glow on surrounding walls/geometry only, not on the TV surface or through occluders.
+  }
+
+  // Room lighting: walls, characters, and other occluders — never the visible TV/banner surface.
+  // Pre-283957f used a single else here (light occluders + off-screen pixels). The occluder split
+  // removed cast light from characters blocking the screen; restore that while keeping the surface excluded.
+  bool applyRoomLight = (SurfaceOnly < 0.5 || LightingOnly > 0.5)
+      && (LightingOnly > 0.5 || !isInside || occlusion >= 0.999);
+
+  if (applyRoomLight) {
+      // Ambient glow on surrounding geometry and on occluders in front of the screen.
       float depthMask = 1.0;
       if (gameDepth < 0.0001) depthMask = 0; // Ignore skybox
       
@@ -965,14 +1006,6 @@ float4 PS(VS_OUT input) : SV_TARGET {
       
       // Reconstruct the 3D world position of the game pixel
       float3 gameWorldPos = CameraPos + rayDir * (gameViewZ / dot(rayDir, -CameraForward));
-      
-      // Skip pixels in front of the TV plane (e.g. the player occluding the screen).
-      if (t > 0.0) {
-          float tvViewZ = dot(rayDir * t, -CameraForward);
-          if (gameViewZ < tvViewZ - 0.05) {
-              depthMask = 0.0;
-          }
-      }
       
       // Calculate TV dimensions in 3D world space
       float3 tvCenter3D = (CornerTR3D + CornerBL3D) * 0.5;
@@ -984,33 +1017,32 @@ float4 PS(VS_OUT input) : SV_TARGET {
       float3 toPixel = gameWorldPos - tvCenter3D;
       float dist3D = length(toPixel);
       
-      // Subtract half the TV size so the glow starts fading from the edges, not the center
-      dist3D = max(0.0, dist3D - tvSize3D * 0.5);
+      // Subtract half the screen size so the glow starts fading from the edges, not the center.
+      float edgeInset = StaticLightSource > 0.5 ? tvSize3D * 0.2 : tvSize3D * 0.5;
+      dist3D = max(0.0, dist3D - edgeInset);
       
-      // Physical light dissipation based on world space distance
-      float maxGlowRadius3D = max(4.0, tvSize3D * 1.5);
-      float distanceFade = saturate(1.0 - (dist3D / maxGlowRadius3D)); 
-      depthMask *= pow(distanceFade, 2.5); // Non-linear falloff for realism
-      
-      // Backlight directionality fade: shine behind the TV, not on objects in front
+      // Backlight directionality fade: shine behind the screen, not on objects in front.
       float3 dirToPixel = dist3D > 0.001 ? normalize(toPixel) : float3(0, 0, 0);
       float dotNorm = dot(dirToPixel, tvNormal);
       float directionFade = smoothstep(0.5, -0.2, dotNorm);
-      depthMask *= directionFade;
+
+      if (StaticLightSource > 0.5) {
+          // Banners: radial falloff only. directionFade is a half-space cut (sharp plane on
+          // characters); TVs keep it because moving video masks the edge.
+          float maxGlowRadius3D = max(8.0, tvSize3D * 3.0);
+          float distanceFade = 1.0 - smoothstep(maxGlowRadius3D * 0.02, maxGlowRadius3D * 1.5, dist3D);
+          depthMask *= distanceFade;
+          float edgeSoftness = clamp(fwidth(depthMask) * 8.0, 0.12, 0.55);
+          depthMask = smoothstep(0.0, edgeSoftness, depthMask);
+      } else {
+          float maxGlowRadius3D = max(4.0, tvSize3D * 1.5);
+          float distanceFade = saturate(1.0 - (dist3D / maxGlowRadius3D)); 
+          depthMask *= pow(distanceFade, 2.5);
+          depthMask *= directionFade;
+      }
       
       if (depthMask > 0.001) {
-          // Use a 144-point (12x12 grid) average texture sample to stabilize the glow color
-          // and mitigate potential flicker from on-screen movement.
-          float3 prominentColor = float3(0, 0, 0);
-          [unroll]
-          for (int gx = 0; gx < 12; gx++) {
-              [unroll]
-              for (int gy = 0; gy < 12; gy++) {
-                  float2 samplePos = float2((gx + 0.5) / 12.0, (gy + 0.5) / 12.0);
-                  prominentColor += VideoTexture.SampleLevel(VideoSampler, samplePos, 0.0).rgb;
-              }
-          }
-          prominentColor /= 144.0;
+          float3 prominentColor = GetProminentLightColor();
           
           // Scale glow alpha by the computed video luminance.
           float luminance = dot(prominentColor, float3(0.299, 0.587, 0.114));
@@ -1577,7 +1609,7 @@ float4 PS(VS_OUT input) : SV_TARGET {
       float renderWidth, float renderHeight,
       List<(int X, int Y, int W, int H, string Name)> uiRects, IntPtr titleSrvPtr = default,
       bool isLooping = false, bool isShuffle = false, float time = 0, float showScreensaver = 0,
-      float videoAspectRatio = 0, IntPtr gbuffer2SrvPtr = default, IntPtr gbuffer3SrvPtr = default, IntPtr transparentUiSrvPtr = default, IntPtr vignetteExtrapolatedSrvPtr = default, bool useDifferenceFallback = false, float opacity = 1.0f, bool isProjectorMode = false, Vector3? screensaverColor = null, int screensaverStyle = 0, float uiBlendThreshold = 0.0f, float uvBottom = 1.0f, float uvRight = 1.0f, bool enableTvGlow = true, float loadingPulse = 0f, bool isLoadingOverlay = false, IntPtr idleBrandingSrvPtr = default, float idleBrandingAspect = 1.0f, bool surfaceOnly = false,
+      float videoAspectRatio = 0, IntPtr gbuffer2SrvPtr = default, IntPtr gbuffer3SrvPtr = default, IntPtr transparentUiSrvPtr = default, IntPtr vignetteExtrapolatedSrvPtr = default, bool useDifferenceFallback = false, float opacity = 1.0f, bool isProjectorMode = false, Vector3? screensaverColor = null, int screensaverStyle = 0, float uiBlendThreshold = 0.0f, float uvBottom = 1.0f, float uvRight = 1.0f, bool enableTvGlow = true, float loadingPulse = 0f, bool isLoadingOverlay = false, IntPtr idleBrandingSrvPtr = default, float idleBrandingAspect = 1.0f, bool surfaceOnly = false, bool lightingOnly = false, bool staticLightSource = false,
       int visualEffectMode = 0, float effectIntensity = 0.65f, float effectSpeed = 1.0f, AudioVisualState? audioVisuals = null) {
 
       if (!_initialized || _disposed || videoSrvPtr == IntPtr.Zero || depthSrv == null) return false;
@@ -1645,6 +1677,8 @@ float4 PS(VS_OUT input) : SV_TARGET {
           HasIdleBranding = idleBrandingSrvPtr != IntPtr.Zero ? 1.0f : 0.0f,
           IdleBrandingAspect = idleBrandingAspect,
           SurfaceOnly = surfaceOnly ? 1.0f : 0.0f,
+          LightingOnly = lightingOnly ? 1.0f : 0.0f,
+          StaticLightSource = staticLightSource ? 1.0f : 0.0f,
         };
           _context.UpdateSubresource(constants, _constantBuffer);
 
