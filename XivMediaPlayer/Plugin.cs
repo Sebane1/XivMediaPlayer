@@ -9,6 +9,7 @@ using XivMediaPlayer.GameObjects;
 using XivMediaPlayer.Windows;
 using MediaPlayerCore;
 using MediaPlayerCore.Compositing;
+using MediaPlayerCore.Twitch;
 using MediaPlayerCore.YtDlp;
 using XivMediaPlayer.Compositing;
 using XivMediaPlayer.Diagnostics;
@@ -76,6 +77,7 @@ namespace XivMediaPlayer
         private bool _isQueueMenuOpen = false;
         private Compositing.ImageTextureCache _imageTextureCache;
         private readonly Compositing.PlacementManipulator _placementManipulator = new();
+        private TwitchViewerSession? _twitchViewerSession;
         private readonly List<Compositing.PlacementManipulator.Pickable> _placementPickables = new();
 
         private enum WorldQuadDrawKind { Tv, Banner }
@@ -1809,6 +1811,7 @@ namespace XivMediaPlayer
         /// </summary>
         private async Task TeardownPlaybackForMediaSwitchAsync()
         {
+            StopTwitchViewerPresence();
             _mediaManager?.StopStream();
             await Task.Delay(350).ConfigureAwait(false);
             _ytDlpManager?.ReleaseSabrSessions();
@@ -1897,6 +1900,30 @@ namespace XivMediaPlayer
             catch { }
             
             return false;
+        }
+
+        private void StopTwitchViewerPresence()
+        {
+            _twitchViewerSession?.Dispose();
+            _twitchViewerSession = null;
+        }
+
+        private void StartTwitchViewerPresence(string pageUrl, string? channelLoginHint = null)
+        {
+            if (!_config.EnableTwitchViewerPresence || !TwitchViewerSession.IsTwitchLiveChannelUrl(pageUrl))
+            {
+                return;
+            }
+
+            StopTwitchViewerPresence();
+            var session = new TwitchViewerSession
+            {
+                LogInfo = message => _pluginLog.Information(message),
+                LogWarning = (message, ex) => _pluginLog.Warning(ex, message)
+            };
+            _twitchViewerSession = session;
+            string? cookiesPath = _ytDlpManager?.CookiesFilePath;
+            _ = session.StartAsync(pageUrl, channelLoginHint, cookiesPath);
         }
 
         private void PlayRouted(string url, IMediaGameObject audioGameObject, int startTimeMs = 0, bool isAutoSync = false)
@@ -2288,6 +2315,11 @@ namespace XivMediaPlayer
                         _streamSetCooldown.Stop();
                         _streamSetCooldown.Reset();
                         _streamSetCooldown.Start();
+
+                        if (isTwitchLive && isLive)
+                        {
+                            StartTwitchViewerPresence(url, uploader);
+                        }
                     });
                 }
                 finally
@@ -2417,6 +2449,7 @@ namespace XivMediaPlayer
             _controllerService = null;
             _cefBrowserHandle?.Dispose();
             _cefBrowserHandle = null;
+            StopTwitchViewerPresence();
 
             _mediaManager?.StopStream();
             _ytDlpManager?.ReleaseSabrSessions();
@@ -6434,6 +6467,7 @@ namespace XivMediaPlayer
 
             while (_frameworkActions.TryDequeue(out _)) { }
             _videoWindow.MarkDisposed();
+            StopTwitchViewerPresence();
             _emulationClient?.Dispose();
             _controllerService?.Dispose();
             _uiCapture?.Dispose();

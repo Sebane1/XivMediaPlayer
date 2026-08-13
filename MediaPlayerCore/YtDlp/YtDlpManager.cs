@@ -1698,6 +1698,9 @@ namespace MediaPlayerCore.YtDlp
 
         public bool HasCookiesFile => FindCookiesFile() != null;
 
+        /// <summary>Netscape cookies.txt path used for yt-dlp and Twitch viewer telemetry.</summary>
+        public string? CookiesFilePath => FindCookiesFile();
+
         /// <summary>
         /// Returns the path where cookies.txt will be saved (plugin directory).
         /// </summary>

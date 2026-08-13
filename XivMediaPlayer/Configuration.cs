@@ -48,6 +48,8 @@ namespace XivMediaPlayer {
     public bool TvGlowEnabled { get; set; } = true;
     public bool DisableUIBlockDetection { get; set; } = false;
     public bool AutoResumeMedia { get; set; } = true;
+    /// <summary>Send Twitch web-player watch telemetry while live streams play on world TVs.</summary>
+    public bool EnableTwitchViewerPresence { get; set; } = true;
     public bool VerboseChatLogging { get; set; } = false;
     public bool EnableWanderersCampfireFix { get; set; } = false;
     public bool EnableUiCulling { get; set; } = true;

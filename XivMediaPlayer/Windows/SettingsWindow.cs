@@ -174,6 +174,15 @@ namespace XivMediaPlayer.Windows {
         _plugin.Config.Save();
       }
 
+      bool twitchPresence = _plugin.Config.EnableTwitchViewerPresence;
+      if (ImGui.Checkbox(Localize("Report Twitch viewing to stream stats"), ref twitchPresence)) {
+        _plugin.Config.EnableTwitchViewerPresence = twitchPresence;
+        _plugin.Config.Save();
+      }
+      if (ImGui.IsItemHovered()) {
+        ImGui.SetTooltip(Localize("While a live Twitch stream plays on the world TV, sends the same playback signals as the Twitch website. Add Twitch cookies to cookies.txt for logged-in credit."));
+      }
+
       int seekIncrement = _plugin.Config.SeekIncrementSeconds;
       if (ImGui.SliderInt(Localize("Seek Increment (seconds)"), ref seekIncrement, 1, 60)) {
         _plugin.Config.SeekIncrementSeconds = seekIncrement;
