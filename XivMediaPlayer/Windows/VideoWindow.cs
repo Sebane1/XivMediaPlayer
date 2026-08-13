@@ -263,7 +263,7 @@ namespace XivMediaPlayer.Windows {
               drawList.AddRectFilled(trackMin, new Vector2(trackMin.X + barW * progress, trackMax.Y), progressColor, 3f);
             }
 
-            bool seekDisabled = _plugin.BlocksYouTubeUserSeek();
+            bool seekDisabled = _plugin.BlocksYouTubeUserSeek() || !_plugin.CanControlCurrentTvPlayback();
             if (!seekDisabled) {
               ImGui.InvisibleButton("##seek", new Vector2(barW, ImGui.GetFrameHeight()));
               if (ImGui.IsItemHovered() || ImGui.IsItemActive()) {
@@ -292,6 +292,10 @@ namespace XivMediaPlayer.Windows {
 
         //  Transport Controls 
         if (_plugin != null) {
+          if (!_plugin.CanControlCurrentTvPlayback()) {
+            ImGui.BeginDisabled();
+          }
+
           float btnW = 36;
           float btnH = 24;
           var btnSize = new Vector2(btnW, btnH);
@@ -410,6 +414,10 @@ namespace XivMediaPlayer.Windows {
           }
           ImGui.PopStyleColor(2);
           if (ImGui.IsItemHovered()) ImGui.SetTooltip(L("Kill the media pipeline and restart it"));
+
+          if (!_plugin.CanControlCurrentTvPlayback()) {
+            ImGui.EndDisabled();
+          }
         }
 
         //  Volume Slider 

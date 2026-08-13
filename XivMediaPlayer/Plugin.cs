@@ -516,6 +516,25 @@ namespace XivMediaPlayer
             };
         }
         public bool IsHousingMenuOpen => _wasHousingMenuOpen;
+
+        /// <summary>
+        /// True when the local user may change playback on the current TV (play, pause, seek, queue, etc.).
+        /// Locked TVs owned by someone else are view-only unless the housing edit menu is open.
+        /// </summary>
+        public bool CanControlCurrentTvPlayback()
+        {
+            if (CurrentTvPlacement?.IsLocked != true)
+            {
+                return true;
+            }
+
+            if (CurrentTvPlacement.OwnerId == _config.OwnerId)
+            {
+                return true;
+            }
+
+            return IsHousingMenuOpen;
+        }
         public Dalamud.Plugin.Services.IObjectTable ObjectTable => _objectTable;
         public Dalamud.Plugin.Services.IPluginLog PluginLog => _pluginLog;
         public Dalamud.Plugin.Services.IChatGui Chat => _chat;
@@ -1389,7 +1408,7 @@ namespace XivMediaPlayer
 
             url = CleanUrl(url);
 
-            if (!isAutoSync && CurrentTvPlacement?.IsLocked == true && CurrentTvPlacement?.OwnerId != _config.OwnerId && !IsHousingMenuOpen)
+            if (!isAutoSync && !CanControlCurrentTvPlayback())
             {
                 PrintErrorChat("[Media Player] Cannot play stream: The TV in this room is locked by its owner.");
                 return;
@@ -1968,7 +1987,7 @@ namespace XivMediaPlayer
             // But if it's a manual play, we ALLOW it to interrupt the current resolution!
             if (isAutoSync && _isResolvingMedia) return;
 
-            if (!isAutoSync && CurrentTvPlacement?.IsLocked == true && CurrentTvPlacement?.OwnerId != _config.OwnerId && !IsHousingMenuOpen)
+            if (!isAutoSync && !CanControlCurrentTvPlayback())
             {
                 PrintErrorChat("[Media Player] Cannot play: The TV in this room is locked by its owner.");
                 return;
@@ -4993,7 +5012,7 @@ namespace XivMediaPlayer
                             // Seek Bar Drag (0.32 - 0.60, matches drawn bar at y 0.90-0.92)
                             if (uv.Y > 0.90f && uv.Y < 0.92f && uv.X >= 0.32f && uv.X <= 0.60f)
                             {
-                                if (activeStream != null && !BlocksYouTubeUserSeek())
+                                if (activeStream != null && CanControlCurrentTvPlayback() && !BlocksYouTubeUserSeek())
                                 {
                                     float seekProgress = (uv.X - 0.32f) / 0.28f;
                                     long durationMs = GetPlaybackDurationMs();
@@ -5017,6 +5036,11 @@ namespace XivMediaPlayer
 
                             if (_isQueueMenuOpen)
                             {
+                                if (!CanControlCurrentTvPlayback())
+                                {
+                                    return;
+                                }
+
                                 var action = _queueMenuTextureManager?.GetActionAtUV(uv.X, uv.Y);
                                 if (action == "close") {
                                     _isQueueMenuOpen = false;
@@ -5072,7 +5096,7 @@ namespace XivMediaPlayer
                             }
 
                             // Handle Transport Controls (Y between 0.85 and 0.95)
-                            if (uv.Y > 0.85f && uv.Y < 0.95f)
+                            if (uv.Y > 0.85f && uv.Y < 0.95f && CanControlCurrentTvPlayback())
                             {
                                 // Prev (0.02 - 0.06)
                                 if (uv.X >= 0.02f && uv.X <= 0.06f)
@@ -5972,6 +5996,7 @@ namespace XivMediaPlayer
         {
             var activeStream = _mediaManager?.ActiveStream;
             if (activeStream == null) return;
+            if (!CanControlCurrentTvPlayback()) return;
             if (BlocksYouTubeUserSeek()) return;
 
             SeekToMs(activeStream.Time + (seconds * 1000L));
@@ -6038,6 +6063,11 @@ namespace XivMediaPlayer
         {
             var activeStream = _mediaManager?.ActiveStream;
             if (activeStream == null)
+            {
+                return;
+            }
+
+            if (userInitiated && !CanControlCurrentTvPlayback())
             {
                 return;
             }
@@ -6165,6 +6195,11 @@ namespace XivMediaPlayer
         /// </summary>
         public void Stop()
         {
+            if (!CanControlCurrentTvPlayback())
+            {
+                return;
+            }
+
             PrintVerbose("[Media Player] Stopping media and clearing queue...");
             _mediaManager?.StopStream();
             _mediaQueue.Clear();
@@ -6186,6 +6221,11 @@ namespace XivMediaPlayer
         {
             var activeStream = _mediaManager?.ActiveStream;
             if (activeStream == null)
+            {
+                return;
+            }
+
+            if (!CanControlCurrentTvPlayback())
             {
                 return;
             }
@@ -6234,6 +6274,11 @@ namespace XivMediaPlayer
         /// </summary>
         public void PlayNext()
         {
+            if (!CanControlCurrentTvPlayback())
+            {
+                return;
+            }
+
             if (_mediaQueue.Count == 0 || _playerObject == null) return;
 
             // Record history
@@ -6267,6 +6312,11 @@ namespace XivMediaPlayer
         /// </summary>
         public void PlayPrevious()
         {
+            if (!CanControlCurrentTvPlayback())
+            {
+                return;
+            }
+
             if (_mediaHistory.Count == 0 || _playerObject == null) return;
 
             // Requeue current media
