@@ -1,5 +1,4 @@
 using Dalamud.Game.Config;
-using Dalamud.Game.Text;
 using Dalamud.Interface.Windowing;
 using Dalamud.IoC;
 using Dalamud.Plugin;
@@ -10,7 +9,6 @@ using XivMediaPlayer.GameObjects;
 using XivMediaPlayer.Windows;
 using MediaPlayerCore;
 using MediaPlayerCore.Compositing;
-using MediaPlayerCore.Twitch;
 using MediaPlayerCore.YtDlp;
 using XivMediaPlayer.Compositing;
 using XivMediaPlayer.Diagnostics;
@@ -154,7 +152,6 @@ namespace XivMediaPlayer
         private double? _currentMediaDurationMs;
         private string _currentStreamer = "";
         private string _currentMediaTitle = "";
-        private string _potentialStream;
         private bool _streamWasPlaying;
         private bool _disposed;
         private bool _bgmWasMutedByUs;
@@ -225,6 +222,22 @@ namespace XivMediaPlayer
         public void PrintChatWithBody(string body) => _chat.Print(Translate("[Media Player] ") + Translate(body));
 
         public void PrintErrorChatWithBody(string body) => _chat.PrintError(Translate("[Media Player] ") + Translate(body));
+
+        private void PrintVerbose(string message)
+        {
+            if (_config.VerboseChatLogging)
+            {
+                PrintChat(message);
+            }
+        }
+
+        private void PrintVerboseFormat(string format, params object[] args)
+        {
+            if (_config.VerboseChatLogging)
+            {
+                PrintChatFormat(format, args);
+            }
+        }
 
         /// <summary>Re-runs YouTube SABR helper setup (PO Token server). Safe without restarting the game.</summary>
         public void RetryYouTubeSetup()
@@ -436,7 +449,6 @@ namespace XivMediaPlayer
         {
             return Translate("Media Player commands.\n") +
                 Translate(" /media — Open settings\n") +
-                Translate(" /media twitch <url> — Tune into a Twitch stream\n") +
                 Translate(" /media rtmp <url> — Tune into an RTMP stream\n") +
                 Translate(" /media play <url> — Play a media URL\n") +
                 Translate(" /media stop — Stop current stream\n") +
@@ -448,14 +460,12 @@ namespace XivMediaPlayer
         {
             return Translate("Media Player commands.\n") +
                 Translate(" /media — Open settings\n") +
-                Translate(" /media twitch <url> — Tune into a Twitch stream\n") +
                 Translate(" /media rtmp <url> — Tune into an RTMP stream\n") +
                 Translate(" /media play <url> — Play a media URL\n") +
                 Translate(" /media stop — Stop current stream\n") +
                 Translate(" /media video — Toggle video window\n") +
                 Translate(" /media emulate <ip> <session> — Connect to emulation server\n") +
                 Translate(" /media screen [place|move|rotate|scale|reset|save] — 3D screen\n") +
-                Translate(" /media listen — Tune into a shared stream\n") +
                 Translate(" /media ytdlp-update — Update yt-dlp\n") +
                 Translate(" /media help — Show this help");
         }
@@ -732,9 +742,6 @@ namespace XivMediaPlayer
             _clientState.Login += OnLogin;
             _clientState.Logout += OnLogout;
             _videoWindow.WindowResized += OnVideoWindowResized;
-
-            // Chat listener for twitch detection
-            _chat.ChatMessage += OnChatMessage;
 
             // Run initial restore (deferred to allow housing data to load if logging in directly to a house)
             Task.Run(async () =>
@@ -1167,40 +1174,6 @@ namespace XivMediaPlayer
                     else
                         PrintChat("[Media Player] Depth preview closed.");
                     break;
-                case "twitch":
-                    if (splitArgs.Length > 1 && splitArgs[1].Contains("twitch.tv"))
-                    {
-                        if (_playerObject != null)
-                        {
-                            _lastStreamObject = CurrentAudioSource;
-                            PlayRouted(splitArgs[1], CurrentAudioSource, 0);
-                        }
-                    }
-                    else
-                    {
-                        // Open twitch chat for current streamer
-                        if (!string.IsNullOrEmpty(_currentStreamer))
-                        {
-                            try
-                            {
-                                Process.Start(new ProcessStartInfo()
-                                {
-                                    FileName = @"https://www.twitch.tv/popout/" + _currentStreamer + @"/chat?popout=",
-                                    UseShellExecute = true,
-                                    Verb = "OPEN"
-                                });
-                            }
-                            catch (Exception e)
-                            {
-                                _pluginLog.Warning(e, e.Message);
-                            }
-                        }
-                        else
-                        {
-                            PrintErrorChat("[Media Player] No active stream. Use: /media twitch <url>");
-                        }
-                    }
-                    break;
 
                 case "rtmp":
                     if (splitArgs.Length > 1 && splitArgs[1].Contains("rtmp"))
@@ -1296,13 +1269,6 @@ namespace XivMediaPlayer
                     else
                     {
                         PrintErrorChat("[Media Player] Usage: /media emulate <ip> <session>");
-                    }
-                    break;
-
-                case "listen":
-                    if (!string.IsNullOrEmpty(_potentialStream) && _playerObject != null)
-                    {
-                        PlayRouted(_potentialStream, CurrentAudioSource, 0);
                     }
                     break;
 
@@ -2436,7 +2402,6 @@ namespace XivMediaPlayer
         {
             _lastStreamObject = null;
             _streamURLs = null;
-            _potentialStream = "";
             _lastStreamURL = "";
             _currentMediaDurationMs = null;
             InvalidateSabrSeekCache();
@@ -2473,84 +2438,6 @@ namespace XivMediaPlayer
             if (pushToServer) {
                 _ = PushMediaToServerAsync(isBackgroundSync: false);
             }
-        }
-
-        #endregion
-
-        #region Chat Twitch Detection
-
-        private void PrintVerbose(string message)
-        {
-            if (_config.VerboseChatLogging)
-            {
-                PrintChat(message);
-            }
-        }
-
-        private void PrintVerboseFormat(string format, params object[] args)
-        {
-            if (_config.VerboseChatLogging)
-            {
-                PrintChatFormat(format, args);
-            }
-        }
-
-        private void OnChatMessage(Dalamud.Game.Chat.IHandleableChatMessage msg)
-        {
-            if (_disposed || _mediaManager == null) return;
-
-            var type = msg.LogKind;
-            if (type == XivChatType.Yell || type == XivChatType.Shout || type == XivChatType.TellIncoming)
-            {
-                TwitchChatCheck(msg.Message.TextValue, type);
-            }
-        }
-
-        private unsafe void TwitchChatCheck(string messageText, XivChatType type)
-        {
-            if (_config.TuneIntoTwitchStreams && IsResidential())
-            {
-                if (!_streamSetCooldown.IsRunning || _streamSetCooldown.ElapsedMilliseconds > 10000)
-                {
-                    var strings = messageText.Split(' ');
-                    foreach (string value in strings)
-                    {
-                        if (value.Contains("twitch.tv") && _lastStreamURL != value)
-                        {
-                            if (_playerObject != null)
-                            {
-                                var audioGameObject = CurrentAudioSource;
-                                if (_mediaManager.IsAllowedToStartStream(audioGameObject))
-                                {
-                                    _lastStreamObject = CurrentAudioSource;
-                                    PlayRouted(value.Trim('(').Trim(')').Trim('[').Trim(']').Trim('!').Trim('@'), audioGameObject, 0);
-                                }
-                            }
-                            break;
-                        }
-                    }
-                }
-            }
-            else if (_config.TuneIntoTwitchStreamPrompt)
-            {
-                var strings = messageText.Split(' ');
-                foreach (string value in strings)
-                {
-                    if (value.Contains("twitch.tv") && _lastStreamURL != value)
-                    {
-                        _potentialStream = value;
-                        _lastStreamURL = value;
-                        string cleanedURL = RemoveSpecialSymbols(value);
-                        string streamer = cleanedURL.Replace(@"https://", null).Replace(@"www.", null).Replace("twitch.tv/", null);
-                        PrintChatFormat("[Media Player] {0} is hosting a stream! Use \"/media listen\" to tune in.", streamer);
-                    }
-                }
-            }
-        }
-
-        private unsafe bool IsResidential()
-        {
-            return HousingManager.Instance()->IsInside() || HousingManager.Instance()->OutdoorTerritory != null;
         }
 
         #endregion
@@ -5856,11 +5743,6 @@ namespace XivMediaPlayer
             return totalSeconds * 1000;
         }
 
-        private static string RemoveSpecialSymbols(string value)
-        {
-            return Regex.Replace(value, @"[^a-zA-Z0-9:/._\-]", "");
-        }
-
         internal void RunOnFrameworkThread(Action action) => EnqueueFrameworkAction(action);
 
         private void EnqueueFrameworkAction(Action action)
@@ -6538,7 +6420,6 @@ namespace XivMediaPlayer
             _clientState.Login -= OnLogin;
             _clientState.Logout -= OnLogout;
             _videoWindow.WindowResized -= OnVideoWindowResized;
-            _chat.ChatMessage -= OnChatMessage;
             if (_mediaManager != null)
             {
                 _mediaManager.OnErrorReceived -= OnMediaError;

@@ -25,8 +25,6 @@ namespace XivMediaPlayer {
     public event EventHandler OnConfigurationChanged;
 
     private float _livestreamVolume = 0.5f;
-    private bool _tuneIntoTwitchStreams = true;
-    private bool _tuneIntoTwitchStreamPrompt = true;
     private int _defaultVideoOpen = 1; // 0 = open, 1 = closed
     private bool _enableOutdoorPublicScreens = false; // Opt-in
     private bool _onlySafeDomainsPublicScreens = true;
@@ -38,8 +36,6 @@ namespace XivMediaPlayer {
     #region Saved configuration values
 
     public float LivestreamVolume { get => _livestreamVolume; set => _livestreamVolume = value; }
-    public bool TuneIntoTwitchStreams { get => _tuneIntoTwitchStreams; set => _tuneIntoTwitchStreams = value; }
-    public bool TuneIntoTwitchStreamPrompt { get => _tuneIntoTwitchStreamPrompt; set => _tuneIntoTwitchStreamPrompt = value; }
     public int DefaultVideoOpen { get => _defaultVideoOpen; set => _defaultVideoOpen = value; }
     
     public bool EnableOutdoorPublicScreens { get => _enableOutdoorPublicScreens; set => _enableOutdoorPublicScreens = value; }

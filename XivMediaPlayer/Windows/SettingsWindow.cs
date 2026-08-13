@@ -159,22 +159,6 @@ namespace XivMediaPlayer.Windows {
       }
 
       ImGui.Spacing();
-      ImGui.TextColored(new Vector4(0.7f, 0.9f, 1.0f, 1.0f), Localize("Twitch"));
-      ImGui.Separator();
-
-      bool tuneInto = _plugin.Config.TuneIntoTwitchStreams;
-      if (ImGui.Checkbox(Localize("Auto-tune into Twitch streams (in residential areas)"), ref tuneInto)) {
-        _plugin.Config.TuneIntoTwitchStreams = tuneInto;
-        _plugin.Config.Save();
-      }
-
-      bool streamPrompt = _plugin.Config.TuneIntoTwitchStreamPrompt;
-      if (ImGui.Checkbox(Localize("Show stream prompts in chat"), ref streamPrompt)) {
-        _plugin.Config.TuneIntoTwitchStreamPrompt = streamPrompt;
-        _plugin.Config.Save();
-      }
-
-      ImGui.Spacing();
       ImGui.TextColored(new Vector4(0.7f, 0.9f, 1.0f, 1.0f), Localize("Playback"));
       ImGui.Separator();
 
