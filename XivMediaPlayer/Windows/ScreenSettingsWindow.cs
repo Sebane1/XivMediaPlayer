@@ -359,7 +359,7 @@ namespace XivMediaPlayer.Windows {
           || _plugin.CurrentTvPlacement != null;
 
       if (!hasObjects) {
-        ImGui.TextWrapped(Localize("Add a screen or banner from the sidebar. You can set the banner image URL after creating it."));
+        ImGui.TextWrapped(Localize("Add a screen or banner from the sidebar. You can set the banner media URL after creating it."));
         ImGui.Spacing();
         ImGui.Separator();
         ImGui.Spacing();
@@ -481,7 +481,7 @@ namespace XivMediaPlayer.Windows {
     }
 
     private void DrawIdleBrandingUrlField(bool applyLive) {
-      bool urlChanged = ImGui.InputText(Localize("Screensaver Image URL"), ref _idleBrandingUrl, 512);
+      bool urlChanged = ImGui.InputText(Localize("Screensaver Media URL"), ref _idleBrandingUrl, 512);
       if (applyLive && (urlChanged || ImGui.IsItemDeactivatedAfterEdit()))
       {
         if (!string.IsNullOrWhiteSpace(_idleBrandingUrl))
@@ -491,13 +491,15 @@ namespace XivMediaPlayer.Windows {
         }
         _plugin.ApplyIdleBrandingUrl(_idleBrandingUrl);
       }
+      ImGui.TextWrapped(Localize("Direct link to a static image (PNG, JPG, WebP), animated GIF, or short looping MP4/WebM/MOV. Video is scaled to screen size on first load."));
     }
 
     private void DrawBannerImageUrlField(bool applyLive) {
-      bool urlChanged = ImGui.InputText(Localize("Banner Image URL"), ref _bannerImageUrl, 512);
+      bool urlChanged = ImGui.InputText(Localize("Banner Media URL"), ref _bannerImageUrl, 512);
       if (applyLive && (urlChanged || ImGui.IsItemDeactivatedAfterEdit())) {
         _plugin.ApplyBannerImageUrl(_bannerImageUrl);
       }
+      ImGui.TextWrapped(Localize("Direct link to a static image (PNG, JPG, WebP), animated GIF, or short looping MP4/WebM/MOV. Video is scaled to banner size on first load."));
     }
 
     private void ApplyBannerScaleFromImageAspect() {
@@ -511,9 +513,9 @@ namespace XivMediaPlayer.Windows {
       ImGui.TextColored(new Vector4(0.7f, 0.9f, 1f, 1f), Localize("Banner Size (world units)"));
 
       if (_plugin.TryGetBannerImageAspect(_plugin.CurrentBannerPlacement!, out float imageAspect)) {
-        ImGui.TextDisabled(string.Format(Localize("Image aspect: {0:F2}:1"), imageAspect));
+        ImGui.TextDisabled(string.Format(Localize("Media aspect: {0:F2}:1"), imageAspect));
       } else {
-        ImGui.TextDisabled(Localize("Image aspect will apply once the banner texture loads."));
+        ImGui.TextDisabled(Localize("Media aspect will apply once the banner loads."));
       }
 
       bool scaleChanged = ImGui.DragFloat(Localize("Width##bannerScale"), ref _scale.X, 0.1f, 0.5f, 200f, "%.1f");
@@ -522,7 +524,7 @@ namespace XivMediaPlayer.Windows {
         ApplyBannerScaleFromImageAspect();
         _transform.Scale = _scale;
       }
-      if (saveScale || scaleChanged) {
+      if (saveScale) {
         _onSave?.Invoke();
       }
 
@@ -534,7 +536,7 @@ namespace XivMediaPlayer.Windows {
       ImGui.SameLine();
       if (ImGui.Button(Localize("Cinema (12m)"))) { _scale.X = 12f; ApplyBannerScaleFromImageAspect(); _transform.Scale = _scale; _onSave?.Invoke(); }
 
-      ImGui.TextDisabled(string.Format(Localize("Height: {0:F1}m (from image aspect)"), _scale.Y));
+      ImGui.TextDisabled(string.Format(Localize("Height: {0:F1}m (from media aspect)"), _scale.Y));
       ImGui.TextWrapped(Localize("You can also drag the green corner handles on the banner in-world to scale it."));
     }
 
@@ -583,36 +585,44 @@ namespace XivMediaPlayer.Windows {
         : Localize("Projector & Transparency"));
 
       bool appearanceChanged = false;
+      bool persistAppearance = false;
       if (!editingBanner) {
-        appearanceChanged |= ImGui.Checkbox(Localize("Projector Mode (Additive Blend)"), ref _isProjectorMode);
+        if (ImGui.Checkbox(Localize("Projector Mode (Additive Blend)"), ref _isProjectorMode)) {
+          appearanceChanged = true;
+          persistAppearance = true;
+        }
         appearanceChanged |= ImGui.SliderFloat(Localize("Opacity"), ref _opacity, 0.05f, 1.0f, "%.2f");
+        persistAppearance |= ImGui.IsItemDeactivatedAfterEdit();
         appearanceChanged |= ImGui.ColorEdit3(Localize("Screensaver Color"), ref _screensaverColor);
+        persistAppearance |= ImGui.IsItemDeactivatedAfterEdit();
 
         string[] screensaverStyles = new string[] {
-          Localize("Bouncing Logo"), Localize("VCR"), Localize("No Signal"), Localize("Static"), Localize("Test Pattern"), Localize("Matrix Rain"), Localize("Custom Image")
+          Localize("Bouncing Logo"), Localize("VCR"), Localize("No Signal"), Localize("Static"), Localize("Test Pattern"), Localize("Matrix Rain"), Localize("Custom Media")
         };
-        appearanceChanged |= ImGui.Combo(Localize("Screensaver Style"), ref _screensaverStyle, screensaverStyles, screensaverStyles.Length);
+        if (ImGui.Combo(Localize("Screensaver Style"), ref _screensaverStyle, screensaverStyles, screensaverStyles.Length)) {
+          appearanceChanged = true;
+          persistAppearance = true;
+        }
 
         if (_screensaverStyle == 6) {
           DrawIdleBrandingUrlField(applyLive: true);
-          if (_plugin.IsImageTextureReady(_idleBrandingUrl))
+          if (_plugin.IsImageTextureReady(_idleBrandingUrl, _scale.X))
           {
-            ImGui.TextDisabled(Localize("Image loaded. Preview shows on the TV while this window is open and nothing is playing."));
+            ImGui.TextDisabled(Localize("Media loaded. Preview shows on the TV while this window is open and nothing is playing."));
           }
           else if (!string.IsNullOrWhiteSpace(_idleBrandingUrl))
           {
-            ImGui.TextDisabled(Localize("Downloading image... It appears once loaded, or after ~5 seconds idle with nothing playing."));
+            ImGui.TextDisabled(Localize("Downloading or converting media... It appears once ready, or after ~5 seconds idle with nothing playing."));
           }
           else
           {
-            ImGui.TextWrapped(Localize("Paste any direct HTTPS image link — file extensions are optional. Stop playback to preview idle screensaver images."));
+            ImGui.TextWrapped(Localize("Paste a direct HTTPS media link. Stop playback to preview the idle screensaver."));
           }
         }
       } else {
         appearanceChanged |= ImGui.SliderFloat(Localize("Opacity"), ref _opacity, 0.05f, 1.0f, "%.2f");
+        persistAppearance |= ImGui.IsItemDeactivatedAfterEdit();
       }
-
-      bool saveAppearance = ImGui.IsItemDeactivatedAfterEdit() || ImGui.IsItemDeactivated();
 
       if (appearanceChanged) {
         _transform.Opacity = _opacity;
@@ -627,15 +637,15 @@ namespace XivMediaPlayer.Windows {
           }
         }
       }
-      if (saveAppearance || appearanceChanged) {
+      if (persistAppearance) {
         _onSave?.Invoke();
       }
 
       ImGui.Spacing();
       ImGui.TextColored(new Vector4(0.7f, 0.9f, 1f, 1f), Localize("Visual Effects (Experimental)"));
       ImGui.TextWrapped(editingBanner
-        ? Localize("Shader post-effects on the banner image.")
-        : Localize("Shader post-effects on the TV/banner image. Audio modes react to desktop playback (Settings → Audio) or spatial audio when that option is off."));
+        ? Localize("Shader post-effects on the banner media.")
+        : Localize("Shader post-effects on the TV/banner media. Audio modes react to desktop playback (Settings → Audio) or spatial audio when that option is off."));
 
       string[] visualEffects = new string[] {
         Localize("None"),
@@ -647,16 +657,23 @@ namespace XivMediaPlayer.Windows {
         Localize("Audio Spectrum"),
         Localize("Kaleidoscope"),
       };
-      appearanceChanged |= ImGui.Combo(Localize("Effect Mode"), ref _visualEffectMode, visualEffects, visualEffects.Length);
-      appearanceChanged |= ImGui.SliderFloat(Localize("Effect Intensity"), ref _effectIntensity, 0f, 2f, "%.2fx");
-      appearanceChanged |= ImGui.SliderFloat(Localize("Effect Speed"), ref _effectSpeed, 0.1f, 3f, "%.1fx");
+      bool effectValuesChanged = false;
+      bool persistEffects = false;
+      if (ImGui.Combo(Localize("Effect Mode"), ref _visualEffectMode, visualEffects, visualEffects.Length)) {
+        effectValuesChanged = true;
+        persistEffects = true;
+      }
+      effectValuesChanged |= ImGui.SliderFloat(Localize("Effect Intensity"), ref _effectIntensity, 0f, 2f, "%.2fx");
+      persistEffects |= ImGui.IsItemDeactivatedAfterEdit();
+      effectValuesChanged |= ImGui.SliderFloat(Localize("Effect Speed"), ref _effectSpeed, 0.1f, 3f, "%.1fx");
+      persistEffects |= ImGui.IsItemDeactivatedAfterEdit();
 
-      if (appearanceChanged) {
+      if (effectValuesChanged) {
         _transform.VisualEffectMode = _visualEffectMode;
         _transform.EffectIntensity = _effectIntensity;
         _transform.EffectSpeed = _effectSpeed;
       }
-      if (saveAppearance || appearanceChanged) {
+      if (persistEffects) {
         _onSave?.Invoke();
       }
     }
@@ -769,14 +786,14 @@ namespace XivMediaPlayer.Windows {
             _plugin.UpsertRoomBanner(result);
             _plugin.SelectBannerForEditing(result);
             _statusMessage = string.IsNullOrWhiteSpace(result.ImageUrl)
-                ? "Banner added! Set its image URL below, then Save."
+                ? "Banner added! Set its media URL below, then Save."
                 : "Banner added! Use Placement controls or the gizmo, then Save.";
             _statusColor = new Vector4(0.3f, 1f, 0.3f, 1);
           } else {
             _plugin.UpsertRoomBanner(placement);
             _plugin.SelectBannerForEditing(placement);
             _statusMessage = string.IsNullOrWhiteSpace(placement.ImageUrl)
-                ? "Banner added locally! Set its image URL below, then Save."
+                ? "Banner added locally! Set its media URL below, then Save."
                 : "Banner added locally, but sync server rejected it. You can still move it here.";
             _statusColor = new Vector4(1, 0.6f, 0.2f, 1);
           }
@@ -836,14 +853,14 @@ namespace XivMediaPlayer.Windows {
             _plugin.UpsertRoomBanner(result);
             _plugin.SelectBannerForEditing(result);
             _statusMessage = string.IsNullOrWhiteSpace(result.ImageUrl)
-                ? "Banner added! Set its image URL below, then Save."
+                ? "Banner added! Set its media URL below, then Save."
                 : "Banner added! Use Placement controls or Save to sync.";
             _statusColor = new Vector4(0.3f, 1f, 0.3f, 1);
           } else {
             _plugin.UpsertRoomBanner(placement);
             _plugin.SelectBannerForEditing(placement);
             _statusMessage = string.IsNullOrWhiteSpace(placement.ImageUrl)
-                ? "Banner added locally! Set its image URL below, then Save."
+                ? "Banner added locally! Set its media URL below, then Save."
                 : "Banner added locally, but sync server rejected it.";
             _statusColor = new Vector4(1, 0.6f, 0.2f, 1);
           }

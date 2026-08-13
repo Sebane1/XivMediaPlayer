@@ -13,17 +13,20 @@ using System.Threading.Tasks;
 namespace XivMediaPlayer.Compositing
 {
     /// <summary>
-    /// Downloads image URLs and uploads them as GPU textures for banners and idle branding.
-    /// Format detection uses response Content-Type and file signatures, not URL extensions.
-    /// Animated GIFs are decoded and advanced on the framework thread.
+    /// Downloads image and video URLs and uploads them as GPU textures for banners, idle branding, and venue screensavers.
+    /// Static images, animated GIFs, and short looping videos (MP4/WebM/MOV) are supported.
+    /// Video is scaled to in-world display size on first load, then looped like a GIF.
     /// </summary>
     internal sealed class ImageTextureCache : IDisposable
     {
         private static readonly TimeSpan FailedRetryDelay = TimeSpan.FromSeconds(30);
+        private static readonly TimeSpan VideoDownloadTimeout = TimeSpan.FromMinutes(5);
 
         private readonly ITextureProvider _textureProvider;
         private readonly IPluginLog _log;
         private readonly HttpClient _httpClient;
+        private readonly Func<string> _ffmpegPathProvider;
+        private readonly string _bannerVideoCacheRoot;
         private readonly ConcurrentDictionary<string, CachedImage> _cache = new(StringComparer.OrdinalIgnoreCase);
         private readonly ConcurrentDictionary<string, DateTime> _retryAfterUtc = new(StringComparer.OrdinalIgnoreCase);
         private readonly HashSet<string> _loading = new(StringComparer.OrdinalIgnoreCase);
@@ -43,53 +46,64 @@ namespace XivMediaPlayer.Compositing
             public readonly object Sync = new();
         }
 
-        public ImageTextureCache(ITextureProvider textureProvider, IPluginLog log)
+        public ImageTextureCache(
+            ITextureProvider textureProvider,
+            IPluginLog log,
+            Func<string> ffmpegPathProvider,
+            string bannerVideoCacheRoot)
         {
             _textureProvider = textureProvider;
             _log = log;
+            _ffmpegPathProvider = ffmpegPathProvider;
+            _bannerVideoCacheRoot = bannerVideoCacheRoot;
             _httpClient = new HttpClient
             {
-                Timeout = TimeSpan.FromSeconds(30)
+                Timeout = VideoDownloadTimeout
             };
             _httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("XivMediaPlayer/1.0");
             _httpClient.DefaultRequestHeaders.Accept.ParseAdd("image/*,*/*;q=0.8");
         }
 
-        public void RequestLoad(string? url)
+        public void RequestLoad(string? url, float worldScaleX = 0f)
         {
             url = ImageUrlUtility.Normalize(url);
             if (_disposed || url == null) return;
 
-            if (_cache.ContainsKey(url)) return;
+            string cacheKey = ResolveCacheKey(url, worldScaleX);
+            if (_cache.ContainsKey(cacheKey)) return;
 
-            if (_retryAfterUtc.TryGetValue(url, out var retryAfter) && DateTime.UtcNow < retryAfter)
+            if (_retryAfterUtc.TryGetValue(cacheKey, out var retryAfter) && DateTime.UtcNow < retryAfter)
             {
                 return;
             }
 
             lock (_loadingLock)
             {
-                if (_loading.Contains(url)) return;
-                _loading.Add(url);
+                if (_loading.Contains(cacheKey)) return;
+                _loading.Add(cacheKey);
             }
+
+            int targetPixelWidth = worldScaleX > 0.001f
+                ? BannerVideoConverter.EstimateTargetPixelWidth(worldScaleX)
+                : 0;
 
             _ = Task.Run(async () =>
             {
                 try
                 {
-                    await LoadInternalAsync(url);
+                    await LoadInternalAsync(url, cacheKey, targetPixelWidth);
                 }
                 finally
                 {
                     lock (_loadingLock)
                     {
-                        _loading.Remove(url);
+                        _loading.Remove(cacheKey);
                     }
                 }
             });
         }
 
-        public unsafe bool TryGetTexture(string? url, out IntPtr srv, out int width, out int height)
+        public unsafe bool TryGetTexture(string? url, out IntPtr srv, out int width, out int height, float worldScaleX = 0f)
         {
             srv = IntPtr.Zero;
             width = 0;
@@ -97,7 +111,9 @@ namespace XivMediaPlayer.Compositing
 
             url = ImageUrlUtility.Normalize(url);
             if (url == null) return false;
-            if (!_cache.TryGetValue(url, out var cached) || cached.Wrap == null) return false;
+
+            string cacheKey = ResolveCacheKey(url, worldScaleX);
+            if (!_cache.TryGetValue(cacheKey, out var cached) || cached.Wrap == null) return false;
 
             lock (cached.Sync)
             {
@@ -111,16 +127,28 @@ namespace XivMediaPlayer.Compositing
             }
         }
 
-        public void Invalidate(string? url)
+        public void Invalidate(string? url, float worldScaleX = 0f)
         {
             url = ImageUrlUtility.Normalize(url);
             if (url == null) return;
 
-            _retryAfterUtc.TryRemove(url, out _);
-            if (_cache.TryRemove(url, out var cached))
+            string cacheKey = ResolveCacheKey(url, worldScaleX);
+            _retryAfterUtc.TryRemove(cacheKey, out _);
+            if (_cache.TryRemove(cacheKey, out var cached))
             {
                 ReleaseGpuResources(cached);
             }
+        }
+
+        private static string ResolveCacheKey(string url, float worldScaleX)
+        {
+            if (worldScaleX <= 0.001f)
+            {
+                return url;
+            }
+
+            int targetPixelWidth = BannerVideoConverter.EstimateTargetPixelWidth(worldScaleX);
+            return BannerVideoConverter.GetScaledCacheKey(url, targetPixelWidth);
         }
 
         public void UpdateAnimations()
@@ -166,47 +194,151 @@ namespace XivMediaPlayer.Compositing
             }
         }
 
-        private async Task LoadInternalAsync(string url)
+        private async Task LoadInternalAsync(string url, string cacheKey, int targetPixelWidth)
         {
             try
             {
                 using var request = new HttpRequestMessage(HttpMethod.Get, url);
-                using var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
+                using var cts = new System.Threading.CancellationTokenSource(VideoDownloadTimeout);
+                using var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cts.Token);
                 response.EnsureSuccessStatusCode();
 
                 var contentType = response.Content.Headers.ContentType?.MediaType;
-                var data = await response.Content.ReadAsByteArrayAsync();
+                var data = await response.Content.ReadAsByteArrayAsync(cts.Token);
                 if (data.Length == 0)
                 {
-                    MarkLoadFailed(url, "Image URL returned an empty response.");
+                    MarkLoadFailed(cacheKey, "Image URL returned an empty response.");
                     return;
                 }
 
-                if (!IsLikelyImagePayload(data, contentType))
+                CachedImage? cached = null;
+                if (BannerVideoConverter.IsLikelyVideoPayload(data, contentType, url))
                 {
-                    MarkLoadFailed(url, $"URL did not return an image (Content-Type: {contentType ?? "unknown"}). Use a direct image link.");
-                    return;
-                }
+                    if (targetPixelWidth <= 0)
+                    {
+                        targetPixelWidth = BannerVideoConverter.EstimateTargetPixelWidth(2f);
+                    }
 
-                if (!TryDecodeImage(data, out var cached) || cached == null)
+                    cached = await TryPrepareVideoAsync(url, data, targetPixelWidth).ConfigureAwait(false);
+                    if (cached == null)
+                    {
+                        MarkLoadFailed(cacheKey, "Video banner could not be converted. Ensure ffmpeg.exe is available.");
+                        return;
+                    }
+                }
+                else
                 {
-                    MarkLoadFailed(url, "Download succeeded but the image could not be decoded.");
-                    return;
+                    if (!IsLikelyImagePayload(data, contentType))
+                    {
+                        MarkLoadFailed(cacheKey, $"URL did not return an image (Content-Type: {contentType ?? "unknown"}). Use a direct image or video link.");
+                        return;
+                    }
+
+                    if (!TryDecodeImage(data, out cached) || cached == null)
+                    {
+                        MarkLoadFailed(cacheKey, "Download succeeded but the image could not be decoded.");
+                        return;
+                    }
                 }
 
-                _retryAfterUtc.TryRemove(url, out _);
+                _retryAfterUtc.TryRemove(cacheKey, out _);
 
-                if (_cache.TryGetValue(url, out var existing))
+                if (_cache.TryGetValue(cacheKey, out var existing))
                 {
                     ReleaseGpuResources(existing);
                 }
 
-                _cache[url] = cached;
+                _cache[cacheKey] = cached;
             }
             catch (Exception ex)
             {
-                MarkLoadFailed(url, ex.Message, ex);
+                MarkLoadFailed(cacheKey, ex.Message, ex);
             }
+        }
+
+        private async Task<CachedImage?> TryPrepareVideoAsync(string sourceUrl, byte[] sourceBytes, int targetPixelWidth)
+        {
+            string ffmpegPath = _ffmpegPathProvider();
+            var frameSet = await BannerVideoConverter.EnsureFramesAsync(
+                ffmpegPath,
+                _bannerVideoCacheRoot,
+                sourceUrl,
+                sourceBytes,
+                targetPixelWidth).ConfigureAwait(false);
+
+            if (frameSet == null || frameSet.FramePaths.Count == 0)
+            {
+                return null;
+            }
+
+            return TryDecodeVideoFrames(frameSet);
+        }
+
+        private CachedImage? TryDecodeVideoFrames(BannerVideoFrameSet frameSet)
+        {
+            int frameCount = frameSet.FramePaths.Count;
+            var frameWraps = new IDalamudTextureWrap[frameCount];
+            var delaysMs = new int[frameCount];
+            int width = 0;
+            int height = 0;
+
+            try
+            {
+                for (int i = 0; i < frameCount; i++)
+                {
+                    using var stream = File.OpenRead(frameSet.FramePaths[i]);
+                    using var image = Image.Load<Rgba32>(stream);
+                    if (image.Width <= 0 || image.Height <= 0)
+                    {
+                        ReleaseFrameWraps(frameWraps, i);
+                        return null;
+                    }
+
+                    if (i == 0)
+                    {
+                        width = image.Width;
+                        height = image.Height;
+                    }
+
+                    var frameData = ExtractBgra32(image);
+                    var wrap = CreateTextureFromRaw(frameData, image.Width, image.Height);
+                    if (wrap == null)
+                    {
+                        ReleaseFrameWraps(frameWraps, i);
+                        return null;
+                    }
+
+                    frameWraps[i] = wrap;
+                    delaysMs[i] = frameSet.FrameDelayMs;
+                }
+            }
+            catch (Exception ex)
+            {
+                ReleaseFrameWraps(frameWraps, frameWraps.Length);
+                _log.Debug(ex, "Video banner frame decode failed.");
+                return null;
+            }
+
+            if (frameCount == 1)
+            {
+                return new CachedImage
+                {
+                    Wrap = frameWraps[0],
+                    Width = width,
+                    Height = height
+                };
+            }
+
+            return new CachedImage
+            {
+                Wrap = frameWraps[0],
+                FrameWraps = frameWraps,
+                Width = width,
+                Height = height,
+                FrameDelaysMs = delaysMs,
+                CurrentFrameIndex = 0,
+                AccumulatedMs = 0
+            };
         }
 
         private void MarkLoadFailed(string url, string message, Exception? ex = null)

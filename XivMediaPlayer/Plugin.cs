@@ -159,6 +159,10 @@ namespace XivMediaPlayer
         private bool _bgmWasMutedByUs;
         private bool _wasHousingMenuOpen = false;
         private bool _pendingConfigSave;
+        private DateTime _configDirtyAtUtc = DateTime.MinValue;
+        private DateTime _lastConfigSaveUtc = DateTime.MinValue;
+        private DateTime _nextConfigSaveAttemptUtc = DateTime.MinValue;
+        private DateTime _lastMediaStatePersistUtc = DateTime.MinValue;
         private readonly ConcurrentQueue<Action> _frameworkActions = new();
         private DateTime? _deferredBgmRestoreTime = null;
         private bool _killRestartQueued;
@@ -591,6 +595,7 @@ namespace XivMediaPlayer
         private readonly List<Networking.Models.BannerPlacement> _roomBannerPlacements = new();
         public Networking.Models.BannerPlacement? CurrentBannerPlacement { get; internal set; }
         internal Compositing.ImageTextureCache ImageTextureCache => _imageTextureCache;
+        private readonly Dictionary<string, float> _bannerBakedMediaScaleById = new(StringComparer.OrdinalIgnoreCase);
         private List<Networking.Models.TvPlacement> _nearbyTvs = new();
         private string? _interactionTvId;
 
@@ -658,8 +663,11 @@ namespace XivMediaPlayer
             // Load configuration
             _config = (Configuration)_pluginInterface.GetPluginConfig()
                  ?? new Configuration();
-            _config.Initialize(_pluginInterface);
-            _config.Migrate();
+            _config.Initialize(_pluginInterface, MarkConfigDirty);
+            if (_config.Migrate())
+            {
+                MarkConfigDirty();
+            }
             InitializeLocalization();
             RefreshDiagnosticReportEligibility();
 
@@ -707,7 +715,11 @@ namespace XivMediaPlayer
             _titleTextureManager = new Compositing.TitleTextureManager(_textureProvider);
             _historyMenuTextureManager = new Compositing.HistoryMenuTextureManager(_textureProvider);
             _queueMenuTextureManager = new Compositing.QueueMenuTextureManager(_textureProvider);
-            _imageTextureCache = new Compositing.ImageTextureCache(_textureProvider, _pluginLog);
+            _imageTextureCache = new Compositing.ImageTextureCache(
+                _textureProvider,
+                _pluginLog,
+                () => Path.Combine(_dependencyManager.DependenciesDir, "ffmpeg.exe"),
+                Path.Combine(configDir, "BannerVideoCache"));
             _placementManipulator.Configure(
                 OnPlacementSelectionChanged,
                 OnPlacementTransformPreview,
@@ -726,8 +738,8 @@ namespace XivMediaPlayer
               {
                   ApplyWorkingTransformToCurrentSelection();
                   SyncPlacementManipulatorFromWorkingTransform();
-                  _config.Save();
                   SaveScreenForCurrentLocation();
+                  MarkConfigDirty();
                   SchedulePlacementServerSync();
               },
               onPlaceAtCamera: () => PlaceScreenAtCamera()
@@ -797,7 +809,7 @@ namespace XivMediaPlayer
                 }
             }
 
-            FlushPendingConfigSave();
+            MaybePersistMediaState();
 
             if (!_clientState.IsLoggedIn) return;
 
@@ -1064,6 +1076,8 @@ namespace XivMediaPlayer
 
             // Clipboard cookie watcher. Check every 5 seconds.
             CheckClipboardForCookies();
+
+            FlushPendingConfigSave();
         }
 
         private void CheckClipboardForCookies()
@@ -2573,6 +2587,8 @@ namespace XivMediaPlayer
 
         private const int ScreensaverStyleCustomImage = 6;
 
+        private static float ResolveMediaWorldScale(float scaleX) => scaleX > 0.001f ? scaleX : 2f;
+
         private static MediaPlayerCore.Compositing.WorldScreenTransform TvPlacementToTransform(TvPlacement tv)
         {
             return new MediaPlayerCore.Compositing.WorldScreenTransform
@@ -2616,7 +2632,7 @@ namespace XivMediaPlayer
             ApplyTransformToRenderer(_worldRenderer, TvPlacementToTransform(tv));
             if (tv.ScreensaverStyle == ScreensaverStyleCustomImage && !string.IsNullOrWhiteSpace(tv.IdleBrandingUrl))
             {
-                _imageTextureCache.RequestLoad(tv.IdleBrandingUrl);
+                _imageTextureCache.RequestLoad(tv.IdleBrandingUrl, ResolveMediaWorldScale(tv.ScaleX));
             }
         }
 
@@ -2637,10 +2653,11 @@ namespace XivMediaPlayer
             };
         }
 
-        internal bool IsImageTextureReady(string? url)
+        internal bool IsImageTextureReady(string? url, float worldScaleX = 0f)
         {
             if (string.IsNullOrWhiteSpace(url)) return false;
-            return _imageTextureCache.TryGetTexture(url.Trim(), out _, out int width, out int height)
+            float scale = ResolveMediaWorldScale(worldScaleX);
+            return _imageTextureCache.TryGetTexture(url.Trim(), out _, out int width, out int height, scale)
                 && width > 0 && height > 0;
         }
 
@@ -2663,8 +2680,12 @@ namespace XivMediaPlayer
 
             if (string.IsNullOrWhiteSpace(url)) return false;
 
-            _imageTextureCache.RequestLoad(url);
-            if (!_imageTextureCache.TryGetTexture(url, out srv, out int width, out int height) || width <= 0 || height <= 0)
+            float worldScale = ResolveMediaWorldScale(renderTransform.Scale.X > 0.001f
+                ? renderTransform.Scale.X
+                : tv.ScaleX);
+
+            _imageTextureCache.RequestLoad(url, worldScale);
+            if (!_imageTextureCache.TryGetTexture(url, out srv, out int width, out int height, worldScale) || width <= 0 || height <= 0)
             {
                 return false;
             }
@@ -2695,12 +2716,12 @@ namespace XivMediaPlayer
             if (!string.IsNullOrWhiteSpace(previous)
                 && !string.Equals(previous, trimmed, StringComparison.OrdinalIgnoreCase))
             {
-                _imageTextureCache.Invalidate(previous);
+                _imageTextureCache.Invalidate(previous, ResolveMediaWorldScale(transform.Scale.X));
             }
 
             if (!string.IsNullOrWhiteSpace(trimmed))
             {
-                _imageTextureCache.RequestLoad(trimmed);
+                _imageTextureCache.RequestLoad(trimmed, ResolveMediaWorldScale(transform.Scale.X));
             }
 
             if (CurrentTvPlacement != null)
@@ -2719,7 +2740,7 @@ namespace XivMediaPlayer
                 if (tv == null || tv.ScreensaverStyle != ScreensaverStyleCustomImage) continue;
                 if (!string.IsNullOrWhiteSpace(tv.IdleBrandingUrl))
                 {
-                    _imageTextureCache.RequestLoad(tv.IdleBrandingUrl);
+                    _imageTextureCache.RequestLoad(tv.IdleBrandingUrl, ResolveMediaWorldScale(tv.ScaleX));
                 }
             }
         }
@@ -2760,13 +2781,50 @@ namespace XivMediaPlayer
         {
             widthOverHeight = 1f;
             if (banner == null || string.IsNullOrWhiteSpace(banner.ImageUrl)) return false;
-            if (!_imageTextureCache.TryGetTexture(banner.ImageUrl, out _, out int width, out int height) || width <= 0 || height <= 0)
+            float mediaScale = GetBannerMediaLoadScale(banner);
+            if (!_imageTextureCache.TryGetTexture(banner.ImageUrl, out _, out int width, out int height, mediaScale) || width <= 0 || height <= 0)
             {
                 return false;
             }
 
             widthOverHeight = width / (float)height;
             return true;
+        }
+
+        private float GetBannerMediaLoadScale(BannerPlacement banner)
+        {
+            if (_bannerBakedMediaScaleById.TryGetValue(banner.Id, out float bakedScale)
+                && IsLiveEditingBanner(banner)
+                && _placementManipulator.IsDragging)
+            {
+                return bakedScale;
+            }
+
+            return banner.ScaleX;
+        }
+
+        private void RefreshBannerMediaForScale(BannerPlacement banner, float previousBakedScaleX)
+        {
+            if (string.IsNullOrWhiteSpace(banner.ImageUrl)) return;
+
+            float newScale = ResolveMediaWorldScale(banner.ScaleX);
+            float oldScale = previousBakedScaleX > 0.001f
+                ? ResolveMediaWorldScale(previousBakedScaleX)
+                : newScale;
+
+            if (previousBakedScaleX > 0.001f
+                && BannerVideoConverter.EstimateTargetPixelWidth(oldScale)
+                    != BannerVideoConverter.EstimateTargetPixelWidth(newScale))
+            {
+                _imageTextureCache.Invalidate(banner.ImageUrl, oldScale);
+                _imageTextureCache.RequestLoad(banner.ImageUrl, banner.ScaleX);
+            }
+            else if (previousBakedScaleX <= 0.001f)
+            {
+                _imageTextureCache.RequestLoad(banner.ImageUrl, banner.ScaleX);
+            }
+
+            _bannerBakedMediaScaleById[banner.Id] = banner.ScaleX;
         }
 
         private System.Numerics.Vector2 ResolveBannerScale(BannerPlacement banner)
@@ -2814,6 +2872,8 @@ namespace XivMediaPlayer
         {
             if (!IsValidBannerPlacement(banner)) return;
 
+            _bannerBakedMediaScaleById.TryGetValue(banner.Id, out float previousBakedScaleX);
+
             int index = _roomBannerPlacements.FindIndex(b => b != null && b.Id == banner.Id);
             if (index >= 0)
             {
@@ -2824,10 +2884,7 @@ namespace XivMediaPlayer
                 _roomBannerPlacements.Add(banner);
             }
 
-            if (!string.IsNullOrWhiteSpace(banner.ImageUrl))
-            {
-                _imageTextureCache.RequestLoad(banner.ImageUrl);
-            }
+            RefreshBannerMediaForScale(banner, previousBakedScaleX);
         }
 
         internal void ApplyBannerImageUrl(string? imageUrl)
@@ -2835,9 +2892,17 @@ namespace XivMediaPlayer
             if (!IsBannerEditActive() || CurrentBannerPlacement == null) return;
 
             string trimmed = imageUrl?.Trim() ?? string.Empty;
-            if (string.Equals(CurrentBannerPlacement.ImageUrl, trimmed, StringComparison.OrdinalIgnoreCase)) return;
+            string previousUrl = CurrentBannerPlacement.ImageUrl ?? string.Empty;
+            if (string.Equals(previousUrl, trimmed, StringComparison.OrdinalIgnoreCase)) return;
+
+            if (!string.IsNullOrWhiteSpace(previousUrl)
+                && _bannerBakedMediaScaleById.TryGetValue(CurrentBannerPlacement.Id, out float bakedScale))
+            {
+                _imageTextureCache.Invalidate(previousUrl, ResolveMediaWorldScale(bakedScale));
+            }
 
             CurrentBannerPlacement.ImageUrl = trimmed;
+            _bannerBakedMediaScaleById.Remove(CurrentBannerPlacement.Id);
             UpsertRoomBanner(CurrentBannerPlacement);
 
             if (TryGetBannerImageAspect(CurrentBannerPlacement, out _))
@@ -2895,6 +2960,7 @@ namespace XivMediaPlayer
         internal void RemoveRoomBanner(string bannerId)
         {
             _roomBannerPlacements.RemoveAll(b => b.Id == bannerId);
+            _bannerBakedMediaScaleById.Remove(bannerId);
         }
 
         internal void UpsertRoomVenueSettings(Networking.Models.RoomVenueSettings settings)
@@ -2902,7 +2968,7 @@ namespace XivMediaPlayer
             _roomVenueSettings = settings;
             if (!string.IsNullOrWhiteSpace(settings.IdleBrandingUrl))
             {
-                _imageTextureCache.RequestLoad(settings.IdleBrandingUrl);
+                _imageTextureCache.RequestLoad(settings.IdleBrandingUrl, ResolveMediaWorldScale(2f));
             }
         }
 
@@ -3427,9 +3493,10 @@ namespace XivMediaPlayer
                 {
                     PrepareBannerAspectForRender(banner);
 
-                    if (!_imageTextureCache.TryGetTexture(banner.ImageUrl, out IntPtr bannerSrv, out int bannerW, out int bannerH))
+                    float mediaScale = GetBannerMediaLoadScale(banner);
+                    if (!_imageTextureCache.TryGetTexture(banner.ImageUrl, out IntPtr bannerSrv, out int bannerW, out int bannerH, mediaScale))
                     {
-                        _imageTextureCache.RequestLoad(banner.ImageUrl);
+                        _imageTextureCache.RequestLoad(banner.ImageUrl, mediaScale);
                         continue;
                     }
 
@@ -3942,7 +4009,7 @@ namespace XivMediaPlayer
                 _roomVenueSettings = venueSettings ?? new Networking.Models.RoomVenueSettings { LocationKey = primaryKey };
                 if (!string.IsNullOrWhiteSpace(_roomVenueSettings.IdleBrandingUrl))
                 {
-                    _imageTextureCache.RequestLoad(_roomVenueSettings.IdleBrandingUrl);
+                    _imageTextureCache.RequestLoad(_roomVenueSettings.IdleBrandingUrl, ResolveMediaWorldScale(2f));
                 }
 
                 PreloadTvIdleBrandingTextures(_roomTvPlacements.Where(t => t != null && t.LocationKey == primaryKey));
@@ -3968,7 +4035,7 @@ namespace XivMediaPlayer
                 {
                     if (!string.IsNullOrWhiteSpace(banner.ImageUrl))
                     {
-                        _imageTextureCache.RequestLoad(banner.ImageUrl);
+                        _imageTextureCache.RequestLoad(banner.ImageUrl, banner.ScaleX);
                     }
                 }
 
@@ -4059,12 +4126,11 @@ namespace XivMediaPlayer
         /// <summary>
         /// Saves the current media URL, queue, and timecode for the current location.
         /// </summary>
-        private void SaveMediaStateForCurrentLocation()
+        private bool TryBuildRoomMediaState(out string key, out RoomMediaState state)
         {
-            var key = CurrentTvPlacement?.LocationKey ?? _lastLocationKey;
-            if (string.IsNullOrEmpty(key)) return;
-
-            var state = new RoomMediaState();
+            key = CurrentTvPlacement?.LocationKey ?? _lastLocationKey;
+            state = new RoomMediaState();
+            if (string.IsNullOrEmpty(key)) return false;
 
             var activeStream = _mediaManager?.ActiveStream;
             if (activeStream != null && !string.IsNullOrEmpty(activeStream.SoundPath))
@@ -4079,10 +4145,56 @@ namespace XivMediaPlayer
             }
 
             state.Playlist = new System.Collections.Generic.List<string>(_mediaQueue);
+            return true;
+        }
+
+        private static bool RoomMediaStatesEqual(RoomMediaState left, RoomMediaState right)
+        {
+            if (!string.Equals(left.CurrentUrl, right.CurrentUrl, StringComparison.Ordinal)) return false;
+            if (Math.Abs(left.TimecodeMs - right.TimecodeMs) > 5000) return false;
+            if (left.Playlist.Count != right.Playlist.Count) return false;
+            for (int i = 0; i < left.Playlist.Count; i++)
+            {
+                if (!string.Equals(left.Playlist[i], right.Playlist[i], StringComparison.Ordinal)) return false;
+            }
+
+            return true;
+        }
+
+        private void SaveMediaStateForCurrentLocation(bool queueDiskSave = true, bool logSave = true)
+        {
+            if (!TryBuildRoomMediaState(out var key, out var state)) return;
+
+            if (_config.RoomMediaStates.TryGetValue(key, out var existing)
+                && RoomMediaStatesEqual(existing, state))
+            {
+                return;
+            }
 
             _config.RoomMediaStates[key] = state;
-            _config.Save();
-            _pluginLog.Information($"Saved media state for {key}: {state.CurrentUrl} @ {state.TimecodeMs}ms ({state.Playlist.Count} queued)");
+            if (queueDiskSave)
+            {
+                MarkConfigDirty();
+            }
+            if (logSave)
+            {
+                _pluginLog.Information($"Saved media state for {key}: {state.CurrentUrl} @ {state.TimecodeMs}ms ({state.Playlist.Count} queued)");
+            }
+        }
+
+        private void MaybePersistMediaState()
+        {
+            if (!_clientState.IsLoggedIn) return;
+            if (!TryBuildRoomMediaState(out _, out _)) return;
+
+            var activeStream = _mediaManager?.ActiveStream;
+            if (activeStream == null && _mediaQueue.Count == 0) return;
+
+            var now = DateTime.UtcNow;
+            if ((now - _lastMediaStatePersistUtc).TotalSeconds < 30) return;
+            _lastMediaStatePersistUtc = now;
+
+            SaveMediaStateForCurrentLocation(logSave: false);
         }
 
         /// <summary>
@@ -4182,8 +4294,12 @@ namespace XivMediaPlayer
                     TimecodeMs = sync.TimecodeMs,
                     Playlist = new List<string>(mediaQueueArray)
                 };
-                _config.RoomMediaStates[key] = state;
-                _config.Save();
+                if (!_config.RoomMediaStates.TryGetValue(key, out var existingState)
+                    || !RoomMediaStatesEqual(existingState, state))
+                {
+                    _config.RoomMediaStates[key] = state;
+                    MarkConfigDirty();
+                }
 
                 try
                 {
@@ -4638,9 +4754,16 @@ namespace XivMediaPlayer
                 TimecodeMs = time,
                 LastPlayed = DateTime.UtcNow
             };
+
+            if (_config.WatchHistory.TryGetValue(_lastStreamURL, out var existing)
+                && existing.TimecodeMs == time
+                && string.Equals(existing.Title, title, StringComparison.Ordinal))
+            {
+                return;
+            }
             
             _config.WatchHistory[_lastStreamURL] = entry;
-            _config.Save();
+            MarkConfigDirty();
         }
 
         /// <summary>
@@ -5006,6 +5129,7 @@ namespace XivMediaPlayer
                                     float volProgress = (uv.X - 0.32f) / 0.28f;
                                     _mediaManager.LiveStreamVolume = Math.Clamp(volProgress * 3f, 0f, 3f);
                                     _config.LivestreamVolume = _mediaManager.LiveStreamVolume;
+                                    MarkConfigDirty();
                                 }
                             }
                             
@@ -5023,11 +5147,6 @@ namespace XivMediaPlayer
                                     }
                                 }
                             }
-                        }
-
-                        if (isMouseReleased)
-                        {
-                            _config.Save(); // Save volume if it changed
                         }
 
                         if (isMouseReleased && _clickStartedOnTv)
@@ -5810,13 +5929,49 @@ namespace XivMediaPlayer
             }
         }
 
-        private void MarkConfigDirty() => _pendingConfigSave = true;
+        private void MarkConfigDirty()
+        {
+            _pendingConfigSave = true;
+            if (_configDirtyAtUtc == DateTime.MinValue)
+            {
+                _configDirtyAtUtc = DateTime.UtcNow;
+            }
+        }
 
         private void FlushPendingConfigSave()
         {
-            if (!_pendingConfigSave) return;
-            _pendingConfigSave = false;
-            _config.Save();
+            if (_disposed || !_pendingConfigSave) return;
+
+            var now = DateTime.UtcNow;
+            if (now < _nextConfigSaveAttemptUtc) return;
+
+            // Coalesce bursty updates (slider drags, periodic media snapshots, etc.).
+            if ((now - _configDirtyAtUtc).TotalMilliseconds < 750) return;
+
+            // Avoid hammering disk while another write may still be finishing.
+            if (_lastConfigSaveUtc != DateTime.MinValue
+                && (now - _lastConfigSaveUtc).TotalSeconds < 2)
+            {
+                return;
+            }
+
+            switch (_config.SaveImmediate(out _))
+            {
+                case ConfigSaveResult.Saved:
+                    _pendingConfigSave = false;
+                    _configDirtyAtUtc = DateTime.MinValue;
+                    _nextConfigSaveAttemptUtc = DateTime.MinValue;
+                    _lastConfigSaveUtc = now;
+                    break;
+
+                case ConfigSaveResult.SkippedInProgress:
+                    break;
+
+                case ConfigSaveResult.Failed:
+                    // Silent retry with backoff — file locks are usually transient.
+                    _nextConfigSaveAttemptUtc = now.AddSeconds(5);
+                    break;
+            }
         }
 
         #endregion
@@ -6495,8 +6650,9 @@ namespace XivMediaPlayer
 
             UpdateWatchHistory();
 
+            // Update in-memory config only; Dalamud tears down file storage on a background thread during unload.
             SaveScreenForCurrentLocation();
-            SaveMediaStateForCurrentLocation();
+            SaveMediaStateForCurrentLocation(queueDiskSave: false);
 
             _framework.Update -= OnFrameworkUpdate;
             _clientState.TerritoryChanged -= OnTerritoryChanged;
