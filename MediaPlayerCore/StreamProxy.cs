@@ -27,6 +27,167 @@ namespace MediaPlayerCore
             public string PreFetchedM3u8Content { get; set; }
             public Dictionary<string, string> Headers { get; set; }
             public HttpClient Client { get; set; }
+            public TemporaryMediaCache? Cache { get; set; }
+        }
+
+        /// <summary>
+        /// Caches data locally to prevent reseeking and reseeking from and unseekable source.
+        /// </summary>
+        public sealed class TemporaryMediaCache : IDisposable
+        {
+            private readonly object _sync = new();
+            private readonly CancellationTokenSource _cancellation = new();
+            private TaskCompletionSource<bool> _changed = NewSignal();
+            private long _availableBytes;
+            private long? _totalBytes;
+            private string? _contentType;
+            private bool _completed;
+            private Exception? _failure;
+
+            public string Path { get; } = System.IO.Path.Combine(System.IO.Path.GetTempPath(),
+                $"xivmp-media-{Guid.NewGuid():N}.cache");
+
+            public void Start(HttpClient client, string url)
+            {
+                _ = Task.Run(() => DownloadAsync(client, url, _cancellation.Token));
+            }
+
+            public async Task WaitForMetadataAsync()
+            {
+                while (true)
+                {
+                    Task wait;
+                    lock (_sync)
+                    {
+                        if (_totalBytes.HasValue || _contentType != null || _completed || _failure != null) return;
+                        wait = _changed.Task;
+                    }
+                    await wait.ConfigureAwait(false);
+                }
+            }
+
+            public (long AvailableBytes, long? TotalBytes, string? ContentType, bool Completed, Exception? Failure) Snapshot()
+            {
+                lock (_sync) return (_availableBytes, _totalBytes, _contentType, _completed, _failure);
+            }
+
+            public async Task WaitForBytesAsync(long requiredBytes)
+            {
+                while (true)
+                {
+                    Task wait;
+                    lock (_sync)
+                    {
+                        if (_availableBytes >= requiredBytes || _completed || _failure != null) return;
+                        wait = _changed.Task;
+                    }
+                    await wait.ConfigureAwait(false);
+                }
+            }
+
+            public async Task CopyToAsync(Stream destination, long offset, long? endOffset)
+            {
+                byte[] buffer = new byte[81920];
+                long position = offset;
+                using var file = new FileStream(Path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite,
+                    buffer.Length, FileOptions.Asynchronous | FileOptions.SequentialScan);
+                file.Position = offset;
+
+                while (!endOffset.HasValue || position <= endOffset.Value)
+                {
+                    await WaitForBytesAsync(position + 1).ConfigureAwait(false);
+                    var state = Snapshot();
+                    if (state.AvailableBytes <= position)
+                    {
+                        // Download finished or failed before this range. The
+                        // response ends naturally; the caller has already sent
+                        // the correct bounded response when a total was known.
+                        break;
+                    }
+
+                    int bytesToRead = (int)Math.Min(buffer.Length, state.AvailableBytes - position);
+                    if (endOffset.HasValue)
+                    {
+                        bytesToRead = (int)Math.Min(bytesToRead, endOffset.Value - position + 1);
+                    }
+
+                    int read = await file.ReadAsync(buffer, 0, bytesToRead).ConfigureAwait(false);
+                    if (read == 0)
+                    {
+                        // A writer update can become visible before this handle
+                        // observes the new length. Wait for the next update.
+                        await Task.Delay(10).ConfigureAwait(false);
+                        continue;
+                    }
+
+                    await destination.WriteAsync(buffer, 0, read).ConfigureAwait(false);
+                    position += read;
+                }
+            }
+
+            private async Task DownloadAsync(HttpClient client, string url, CancellationToken cancellationToken)
+            {
+                try
+                {
+                    using var response = await client.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
+                    response.EnsureSuccessStatusCode();
+                    await using var source = await response.Content.ReadAsStreamAsync().ConfigureAwait(false);
+                    await using var destination = new FileStream(Path, FileMode.CreateNew, FileAccess.Write, FileShare.Read,
+                        81920, FileOptions.Asynchronous | FileOptions.SequentialScan);
+                    lock (_sync)
+                    {
+                        _totalBytes = response.Content.Headers.ContentLength;
+                        _contentType = response.Content.Headers.ContentType?.ToString();
+                        SignalChanged();
+                    }
+
+                    byte[] buffer = new byte[81920];
+                    int read;
+                    while ((read = await source.ReadAsync(buffer, 0, buffer.Length, cancellationToken).ConfigureAwait(false)) > 0)
+                    {
+                        await destination.WriteAsync(buffer, 0, read, cancellationToken).ConfigureAwait(false);
+                        await destination.FlushAsync(cancellationToken).ConfigureAwait(false);
+                        lock (_sync)
+                        {
+                            _availableBytes += read;
+                            SignalChanged();
+                        }
+                    }
+                }
+                catch (Exception ex) when (!(ex is OperationCanceledException && _cancellation.IsCancellationRequested))
+                {
+                    lock (_sync)
+                    {
+                        _failure = ex;
+                        SignalChanged();
+                    }
+                }
+                finally
+                {
+                    lock (_sync)
+                    {
+                        _completed = true;
+                        SignalChanged();
+                    }
+                }
+            }
+
+            private void SignalChanged()
+            {
+                var previous = _changed;
+                _changed = NewSignal();
+                previous.TrySetResult(true);
+            }
+
+            private static TaskCompletionSource<bool> NewSignal()
+                => new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            public void Dispose()
+            {
+                _cancellation.Cancel();
+                _cancellation.Dispose();
+                try { File.Delete(Path); } catch { }
+            }
         }
 
         private StreamProxy()
@@ -164,8 +325,10 @@ namespace MediaPlayerCore
             string sessionId = Guid.NewGuid().ToString("N");
             
             var client = CreateStreamingHttpClient(headers, mediaUrl);
+            var cache = new TemporaryMediaCache();
+            cache.Start(client, mediaUrl);
 
-            _sessions[sessionId] = new ProxySession { OriginalM3u8Url = mediaUrl, Headers = headers, Client = client };
+            _sessions[sessionId] = new ProxySession { OriginalM3u8Url = mediaUrl, Headers = headers, Client = client, Cache = cache };
 
             string targetBase64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(mediaUrl));
             return $"http://127.0.0.1:{_port}/proxy_media?sid={sessionId}&target={Uri.EscapeDataString(targetBase64)}";
@@ -290,6 +453,12 @@ namespace MediaPlayerCore
                 }
                 else if (path == "/proxy_media")
                 {
+                    if (session.Cache != null)
+                    {
+                        await ServeCachedMediaAsync(req, res, session.Cache);
+                        return;
+                    }
+
                     string targetUrl = Encoding.UTF8.GetString(Convert.FromBase64String(req.QueryString["target"]));
                     var requestMessage = new HttpRequestMessage(HttpMethod.Get, targetUrl);
 
@@ -414,6 +583,72 @@ namespace MediaPlayerCore
             }
         }
 
+        private static async Task ServeCachedMediaAsync(HttpListenerRequest request, HttpListenerResponse response,
+            TemporaryMediaCache cache)
+        {
+            await cache.WaitForMetadataAsync().ConfigureAwait(false);
+            var state = cache.Snapshot();
+            if (state.Failure != null)
+            {
+                response.StatusCode = (int)HttpStatusCode.BadGateway;
+                return;
+            }
+
+            long offset = 0;
+            long? requestedEnd = null;
+            string? rangeHeader = request.Headers["Range"];
+            bool isRangeRequest = !string.IsNullOrEmpty(rangeHeader) && rangeHeader.StartsWith("bytes=", StringComparison.OrdinalIgnoreCase);
+            if (isRangeRequest)
+            {
+                string[] parts = rangeHeader!.Substring("bytes=".Length).Split('-', 2);
+                if (!long.TryParse(parts[0], out offset) || offset < 0)
+                {
+                    response.StatusCode = (int)HttpStatusCode.RequestedRangeNotSatisfiable;
+                    return;
+                }
+                if (parts.Length == 2 && long.TryParse(parts[1], out long parsedEnd)) requestedEnd = parsedEnd;
+            }
+
+            if (state.TotalBytes.HasValue && offset >= state.TotalBytes.Value)
+            {
+                response.StatusCode = (int)HttpStatusCode.RequestedRangeNotSatisfiable;
+                response.Headers["Content-Range"] = $"bytes */{state.TotalBytes.Value}";
+                return;
+            }
+
+            response.ContentType = state.ContentType ?? "application/octet-stream";
+            response.Headers["Accept-Ranges"] = "bytes";
+            long? end = requestedEnd;
+            if (state.TotalBytes.HasValue)
+            {
+                end = Math.Min(end ?? state.TotalBytes.Value - 1, state.TotalBytes.Value - 1);
+            }
+
+            if (isRangeRequest)
+            {
+                response.StatusCode = (int)HttpStatusCode.PartialContent;
+                if (state.TotalBytes.HasValue)
+                {
+                    response.Headers["Content-Range"] = $"bytes {offset}-{end}/{state.TotalBytes.Value}";
+                    response.ContentLength64 = end!.Value - offset + 1;
+                }
+                else
+                {
+                    response.SendChunked = true;
+                }
+            }
+            else if (state.TotalBytes.HasValue)
+            {
+                response.ContentLength64 = state.TotalBytes.Value;
+            }
+            else
+            {
+                response.SendChunked = true;
+            }
+
+            await cache.CopyToAsync(response.OutputStream, offset, end).ConfigureAwait(false);
+        }
+
         private string RewriteProxiedUrl(Uri baseUri, string originalUrl, string sid)
         {
             if (!Uri.TryCreate(baseUri, originalUrl, out Uri absoluteUrl))
@@ -477,6 +712,7 @@ namespace MediaPlayerCore
         {
             if (_sessions.TryRemove(sessionId, out var session))
             {
+                try { session.Cache?.Dispose(); } catch { }
                 try { session.Client?.Dispose(); } catch { }
             }
         }
