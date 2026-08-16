@@ -170,6 +170,14 @@ namespace MediaPlayerCore {
     
     public LibVLCSharp.Shared.VLCState VlcState => _vlcPlayer?.State ?? LibVLCSharp.Shared.VLCState.Stopped;
 
+    /// <summary>Whether VLC supports timecode seeks for the current source.</summary>
+    public bool IsTimecodeSeekable {
+      get {
+        if (_vlcPlayer == null || _isLiveStream) return false;
+        try { return _vlcPlayer.IsSeekable; } catch { return false; }
+      }
+    }
+
     public bool IsLiveStream => _isLiveStream;
 
     private int PrepareSabrResumeSeek(string mediaPath, int startTimeMs)
@@ -234,6 +242,10 @@ namespace MediaPlayerCore {
       => message.Contains("DEMUX_GET_TIME", StringComparison.OrdinalIgnoreCase)
         || message.Contains("DEMUX_GET_LENGTH", StringComparison.OrdinalIgnoreCase)
         || message.Contains("DEMUX_GET_PTS", StringComparison.OrdinalIgnoreCase)
+        // These are produced by VLC's FFmpeg bridge when a non-seekable HTTP
+        // source has no reference clock. They are not decode failures.
+        || message.Contains("Timestamp conversion failed", StringComparison.OrdinalIgnoreCase)
+        || message.Contains("Could not convert timestamp", StringComparison.OrdinalIgnoreCase)
         || message.Contains("dav1d", StringComparison.OrdinalIgnoreCase)
         || message.Contains("Decoder feed error", StringComparison.OrdinalIgnoreCase)
         || message.Contains("Failed to set on top", StringComparison.OrdinalIgnoreCase);
@@ -245,10 +257,9 @@ namespace MediaPlayerCore {
         }
 
         try {
-          if (!_vlcPlayer.IsSeekable) {
-            return 0;
-          }
-
+          // Some HTTP VOD demuxers report non-seekable even though VLC still
+          // provides a valid playback clock.  Progress display and room sync
+          // need that clock; seekability is enforced by the setter instead.
           return _vlcPlayer.Time;
         } catch {
           return 0;
@@ -294,14 +305,30 @@ namespace MediaPlayerCore {
         }
 
         try {
-          if (!_vlcPlayer.IsSeekable) {
-            return 0;
-          }
-
+          // Duration can be known for a non-seekable VOD, so do not hide it
+          // from the progress UI merely because seeking is unavailable.
           long length = _vlcPlayer.Length;
           return length > 0 ? length : 0;
         } catch {
           return 0;
+        }
+      }
+    }
+
+    /// <summary>
+    /// VLC's normalized playback position. Unlike Length, this is often
+    /// available for HTTP VODs whose total duration is not exposed yet.
+    /// </summary>
+    public float Position {
+      get {
+        if (_vlcPlayer == null || _isLiveStream) {
+          return 0f;
+        }
+
+        try {
+          return Math.Clamp(_vlcPlayer.Position, 0f, 1f);
+        } catch {
+          return 0f;
         }
       }
     }

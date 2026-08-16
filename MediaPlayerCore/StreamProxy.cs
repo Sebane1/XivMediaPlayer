@@ -294,14 +294,19 @@ namespace MediaPlayerCore
                     var requestMessage = new HttpRequestMessage(HttpMethod.Get, targetUrl);
 
                     long requestedOffset = 0;
+                    long? requestedEnd = null;
                     string rangeHeader = req.Headers["Range"];
                     if (!string.IsNullOrEmpty(rangeHeader) && rangeHeader.StartsWith("bytes="))
                     {
-                        string rangeVal = rangeHeader.Substring("bytes=".Length).Split('-')[0];
-                        if (long.TryParse(rangeVal, out long offset))
+                        string[] rangeParts = rangeHeader.Substring("bytes=".Length).Split('-', 2);
+                        if (long.TryParse(rangeParts[0], out long offset))
                         {
                             requestedOffset = offset;
-                            requestMessage.Headers.Range = new System.Net.Http.Headers.RangeHeaderValue(offset, null);
+                            if (rangeParts.Length == 2 && long.TryParse(rangeParts[1], out long end))
+                            {
+                                requestedEnd = end;
+                            }
+                            requestMessage.Headers.Range = new System.Net.Http.Headers.RangeHeaderValue(offset, requestedEnd);
                         }
                     }
 
@@ -321,7 +326,8 @@ namespace MediaPlayerCore
 
                     using var stream = await response.Content.ReadAsStreamAsync();
 
-                    if (response.StatusCode == HttpStatusCode.OK && requestedOffset > 0)
+                    if (response.StatusCode == HttpStatusCode.OK
+                        && (requestedOffset > 0 || requestedEnd.HasValue))
                     {
                         // SERVER IGNORED RANGE REQUEST. WE MUST MANUALLY DISCARD BYTES.
                         long bytesToDiscard = requestedOffset;
@@ -334,18 +340,27 @@ namespace MediaPlayerCore
                             bytesToDiscard -= read;
                         }
 
-                        res.StatusCode = 206; // Trick VLC into thinking the server honored the Range request
                         long totalLength = response.Content.Headers.ContentLength ?? 0;
-                        if (totalLength > 0)
+                        if (totalLength <= 0 || requestedOffset >= totalLength)
                         {
-                            res.ContentLength64 = totalLength - requestedOffset;
-                            res.Headers["Content-Range"] = $"bytes {requestedOffset}-{totalLength - 1}/{totalLength}";
+                            res.StatusCode = (int)HttpStatusCode.RequestedRangeNotSatisfiable;
+                            if (totalLength > 0) res.Headers["Content-Range"] = $"bytes */{totalLength}";
+                            return;
                         }
-                        else
+
+                        long lastByte = Math.Min(requestedEnd ?? totalLength - 1, totalLength - 1);
+                        if (lastByte < requestedOffset)
                         {
-                            res.SendChunked = true;
-                            res.Headers["Content-Range"] = $"bytes {requestedOffset}-/*";
+                            res.StatusCode = (int)HttpStatusCode.RequestedRangeNotSatisfiable;
+                            res.Headers["Content-Range"] = $"bytes */{totalLength}";
+                            return;
                         }
+
+                        res.StatusCode = (int)HttpStatusCode.PartialContent;
+                        res.Headers["Accept-Ranges"] = "bytes";
+                        res.ContentLength64 = lastByte - requestedOffset + 1;
+                        res.Headers["Content-Range"] = $"bytes {requestedOffset}-{lastByte}/{totalLength}";
+                        await CopyBytesAsync(stream, res.OutputStream, res.ContentLength64);
                     }
                     else
                     {
@@ -353,6 +368,9 @@ namespace MediaPlayerCore
                         if (response.Content.Headers.ContentLength.HasValue)
                         {
                             res.ContentLength64 = response.Content.Headers.ContentLength.Value;
+                            // The proxy can satisfy future ranges by reopening
+                            // and discarding from this static download.
+                            res.Headers["Accept-Ranges"] = "bytes";
                         }
                         else
                         {
@@ -362,10 +380,11 @@ namespace MediaPlayerCore
                         if (response.StatusCode == HttpStatusCode.PartialContent)
                         {
                             res.Headers["Content-Range"] = response.Content.Headers.ContentRange?.ToString();
+                            res.Headers["Accept-Ranges"] = "bytes";
                         }
-                    }
 
-                    await stream.CopyToAsync(res.OutputStream);
+                        await stream.CopyToAsync(res.OutputStream);
+                    }
                 }
                 else
                 {
@@ -380,6 +399,18 @@ namespace MediaPlayerCore
             finally
             {
                 try { context.Response.Close(); } catch { }
+            }
+        }
+
+        private static async Task CopyBytesAsync(Stream source, Stream destination, long bytesToCopy)
+        {
+            byte[] buffer = new byte[81920];
+            while (bytesToCopy > 0)
+            {
+                int read = await source.ReadAsync(buffer, 0, (int)Math.Min(buffer.Length, bytesToCopy));
+                if (read == 0) break;
+                await destination.WriteAsync(buffer, 0, read);
+                bytesToCopy -= read;
             }
         }
 

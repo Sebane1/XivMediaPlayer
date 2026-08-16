@@ -551,6 +551,10 @@ namespace XivMediaPlayer
         private DateTime _lastHistoryUpdate = DateTime.MinValue;
         private DateTime? _deferredTerritoryChangeTime = null;
         private DateTime _lastServerSyncFetch = DateTime.MinValue;
+        // The initial restore must prefer the room state held by the sync server.
+        // Keep the location so the local cache can be used only when that fetch
+        // did not yield playable media (for example, while offline).
+        private volatile string? _lastServerMediaStateLocationKey;
         private string? _pendingPlacementSyncLocationKey;
         private DateTime _pendingPlacementSyncDueAt = DateTime.MinValue;
         private const double PlacementServerSyncDebounceSeconds = 1.0;
@@ -783,7 +787,7 @@ namespace XivMediaPlayer
                 EnqueueFrameworkAction(() =>
                 {
                     RestoreScreenForCurrentLocation();
-                    RestoreMediaForCurrentLocation();
+                    BeginInitialMediaRestore();
                 });
             });
 
@@ -1466,6 +1470,10 @@ namespace XivMediaPlayer
         }
 
         private bool _isResolvingMedia = false;
+        // A server poll can complete while yt-dlp is resolving. Keep one
+        // catch-up request so the initial stream is corrected as soon as VLC
+        // exists, instead of waiting for the next ten-second poll.
+        private volatile bool _serverSyncDeferredDuringResolution = false;
         private string _mediaLoadingMessage = "";
         private bool _playbackHasRenderedFrames = false;
         private int _playbackEnsureAttempts = 0;
@@ -2266,11 +2274,15 @@ namespace XivMediaPlayer
                     bool isTwitchLive = url.Contains("twitch.tv") && !url.Contains("/videos/");
                     bool isYouTubeLive = youTubeLiveProbe == true
                         || (youTubeLiveProbe == null && isYouTube && YtDlpManager.IsYouTubeLiveUrlHeuristic(url));
+                    var resolvedStreamUrl = streamUrls[0];
                     bool isLive = isYouTubeLive
                         || metadata?.IsLiveBroadcast == true
                         || (isTwitchLive && metadata?.IsLiveBroadcast != false)
-                        || (!isYouTube && !isTwitchLive && metadata != null && metadata.Duration == null);
-                    var resolvedStreamUrl = streamUrls[0];
+                        // A generic extractor often has no duration for a normal
+                        // downloadable file. Only infer live playback from that
+                        // absence when the resolved media is actually HLS.
+                        || (!isYouTube && !isTwitchLive && metadata?.Duration == null
+                            && YtDlpManager.IsHlsStreamUrl(resolvedStreamUrl));
                     if (isYouTube && youTubeLiveProbe != false && YtDlpManager.IsHlsStreamUrl(resolvedStreamUrl))
                     {
                         isLive = true;
@@ -2360,6 +2372,11 @@ namespace XivMediaPlayer
                     if (resolutionId == _currentResolutionId)
                     {
                         _isResolvingMedia = false;
+                        if (_serverSyncDeferredDuringResolution)
+                        {
+                            _serverSyncDeferredDuringResolution = false;
+                            EnqueueFrameworkAction(() => _ = FetchMediaFromServerAsync());
+                        }
                     }
                 }
             });
@@ -3913,6 +3930,11 @@ namespace XivMediaPlayer
             string primaryKey = GetLocationKey();
             if (!IsMediaSyncLocation(primaryKey)) return;
 
+            // Playback timecode is independent of TV placements, venue settings,
+            // and banners. Start its poll immediately so a slow or failed
+            // placement request cannot delay (or prevent) drift correction.
+            Task mediaSyncTask = FetchMediaFromServerAsync(primaryKey);
+
             var tvs = await ServerClient.GetTvsBatchAsync(keys);
             var nearbySnapshot = tvs?.Where(t => t != null).ToList() ?? new List<TvPlacement>();
 
@@ -4054,7 +4076,7 @@ namespace XivMediaPlayer
                 }
             });
 
-            await FetchMediaFromServerAsync();
+            await mediaSyncTask;
         }
 
         /// <summary>
@@ -4195,6 +4217,50 @@ namespace XivMediaPlayer
             _lastMediaStatePersistUtc = now;
 
             SaveMediaStateForCurrentLocation(logSave: false);
+        }
+
+        /// <summary>
+        /// Restores initial playback from the authoritative room state. The local
+        /// cache is deliberately delayed so it cannot start an old timecode
+        /// before the current DJ's server timecode arrives.
+        /// </summary>
+        private void BeginInitialMediaRestore()
+        {
+            string key = CurrentTvPlacement?.LocationKey ?? GetLocationKey();
+            if (string.IsNullOrEmpty(key))
+            {
+                return;
+            }
+
+            _lastLocationKey = key;
+            if (!IsMediaSyncLocation(key))
+            {
+                RestoreMediaForCurrentLocation();
+                return;
+            }
+
+            _lastServerMediaStateLocationKey = null;
+            _ = FetchMediaFromServerAsync();
+
+            // Preserve offline auto-resume without racing a normal server fetch.
+            _ = Task.Run(async () =>
+            {
+                await Task.Delay(5000).ConfigureAwait(false);
+                EnqueueFrameworkAction(() =>
+                {
+                    if (_disposed || _lastServerMediaStateLocationKey == key)
+                    {
+                        return;
+                    }
+
+                    string currentKey = CurrentTvPlacement?.LocationKey ?? GetLocationKey();
+                    if (string.Equals(currentKey, key, StringComparison.Ordinal))
+                    {
+                        _pluginLog.Information($"[Social] No server media state received for {key}; restoring local cached media state.");
+                        RestoreMediaForCurrentLocation();
+                    }
+                });
+            });
         }
 
         /// <summary>
@@ -4374,22 +4440,17 @@ namespace XivMediaPlayer
             }
         }
 
-        public async Task FetchMediaFromServerAsync()
+        public async Task FetchMediaFromServerAsync(string? locationKey = null)
         {
-            var key = CurrentTvPlacement?.LocationKey ?? _lastLocationKey;
+            var key = locationKey ?? CurrentTvPlacement?.LocationKey ?? _lastLocationKey;
             _pluginLog.Information($"[Sync] FetchMediaFromServerAsync invoked. Key: {key}");
             if (string.IsNullOrEmpty(key)) return;
             if (!IsMediaSyncLocation(key)) return;
 
-            if (!HasActiveWorldScreens())
-            {
-                EnqueueFrameworkAction(StopMediaIfNoPlayableTarget);
-                return;
-            }
-
             var sync = await ServerClient.GetMediaStateAsync(key);
             if (sync == null || string.IsNullOrEmpty(sync.CurrentUrl)) return;
 
+            _lastServerMediaStateLocationKey = key;
             _currentMediaOwnerId = sync.OwnerId;
 
             if (_isLocalDj)
@@ -4450,13 +4511,28 @@ namespace XivMediaPlayer
             {
                 return; // NEVER interrupt a local FFmpeg stream with a server sync!
             }
-            if (_isResolvingMedia) return;
+            if (_isResolvingMedia)
+            {
+                _serverSyncDeferredDuringResolution = true;
+                _pluginLog.Information("[Social] Deferring server timecode sync until media resolution completes.");
+                return;
+            }
 
             var activeStream = _mediaManager?.ActiveStream;
-            bool isLocalEnded = activeStream != null && activeStream.VlcState == LibVLCSharp.Shared.VLCState.Ended;
-            bool isDifferentUrl = activeStream == null || (!string.IsNullOrEmpty(_lastStreamURL) && _lastStreamURL != sync.CurrentUrl) || (isLocalEnded && sync.IsPlaying);
+            // A VLC Ended state is not a media identity change. Treating it as
+            // one made every periodic poll restart the same URL indefinitely
+            // for sources whose demuxer reports Ended early. URL changes (or a
+            // missing local stream) still trigger a new load.
+            bool isDifferentUrl = activeStream == null
+                || (!string.IsNullOrEmpty(_lastStreamURL)
+                    && !string.Equals(CleanUrl(_lastStreamURL), CleanUrl(sync.CurrentUrl), StringComparison.Ordinal));
             // Only sync VODs. Live streams cannot be reliably timecode-synced.
-            bool isOutofSync = !_lastStreamIsLive && activeStream != null && Math.Abs(activeStream.Time - targetTimeMs) > 2500;
+            // Do not probe or correct a non-seekable source's clock. VLC can
+            // report timestamp-conversion errors for those probes, and a sync
+            // correction must never reopen the stream on the 10-second poll.
+            bool isOutofSync = !_lastStreamIsLive
+                && activeStream?.IsTimecodeSeekable == true
+                && Math.Abs(activeStream.Time - targetTimeMs) > 2500;
             bool localIsPlaying = activeStream != null && activeStream.PlaybackState == NAudio.Wave.PlaybackState.Playing;
 
             if (isDifferentUrl)
@@ -4969,11 +5045,7 @@ namespace XivMediaPlayer
                     var activeStream = _mediaManager?.ActiveStream;
                     if (activeStream != null)
                     {
-                        long durationMs = GetPlaybackDurationMs();
-                        if (durationMs > 0)
-                        {
-                            GetSeekBarProgress(out progress, out bufferProgress);
-                        }
+                        GetSeekBarProgress(out progress, out bufferProgress);
 
                         isPlaying = activeStream.PlaybackState == NAudio.Wave.PlaybackState.Playing;
                         if (isPlaying) playbackState = 1.0f;
@@ -6258,18 +6330,29 @@ namespace XivMediaPlayer
             playbackProgress = 0f;
             seekableProgress = 1f;
 
+            var activeStream = _mediaManager?.ActiveStream;
+            float nativeProgress = activeStream?.Position ?? 0f;
+
             long durationMs = GetPlaybackDurationMs();
             if (durationMs <= 0)
             {
+                // Non-YouTube HTTP VODs can expose a normalized VLC position
+                // before (or without) exposing a duration. Keep the visual
+                // progress indicator alive; callers still require a duration
+                // before allowing an actual seek.
+                playbackProgress = nativeProgress;
                 seekableProgress = 1f;
                 return;
             }
 
-            var activeStream = _mediaManager?.ActiveStream;
             long timeMs = activeStream?.Time ?? 0;
             long seekableMs = GetMaxSeekTimeMs();
 
             playbackProgress = Math.Clamp(timeMs / (float)durationMs, 0f, 1f);
+            if (playbackProgress <= 0f && nativeProgress > 0f)
+            {
+                playbackProgress = nativeProgress;
+            }
             seekableProgress = seekableMs > 0
                 ? Math.Clamp(seekableMs / (float)durationMs, 0f, 1f)
                 : 0f;
