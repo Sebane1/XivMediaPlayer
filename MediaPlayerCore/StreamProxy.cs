@@ -32,6 +32,7 @@ namespace MediaPlayerCore
         /// never be started there.
         /// </summary>
         public static bool IsAvailable => !IsWineRuntime;
+        public static string TransportName => IsWineRuntime ? "TcpListener (Wine-compatible)" : "HttpListener";
 
         public class ProxySession
         {
@@ -845,6 +846,15 @@ namespace MediaPlayerCore
 
         private static bool DetectWineRuntime()
         {
+            // Environment markers cover Proton/XIVLauncher setups where the
+            // Wine loader does not expose wine_get_version through the normal
+            // NativeLibrary lookup.
+            string[] wineMarkers = { "WINEPREFIX", "WINELOADER", "WINEDLLPATH", "STEAM_COMPAT_DATA_PATH", "PROTON_PREFIX" };
+            if (wineMarkers.Any(marker => !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(marker))))
+            {
+                return true;
+            }
+
             IntPtr module = IntPtr.Zero;
             try
             {

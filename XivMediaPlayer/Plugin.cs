@@ -793,6 +793,7 @@ namespace XivMediaPlayer
 
             // Start proxy server for stream routing
             MediaPlayerCore.StreamProxy.Instance.Start();
+            _pluginLog.Information($"[Media Proxy] Transport: {MediaPlayerCore.StreamProxy.TransportName}");
         }
 
         #region Framework / Initialization
