@@ -6191,15 +6191,24 @@ namespace XivMediaPlayer
         /// </summary>
         public long ClampSeekTimeMs(long targetMs)
         {
-            if (_lastStreamIsLive)
-            {
-                return 0;
-            }
-
             var activeStream = _mediaManager?.ActiveStream;
             if (activeStream == null)
             {
                 return Math.Max(0, targetMs);
+            }
+
+            // SABR downloads are the only media whose decoded duration is a
+            // moving frontier.  Direct files and other providers must retain
+            // VLC's native seek and timecode behaviour.
+            string? mediaPath = activeStream.SoundPath;
+            if (mediaPath == null || !YtDlpManager.IsSabrLocalFile(mediaPath))
+            {
+                return Math.Max(0, targetMs);
+            }
+
+            if (_lastStreamIsLive)
+            {
+                return 0;
             }
 
             long maxSeek = GetMaxSeekTimeMs();

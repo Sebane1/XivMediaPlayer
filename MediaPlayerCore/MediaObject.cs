@@ -255,7 +255,10 @@ namespace MediaPlayerCore {
         }
       }
       set {
-        if (_parent?.SeekTimeClamper != null)
+        // The clamp is for a growing YouTube SABR file.  Applying it to every
+        // MediaObject makes unrelated sources inherit SABR's temporary buffer
+        // frontier (and can turn a normal sync seek into a zero-time seek).
+        if (YtDlpManager.IsSabrLocalFile(_soundPath) && _parent?.SeekTimeClamper != null)
         {
           value = _parent.SeekTimeClamper(value);
         }
