@@ -342,6 +342,20 @@ namespace MediaPlayerCore
         public string RegisterDirectMediaSession(string mediaUrl, Dictionary<string, string>? headers = null)
         {
             if (string.IsNullOrEmpty(mediaUrl)) return string.Empty;
+
+            // TemporaryMediaCache exists for servers that do not support byte ranges
+            // (e.g. some Jellyfin/emby stream endpoints). It downloads sequentially
+            // and re-exposes the file as seekable locally. That breaks range-capable
+            // self-hosted MKV. VLC needs end-of-file index reads on open, which the
+            // sequential cache cannot serve until the entire file is buffered.
+            // Skip the cache when upstream already supports random access.
+            if (SupportsUpstreamByteRanges(mediaUrl, headers))
+            {
+                System.Diagnostics.Debug.WriteLine(
+                    $"[StreamProxy] Upstream supports byte ranges; playing directly: {mediaUrl[..Math.Min(mediaUrl.Length, 120)]}...");
+                return mediaUrl;
+            }
+
             Start();
             ClearSessions();
             string sessionId = Guid.NewGuid().ToString("N");
@@ -354,6 +368,85 @@ namespace MediaPlayerCore
 
             string targetBase64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(mediaUrl));
             return $"http://127.0.0.1:{_port}/proxy_media?sid={sessionId}&target={Uri.EscapeDataString(targetBase64)}";
+        }
+
+        /// <summary>
+        /// True when the upstream URL supports random byte access with a known size.
+        /// VLC can play these directly; the sequential download cache cannot.
+        /// </summary>
+        private bool SupportsUpstreamByteRanges(string mediaUrl, Dictionary<string, string>? headers)
+        {
+            if (!mediaUrl.StartsWith("http", StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            try
+            {
+                using var client = CreateStreamingHttpClient(headers, mediaUrl);
+
+                using (var headRequest = new HttpRequestMessage(HttpMethod.Head, mediaUrl))
+                using (var headResponse = client.Send(headRequest))
+                {
+                    if (headResponse.IsSuccessStatusCode
+                        && HeadersSupportByteRanges(headResponse.Headers, headResponse.Content.Headers)
+                        && TryGetTotalContentLength(headResponse.Content.Headers, out long headLength)
+                        && headLength > 0)
+                    {
+                        return true;
+                    }
+                }
+
+                using var rangeRequest = new HttpRequestMessage(HttpMethod.Get, mediaUrl);
+                rangeRequest.Headers.Range = new System.Net.Http.Headers.RangeHeaderValue(0, 0);
+                using var rangeResponse = client.Send(rangeRequest, HttpCompletionOption.ResponseHeadersRead);
+                if (rangeResponse.StatusCode == HttpStatusCode.PartialContent
+                    && TryGetTotalContentLength(rangeResponse.Content.Headers, out long rangeLength)
+                    && rangeLength > 0)
+                {
+                    return true;
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[StreamProxy] Byte-range probe failed for {mediaUrl[..Math.Min(mediaUrl.Length, 120)]}...: {ex.Message}");
+            }
+
+            return false;
+        }
+
+        private static bool HeadersSupportByteRanges(
+            System.Net.Http.Headers.HttpResponseHeaders responseHeaders,
+            System.Net.Http.Headers.HttpContentHeaders contentHeaders)
+        {
+            if (responseHeaders.TryGetValues("Accept-Ranges", out var responseValues)
+                && responseValues.Any(value => value.Contains("bytes", StringComparison.OrdinalIgnoreCase)))
+            {
+                return true;
+            }
+
+            return contentHeaders.TryGetValues("Accept-Ranges", out var contentValues)
+                && contentValues.Any(value => value.Contains("bytes", StringComparison.OrdinalIgnoreCase));
+        }
+
+        private static bool TryGetTotalContentLength(
+            System.Net.Http.Headers.HttpContentHeaders contentHeaders,
+            out long totalLength)
+        {
+            totalLength = 0;
+            if (contentHeaders.ContentRange?.Length is long rangeLength && rangeLength > 0)
+            {
+                totalLength = rangeLength;
+                return true;
+            }
+
+            if (contentHeaders.ContentLength is long contentLength && contentLength > 0)
+            {
+                totalLength = contentLength;
+                return true;
+            }
+
+            return false;
         }
 
         /// <summary>
