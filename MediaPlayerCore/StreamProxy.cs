@@ -5,6 +5,8 @@ using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
+using System.Net.Sockets;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -17,9 +19,19 @@ namespace MediaPlayerCore
         public static StreamProxy Instance => _instance.Value;
 
         private HttpListener _listener;
+        private TcpListener? _wineListener;
         private int _port;
         private CancellationTokenSource _cts;
         private ConcurrentDictionary<string, ProxySession> _sessions = new ConcurrentDictionary<string, ProxySession>();
+        private static readonly bool IsWineRuntime = DetectWineRuntime();
+
+        /// <summary>
+        /// Wine currently aborts the process when HttpListener cancels an HTTP
+        /// request (httpapi.dll.HttpCancelHttpRequest is unimplemented). The
+        /// direct VLC path remains usable, but the Windows HTTP API proxy must
+        /// never be started there.
+        /// </summary>
+        public static bool IsAvailable => !IsWineRuntime;
 
         public class ProxySession
         {
@@ -200,6 +212,11 @@ namespace MediaPlayerCore
 
         public void Start()
         {
+            if (IsWineRuntime)
+            {
+                StartWineListener();
+                return;
+            }
             if (_listener.IsListening) return;
             try
             {
@@ -214,6 +231,10 @@ namespace MediaPlayerCore
 
         public string RegisterStream(string m3u8Url, Dictionary<string, string> headers, string preFetchedM3u8Content = null)
         {
+            // The Wine socket transport currently covers direct media, which
+            // is where the HTTP range/cache proxy is needed. Leave HLS direct
+            // until its playlist rewriter is moved to the same transport.
+            if (IsWineRuntime) return m3u8Url;
             Start();
             ClearSessions();
             string sessionId = Guid.NewGuid().ToString("N");
@@ -355,6 +376,64 @@ namespace MediaPlayerCore
                 {
                     var context = await _listener.GetContextAsync();
                     _ = Task.Run(() => HandleRequest(context));
+                }
+                catch { }
+            }
+        }
+
+        private void StartWineListener()
+        {
+            if (_wineListener != null) return;
+            _wineListener = new TcpListener(IPAddress.Loopback, 0);
+            _wineListener.Start();
+            _port = ((IPEndPoint)_wineListener.LocalEndpoint).Port;
+            Task.Run(() => WineAcceptLoop(_cts.Token));
+        }
+
+        private async Task WineAcceptLoop(CancellationToken token)
+        {
+            while (!token.IsCancellationRequested && _wineListener != null)
+            {
+                try
+                {
+                    var client = await _wineListener.AcceptTcpClientAsync().ConfigureAwait(false);
+                    _ = Task.Run(() => HandleWineRequestAsync(client));
+                }
+                catch when (token.IsCancellationRequested) { }
+                catch { }
+            }
+        }
+
+        private async Task HandleWineRequestAsync(TcpClient client)
+        {
+            using (client)
+            using (var stream = client.GetStream())
+            using (var reader = new StreamReader(stream, Encoding.ASCII, false, 4096, true))
+            {
+                try
+                {
+                    string? requestLine = await reader.ReadLineAsync().ConfigureAwait(false);
+                    if (string.IsNullOrWhiteSpace(requestLine)) return;
+                    string[] requestParts = requestLine.Split(' ');
+                    string target = requestParts.Length > 1 ? requestParts[1] : "/";
+                    string? range = null;
+                    string? line;
+                    while (!string.IsNullOrEmpty(line = await reader.ReadLineAsync().ConfigureAwait(false)))
+                    {
+                        if (line.StartsWith("Range:", StringComparison.OrdinalIgnoreCase)) range = line[6..].Trim();
+                    }
+
+                    var uri = new Uri("http://127.0.0.1" + target);
+                    string sid = uri.Query.TrimStart('?').Split('&')
+                        .Select(p => p.Split('=', 2))
+                        .FirstOrDefault(p => p.Length == 2 && p[0] == "sid")?[1] ?? "";
+                    if (uri.AbsolutePath != "/proxy_media" || !_sessions.TryGetValue(sid, out var session) || session.Cache == null)
+                    {
+                        await WriteWineHeadersAsync(stream, 404, "Not Found", null, 0).ConfigureAwait(false);
+                        return;
+                    }
+
+                    await ServeWineCachedMediaAsync(stream, range, session.Cache).ConfigureAwait(false);
                 }
                 catch { }
             }
@@ -649,6 +728,45 @@ namespace MediaPlayerCore
             await cache.CopyToAsync(response.OutputStream, offset, end).ConfigureAwait(false);
         }
 
+        private static async Task ServeWineCachedMediaAsync(Stream stream, string? rangeHeader, TemporaryMediaCache cache)
+        {
+            await cache.WaitForMetadataAsync().ConfigureAwait(false);
+            var state = cache.Snapshot();
+            if (state.Failure != null) { await WriteWineHeadersAsync(stream, 502, "Bad Gateway", null, 0); return; }
+
+            long offset = 0;
+            long? requestedEnd = null;
+            bool isRange = !string.IsNullOrEmpty(rangeHeader) && rangeHeader.StartsWith("bytes=", StringComparison.OrdinalIgnoreCase);
+            if (isRange)
+            {
+                var parts = rangeHeader!.Substring(6).Split('-', 2);
+                if (!long.TryParse(parts[0], out offset) || offset < 0) { await WriteWineHeadersAsync(stream, 416, "Range Not Satisfiable", null, 0); return; }
+                if (parts.Length == 2 && long.TryParse(parts[1], out var parsedEnd)) requestedEnd = parsedEnd;
+            }
+            if (!state.TotalBytes.HasValue || offset >= state.TotalBytes.Value) { await WriteWineHeadersAsync(stream, 416, "Range Not Satisfiable", null, 0); return; }
+
+            long end = Math.Min(requestedEnd ?? state.TotalBytes.Value - 1, state.TotalBytes.Value - 1);
+            long length = end - offset + 1;
+            var headers = new Dictionary<string, string> {
+                ["Content-Type"] = state.ContentType ?? "application/octet-stream",
+                ["Accept-Ranges"] = "bytes"
+            };
+            if (isRange) headers["Content-Range"] = $"bytes {offset}-{end}/{state.TotalBytes.Value}";
+            await WriteWineHeadersAsync(stream, isRange ? 206 : 200, isRange ? "Partial Content" : "OK", headers,
+                isRange ? length : state.TotalBytes.Value).ConfigureAwait(false);
+            await cache.CopyToAsync(stream, offset, isRange ? end : null).ConfigureAwait(false);
+        }
+
+        private static Task WriteWineHeadersAsync(Stream stream, int status, string reason,
+            Dictionary<string, string>? headers, long contentLength)
+        {
+            var text = new StringBuilder($"HTTP/1.1 {status} {reason}\r\nContent-Length: {contentLength}\r\nConnection: close\r\n");
+            if (headers != null) foreach (var header in headers) text.Append(header.Key).Append(": ").Append(header.Value).Append("\r\n");
+            text.Append("\r\n");
+            byte[] bytes = Encoding.ASCII.GetBytes(text.ToString());
+            return stream.WriteAsync(bytes, 0, bytes.Length);
+        }
+
         private string RewriteProxiedUrl(Uri baseUri, string originalUrl, string sid)
         {
             if (!Uri.TryCreate(baseUri, originalUrl, out Uri absoluteUrl))
@@ -721,7 +839,26 @@ namespace MediaPlayerCore
         {
             _cts?.Cancel();
             try { _listener?.Stop(); _listener?.Close(); } catch { }
+            try { _wineListener?.Stop(); } catch { }
             ClearSessions();
+        }
+
+        private static bool DetectWineRuntime()
+        {
+            IntPtr module = IntPtr.Zero;
+            try
+            {
+                if (!NativeLibrary.TryLoad("ntdll.dll", out module)) return false;
+                return NativeLibrary.TryGetExport(module, "wine_get_version", out _);
+            }
+            catch
+            {
+                return false;
+            }
+            finally
+            {
+                if (module != IntPtr.Zero) NativeLibrary.Free(module);
+            }
         }
     }
 }
