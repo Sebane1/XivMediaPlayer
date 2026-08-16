@@ -246,6 +246,9 @@ namespace MediaPlayerCore {
         // source has no reference clock. They are not decode failures.
         || message.Contains("Timestamp conversion failed", StringComparison.OrdinalIgnoreCase)
         || message.Contains("Could not convert timestamp", StringComparison.OrdinalIgnoreCase)
+        // VLC's prefetch module can emit this while input is deliberately
+        // paused at a progressive cache frontier. It is not a decoder failure.
+        || message.Contains("reading while paused (buggy demux?)", StringComparison.OrdinalIgnoreCase)
         || message.Contains("dav1d", StringComparison.OrdinalIgnoreCase)
         || message.Contains("Decoder feed error", StringComparison.OrdinalIgnoreCase)
         || message.Contains("Failed to set on top", StringComparison.OrdinalIgnoreCase);

@@ -4763,6 +4763,7 @@ namespace XivMediaPlayer
             if (errorMsg.Contains("DEMUX_GET_TIME", StringComparison.OrdinalIgnoreCase)
                 || errorMsg.Contains("DEMUX_GET_LENGTH", StringComparison.OrdinalIgnoreCase)
                 || errorMsg.Contains("Failed to create demuxer", StringComparison.OrdinalIgnoreCase)
+                || errorMsg.Contains("reading while paused (buggy demux?)", StringComparison.OrdinalIgnoreCase)
                 || errorMsg.Contains("dav1d", StringComparison.OrdinalIgnoreCase)
                 || errorMsg.Contains("Decoder feed error", StringComparison.OrdinalIgnoreCase)
                 || errorMsg.Contains("Failed to set on top", StringComparison.OrdinalIgnoreCase))
