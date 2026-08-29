@@ -724,6 +724,8 @@ namespace XivMediaPlayer.Windows {
             }
           }
 
+          DrawCoOwnersSection(locationKey);
+
           ImGui.Spacing();
           if (ImGui.Button(Localize("Sync Placements to Area"))) {
             RegisterTvAsync(locationKey);
@@ -1284,6 +1286,83 @@ namespace XivMediaPlayer.Windows {
       }
     }
 
+    private string _newCoOwnerDiscordId = string.Empty;
+    private int _selectedNearbyPlayerIdx = 0;
+
+    private void DrawCoOwnersSection(string locationKey)
+    {
+      if (_plugin.DiscordAuthClient != null && _plugin.DiscordAuthClient.IsLoggedIn)
+      {
+        ImGui.Spacing();
+        ImGui.TextColored(new Vector4(0.7f, 0.9f, 1f, 1f), Localize("Co-Owners"));
+        ImGui.TextWrapped(Localize("Co-owners can modify TV settings and control playback. Select a nearby player or enter a Discord User ID below."));
+
+        var tv = _plugin.CurrentTvPlacement;
+        System.Collections.Generic.List<string> allowedList = new();
+        if (tv != null && !string.IsNullOrEmpty(tv.AllowedDiscordOwnerIdsJson))
+        {
+          try { allowedList = System.Text.Json.JsonSerializer.Deserialize<System.Collections.Generic.List<string>>(tv.AllowedDiscordOwnerIdsJson) ?? new(); } catch { }
+        }
+
+        // List existing co-owners with 1-click removal
+        for (int i = allowedList.Count - 1; i >= 0; i--)
+        {
+          ImGui.Text(string.Format("• {0}", allowedList[i]));
+          ImGui.SameLine();
+          if (ImGui.Button(string.Format("Remove##coowner_{0}", i)))
+          {
+            allowedList.RemoveAt(i);
+            if (tv != null)
+            {
+              tv.AllowedDiscordOwnerIdsJson = System.Text.Json.JsonSerializer.Serialize(allowedList);
+              RegisterTvAsync(locationKey);
+            }
+            break;
+          }
+        }
+
+        // Nearby Players Selection
+        var nearbyPlayers = _plugin.GetNearbyPlayersWithHashes();
+        if (nearbyPlayers.Count > 0)
+        {
+          string[] displayNames = nearbyPlayers.Select(p => p.DisplayName).ToArray();
+          _selectedNearbyPlayerIdx = Math.Clamp(_selectedNearbyPlayerIdx, 0, displayNames.Length - 1);
+          ImGui.Combo("##nearby_coowners", ref _selectedNearbyPlayerIdx, displayNames, displayNames.Length);
+          ImGui.SameLine();
+          if (ImGui.Button(Localize("Add Nearby Player")))
+          {
+            var selected = nearbyPlayers[_selectedNearbyPlayerIdx];
+            if (!allowedList.Contains(selected.PlayerHash))
+            {
+              allowedList.Add(selected.PlayerHash);
+              if (tv != null)
+              {
+                tv.AllowedDiscordOwnerIdsJson = System.Text.Json.JsonSerializer.Serialize(allowedList);
+                RegisterTvAsync(locationKey);
+              }
+            }
+          }
+        }
+
+        // Manual Input Fallback (Discord ID or Hash)
+        ImGui.InputText("##add_coowner_id", ref _newCoOwnerDiscordId, 64);
+        ImGui.SameLine();
+        if (ImGui.Button(Localize("Add Co-Owner ID")))
+        {
+          string cleanId = _newCoOwnerDiscordId.Trim();
+          if (!string.IsNullOrEmpty(cleanId) && !allowedList.Contains(cleanId))
+          {
+            allowedList.Add(cleanId);
+            _newCoOwnerDiscordId = string.Empty;
+            if (tv != null)
+            {
+              tv.AllowedDiscordOwnerIdsJson = System.Text.Json.JsonSerializer.Serialize(allowedList);
+              RegisterTvAsync(locationKey);
+            }
+          }
+        }
+      }
+    }
   }
 }
 

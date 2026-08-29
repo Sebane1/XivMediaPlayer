@@ -49,7 +49,33 @@ namespace XivMediaPlayer.Server.Controllers
             var tvs = await _db.TvPlacements
                 .Where(t => t.LocationKey == locationKey)
                 .ToListAsync();
-                
+
+            if (locationKey.StartsWith("zone_"))
+            {
+                var lastFetch = _lastFetchTimes.TryGetValue(locationKey, out var lf) ? lf : DateTime.MinValue;
+                bool gridEmpty = lastFetch != DateTime.MinValue && (DateTime.UtcNow - lastFetch).TotalMinutes >= 2.0;
+
+                bool modified = false;
+                if (gridEmpty)
+                {
+                    foreach (var tv in tvs)
+                    {
+                        if (!string.IsNullOrEmpty(tv.DiscordOwnerId) || !string.IsNullOrEmpty(tv.AllowedDiscordOwnerIdsJson) || tv.IsLocked)
+                        {
+                            tv.DiscordOwnerId = null;
+                            tv.AllowedDiscordOwnerIdsJson = null;
+                            tv.IsLocked = false;
+                            modified = true;
+                        }
+                    }
+                }
+                if (modified)
+                {
+                    await _db.SaveChangesAsync();
+                }
+            }
+
+            _lastFetchTimes[locationKey] = DateTime.UtcNow;
             return Ok(tvs);
         }
 
@@ -91,26 +117,69 @@ namespace XivMediaPlayer.Server.Controllers
                 placement.Id = Guid.NewGuid().ToString();
             }
 
+            var (authenticatedDiscordId, callerPlayerHashes) = await GetAuthenticatedDiscordInfoAsync();
+
             if (existing != null)
             {
                 bool isForfeited = false;
                 if (locationKey.StartsWith("zone_"))
                 {
                     var lastFetch = _lastFetchTimes.TryGetValue(locationKey, out var lf) ? lf : DateTime.MinValue;
-                    if ((DateTime.UtcNow - lastFetch).TotalMinutes >= 2)
+                    if (lastFetch != DateTime.MinValue && (DateTime.UtcNow - lastFetch).TotalMinutes >= 2.0)
                     {
                         isForfeited = true;
                     }
                 }
 
-                if (!isForfeited && existing.IsLocked && existing.OwnerId != placement.OwnerId && !placement.BypassLock)
+                // Check 45-day Discord owner claim expiration for housing
+                if (!string.IsNullOrEmpty(existing.DiscordOwnerId) && !locationKey.StartsWith("zone_"))
                 {
-                    return Forbid();
+                    if (existing.LastOwnerActivityUtc.HasValue && (DateTime.UtcNow - existing.LastOwnerActivityUtc.Value).TotalDays >= 45.0)
+                    {
+                        _logger.LogInformation("Discord claim expired for TV '{Id}' in '{LocationKey}' after 45 days of inactivity.", existing.Id, locationKey);
+                        isForfeited = true;
+                    }
                 }
 
-                if (isForfeited) existing.IsLocked = false; // Reset lock if it was abandoned
+                if (isForfeited)
+                {
+                    existing.DiscordOwnerId = null;
+                    existing.AllowedDiscordOwnerIdsJson = null;
+                    existing.IsLocked = false;
+                }
+
+                // Ownership & Lock Check
+                if (!isForfeited && !placement.BypassLock)
+                {
+                    if (!string.IsNullOrEmpty(existing.DiscordOwnerId))
+                    {
+                        // Screen is claimed by a Discord owner or co-owners list
+                        if (!existing.IsDiscordUserAuthorized(authenticatedDiscordId, callerPlayerHashes))
+                        {
+                            _logger.LogWarning("Unauthorized attempt to modify Discord-claimed TV '{Id}' in '{LocationKey}'. Expected Discord Owner/Co-Owner, got '{Caller}'",
+                                existing.Id, locationKey, authenticatedDiscordId ?? "Unauthenticated");
+                            return Forbid();
+                        }
+                    }
+                    else if (existing.IsLocked && existing.OwnerId != placement.OwnerId)
+                    {
+                        return Forbid();
+                    }
+                }
+
+                if (isForfeited) existing.IsLocked = false;
 
                 ApplyPlacementFields(existing, placement);
+                if (authenticatedDiscordId != null)
+                {
+                    existing.DiscordOwnerId = authenticatedDiscordId;
+                    existing.LastOwnerActivityUtc = DateTime.UtcNow;
+                }
+                else if (!string.IsNullOrEmpty(existing.DiscordOwnerId) && authenticatedDiscordId == existing.DiscordOwnerId)
+                {
+                    existing.LastOwnerActivityUtc = DateTime.UtcNow;
+                }
+
                 existing.LastUpdated = placement.LastUpdated;
                 _db.TvPlacements.Update(existing);
                 await _db.SaveChangesAsync();
@@ -125,12 +194,63 @@ namespace XivMediaPlayer.Server.Controllers
                     return BadRequest("Multiple TVs exist for this location. Pass create=true to add another screen.");
                 }
 
+                if (authenticatedDiscordId != null)
+                {
+                    placement.DiscordOwnerId = authenticatedDiscordId;
+                    placement.LastOwnerActivityUtc = DateTime.UtcNow;
+                }
+
                 _db.TvPlacements.Add(placement);
                 await _db.SaveChangesAsync();
                 return Ok(placement);
             }
 
             return BadRequest("Multiple TVs exist for this location. Pass create=true to add another screen.");
+        }
+
+        private async Task<(string? authenticatedDiscordId, List<string> callerPlayerHashes)> GetAuthenticatedDiscordInfoAsync()
+        {
+            string? token = null;
+
+            if (Request.Headers.TryGetValue("X-Bot-Api-Key", out var apiKeyHeader))
+            {
+                token = apiKeyHeader.ToString().Trim();
+            }
+            else if (Request.Headers.TryGetValue("Authorization", out var authHeader))
+            {
+                string raw = authHeader.ToString();
+                if (raw.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
+                {
+                    token = raw.Substring(7).Trim();
+                }
+            }
+
+            if (string.IsNullOrEmpty(token)) return (null, new List<string>());
+
+            using var sha256 = System.Security.Cryptography.SHA256.Create();
+            string hashedToken = Convert.ToHexString(sha256.ComputeHash(System.Text.Encoding.UTF8.GetBytes(token))).ToLowerInvariant();
+
+            // 1. Check User Sessions
+            var session = await _db.UserSessions.FirstOrDefaultAsync(s => s.Token == hashedToken);
+            if (session != null && session.ExpiresUtc > DateTime.UtcNow)
+            {
+                session.LastUsedUtc = DateTime.UtcNow;
+                var discordUser = await _db.DiscordUsers.FirstOrDefaultAsync(u => u.DiscordId == session.DiscordId);
+                var playerHashes = discordUser?.GetPlayerHashes() ?? new List<string>();
+                return (session.DiscordId, playerHashes);
+            }
+
+            // 2. Check Bot API Keys
+            var botKey = await _db.BotApiKeys.FirstOrDefaultAsync(b => b.KeyHash == hashedToken && !b.IsRevoked);
+            if (botKey != null)
+            {
+                botKey.LastUsedUtc = DateTime.UtcNow;
+                var discordUser = await _db.DiscordUsers.FirstOrDefaultAsync(u => u.DiscordId == botKey.DiscordId);
+                var playerHashes = discordUser?.GetPlayerHashes() ?? new List<string>();
+                return (botKey.DiscordId, playerHashes);
+            }
+
+            return (null, new List<string>());
         }
 
         private static void ApplyPlacementFields(TvPlacement target, TvPlacement source)
@@ -155,6 +275,10 @@ namespace XivMediaPlayer.Server.Controllers
             target.EffectIntensity = source.EffectIntensity;
             target.EffectSpeed = source.EffectSpeed;
             target.IsLocked = source.IsLocked;
+            if (source.AllowedDiscordOwnerIdsJson != null)
+            {
+                target.AllowedDiscordOwnerIdsJson = source.AllowedDiscordOwnerIdsJson;
+            }
             target.OwnerId = source.OwnerId;
         }
 
@@ -172,10 +296,19 @@ namespace XivMediaPlayer.Server.Controllers
             var tv = await _db.TvPlacements.FirstOrDefaultAsync(t => t.LocationKey == locationKey && t.Id == tvId);
             if (tv != null)
             {
-                if (tv.OwnerId != ownerId && !bypassLock)
+                var (authenticatedDiscordId, callerPlayerHashes) = await GetAuthenticatedDiscordInfoAsync();
+                if (!string.IsNullOrEmpty(tv.DiscordOwnerId) && !bypassLock)
+                {
+                    if (!tv.IsDiscordUserAuthorized(authenticatedDiscordId, callerPlayerHashes))
+                    {
+                        return StatusCode(403);
+                    }
+                }
+                else if (tv.OwnerId != ownerId && !bypassLock)
                 {
                     return StatusCode(403);
                 }
+
                 _db.TvPlacements.Remove(tv);
                 await _db.SaveChangesAsync();
                 return Ok();
@@ -201,23 +334,42 @@ namespace XivMediaPlayer.Server.Controllers
             settings.LocationKey = locationKey;
             settings.LastUpdated = DateTime.UtcNow;
 
-            if (await IsRoomMediaLockedAsync(locationKey, settings.OwnerId, settings.BypassLock))
-            {
-                return StatusCode(403);
-            }
+            var (authenticatedDiscordId, callerPlayerHashes) = await GetAuthenticatedDiscordInfoAsync();
 
             var existing = await _db.RoomVenueSettings.FindAsync(locationKey);
-            if (existing == null)
+            if (existing != null)
             {
-                _db.RoomVenueSettings.Add(settings);
-            }
-            else
-            {
+                if (!string.IsNullOrEmpty(existing.DiscordOwnerId) && !settings.BypassLock)
+                {
+                    if (existing.LastOwnerActivityUtc.HasValue && (DateTime.UtcNow - existing.LastOwnerActivityUtc.Value).TotalDays >= 45.0)
+                    {
+                        existing.DiscordOwnerId = null;
+                    }
+                    else if (!existing.IsDiscordUserAuthorized(authenticatedDiscordId, callerPlayerHashes))
+                    {
+                        return Forbid();
+                    }
+                }
+
                 existing.IdleBrandingUrl = settings.IdleBrandingUrl ?? string.Empty;
                 existing.OwnerId = settings.OwnerId;
+                if (authenticatedDiscordId != null)
+                {
+                    existing.DiscordOwnerId = authenticatedDiscordId;
+                    existing.LastOwnerActivityUtc = DateTime.UtcNow;
+                }
                 existing.LastUpdated = settings.LastUpdated;
                 _db.RoomVenueSettings.Update(existing);
                 settings = existing;
+            }
+            else
+            {
+                if (authenticatedDiscordId != null)
+                {
+                    settings.DiscordOwnerId = authenticatedDiscordId;
+                    settings.LastOwnerActivityUtc = DateTime.UtcNow;
+                }
+                _db.RoomVenueSettings.Add(settings);
             }
 
             await _db.SaveChangesAsync();
@@ -246,26 +398,45 @@ namespace XivMediaPlayer.Server.Controllers
                 placement.Id = Guid.NewGuid().ToString();
             }
 
-            if (await IsRoomMediaLockedAsync(locationKey, placement.OwnerId, placement.BypassLock))
-            {
-                return StatusCode(403);
-            }
+            var (authenticatedDiscordId, callerPlayerHashes) = await GetAuthenticatedDiscordInfoAsync();
 
             var existing = await _db.BannerPlacements.FirstOrDefaultAsync(
                 b => b.LocationKey == locationKey && b.Id == placement.Id);
 
             if (existing != null)
             {
-                if (existing.OwnerId != placement.OwnerId && !placement.BypassLock)
+                if (!string.IsNullOrEmpty(existing.DiscordOwnerId) && !placement.BypassLock)
+                {
+                    if (existing.LastOwnerActivityUtc.HasValue && (DateTime.UtcNow - existing.LastOwnerActivityUtc.Value).TotalDays >= 45.0)
+                    {
+                        existing.DiscordOwnerId = null;
+                    }
+                    else if (!existing.IsDiscordUserAuthorized(authenticatedDiscordId, callerPlayerHashes))
+                    {
+                        return Forbid();
+                    }
+                }
+                else if (existing.OwnerId != placement.OwnerId && !placement.BypassLock)
                 {
                     return Forbid();
                 }
 
                 ApplyBannerFields(existing, placement);
+                if (authenticatedDiscordId != null)
+                {
+                    existing.DiscordOwnerId = authenticatedDiscordId;
+                    existing.LastOwnerActivityUtc = DateTime.UtcNow;
+                }
                 existing.LastUpdated = placement.LastUpdated;
                 _db.BannerPlacements.Update(existing);
                 await _db.SaveChangesAsync();
                 return Ok(existing);
+            }
+
+            if (authenticatedDiscordId != null)
+            {
+                placement.DiscordOwnerId = authenticatedDiscordId;
+                placement.LastOwnerActivityUtc = DateTime.UtcNow;
             }
 
             _db.BannerPlacements.Add(placement);
@@ -280,7 +451,15 @@ namespace XivMediaPlayer.Server.Controllers
                 b => b.LocationKey == locationKey && b.Id == bannerId);
             if (banner == null) return NotFound();
 
-            if (banner.OwnerId != ownerId && !bypassLock)
+            var (authenticatedDiscordId, callerPlayerHashes) = await GetAuthenticatedDiscordInfoAsync();
+            if (!string.IsNullOrEmpty(banner.DiscordOwnerId) && !bypassLock)
+            {
+                if (!banner.IsDiscordUserAuthorized(authenticatedDiscordId, callerPlayerHashes))
+                {
+                    return StatusCode(403);
+                }
+            }
+            else if (banner.OwnerId != ownerId && !bypassLock)
             {
                 return StatusCode(403);
             }

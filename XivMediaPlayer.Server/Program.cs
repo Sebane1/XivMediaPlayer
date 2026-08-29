@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -13,7 +14,10 @@ var connectionString = builder.Configuration.GetConnectionString("DefaultConnect
     ?? "Data Source=XivMediaPlayer.db;Cache=Shared;";
 
 builder.Services.AddDbContext<XivMediaPlayer.Server.Models.AppDbContext>(options =>
-    options.UseSqlite(connectionString));
+    options.UseSqlite(connectionString)
+           .ConfigureWarnings(w => w.Ignore(RelationalEventId.PendingModelChangesWarning)));
+
+builder.Services.AddHostedService<XivMediaPlayer.Server.Services.HouseClaimCleanupService>();
 
 // Learn more about configuring OpenAPI at https://aka.ms/aspnet/openapi
 builder.Services.AddOpenApi();
@@ -109,9 +113,121 @@ using (var scope = app.Services.CreateScope())
         {
             db.Database.ExecuteSqlRaw("INSERT INTO \"__EFMigrationsHistory\" (\"MigrationId\", \"ProductVersion\") VALUES ('20260812070000_VisualEffectSettings', '10.0.8');");
         }
+
+        // Robust migration: Check each table and individual column separately
+        void EnsureColumnExists(string tableName, string columnName, string columnDef)
+        {
+            try
+            {
+                var tbls = db.Database.SqlQueryRaw<string>($"SELECT name FROM sqlite_master WHERE type='table' AND name='{tableName}'").ToList();
+                if (tbls.Any())
+                {
+                    var cols = db.Database.SqlQueryRaw<string>($"SELECT name FROM pragma_table_info('{tableName}') WHERE name='{columnName}'").ToList();
+                    if (!cols.Any())
+                    {
+                        db.Database.ExecuteSqlRaw($"ALTER TABLE \"{tableName}\" ADD COLUMN \"{columnName}\" {columnDef};");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Migration check note for {tableName}.{columnName}: {ex.Message}");
+            }
+        }
+
+        EnsureColumnExists("TvPlacements", "DiscordOwnerId", "TEXT NULL");
+        EnsureColumnExists("TvPlacements", "LastOwnerActivityUtc", "TEXT NULL");
+        EnsureColumnExists("TvPlacements", "AllowedDiscordOwnerIdsJson", "TEXT NULL");
+
+        EnsureColumnExists("RoomVenueSettings", "DiscordOwnerId", "TEXT NULL");
+        EnsureColumnExists("RoomVenueSettings", "LastOwnerActivityUtc", "TEXT NULL");
+        EnsureColumnExists("RoomVenueSettings", "AllowedDiscordOwnerIdsJson", "TEXT NULL");
+
+        EnsureColumnExists("BannerPlacements", "DiscordOwnerId", "TEXT NULL");
+        EnsureColumnExists("BannerPlacements", "LastOwnerActivityUtc", "TEXT NULL");
+        EnsureColumnExists("BannerPlacements", "AllowedDiscordOwnerIdsJson", "TEXT NULL");
     }
 
-    db.Database.Migrate();
+    // Create Discord auth tables if they don't exist
+    db.Database.ExecuteSqlRaw(@"
+        CREATE TABLE IF NOT EXISTS ""DiscordUsers"" (
+            ""DiscordId"" TEXT NOT NULL CONSTRAINT ""PK_DiscordUsers"" PRIMARY KEY,
+            ""Username"" TEXT NOT NULL DEFAULT '',
+            ""PlayerHashesJson"" TEXT NOT NULL DEFAULT '[]',
+            ""AvatarUrl"" TEXT NOT NULL DEFAULT '',
+            ""LastSeenUtc"" TEXT NOT NULL DEFAULT '0001-01-01 00:00:00',
+            ""CreatedAtUtc"" TEXT NOT NULL DEFAULT '0001-01-01 00:00:00'
+        );
+    ");
+
+    // Migrate: add PlayerHashesJson column if missing (existing DBs)
+    var phCols = db.Database.SqlQueryRaw<string>("SELECT name FROM pragma_table_info('DiscordUsers') WHERE name='PlayerHashesJson'").ToList();
+    if (!phCols.Any())
+    {
+        db.Database.ExecuteSqlRaw("ALTER TABLE \"DiscordUsers\" ADD COLUMN \"PlayerHashesJson\" TEXT NOT NULL DEFAULT '[]';");
+    }
+
+    db.Database.ExecuteSqlRaw(@"
+        CREATE TABLE IF NOT EXISTS ""UserSessions"" (
+            ""Token"" TEXT NOT NULL CONSTRAINT ""PK_UserSessions"" PRIMARY KEY,
+            ""DiscordId"" TEXT NOT NULL DEFAULT '',
+            ""CreatedAtUtc"" TEXT NOT NULL DEFAULT '0001-01-01 00:00:00',
+            ""LastUsedUtc"" TEXT NOT NULL DEFAULT '0001-01-01 00:00:00',
+            ""ExpiresUtc"" TEXT NOT NULL DEFAULT '0001-01-01 00:00:00'
+        );
+    ");
+
+    db.Database.ExecuteSqlRaw(@"
+        CREATE TABLE IF NOT EXISTS ""BotApiKeys"" (
+            ""KeyHash"" TEXT NOT NULL CONSTRAINT ""PK_BotApiKeys"" PRIMARY KEY,
+            ""DiscordId"" TEXT NOT NULL DEFAULT '',
+            ""Label"" TEXT NOT NULL DEFAULT 'Bot Key',
+            ""CreatedAtUtc"" TEXT NOT NULL DEFAULT '0001-01-01 00:00:00',
+            ""LastUsedUtc"" TEXT NULL,
+            ""IsRevoked"" INTEGER NOT NULL DEFAULT 0
+        );
+    ");
+
+    db.Database.ExecuteSqlRaw(@"
+        CREATE TABLE IF NOT EXISTS ""WatchPartyEvents"" (
+            ""Id"" TEXT NOT NULL CONSTRAINT ""PK_WatchPartyEvents"" PRIMARY KEY,
+            ""Title"" TEXT NOT NULL DEFAULT '',
+            ""Description"" TEXT NOT NULL DEFAULT '',
+            ""BannerUrl"" TEXT NOT NULL DEFAULT '',
+            ""LocationKey"" TEXT NOT NULL DEFAULT '',
+            ""DataCenter"" TEXT NOT NULL DEFAULT '',
+            ""World"" TEXT NOT NULL DEFAULT '',
+            ""HousingZone"" TEXT NOT NULL DEFAULT '',
+            ""Ward"" INTEGER NOT NULL DEFAULT 0,
+            ""Plot"" INTEGER NOT NULL DEFAULT 0,
+            ""Room"" INTEGER NOT NULL DEFAULT 0,
+            ""StartTimeUtc"" TEXT NOT NULL DEFAULT '0001-01-01 00:00:00',
+            ""EndTimeUtc"" TEXT NOT NULL DEFAULT '0001-01-01 00:00:00',
+            ""DiscordOwnerId"" TEXT NOT NULL DEFAULT '',
+            ""CreatedAtUtc"" TEXT NOT NULL DEFAULT '0001-01-01 00:00:00'
+        );
+    ");
+
+    db.Database.ExecuteSqlRaw(@"
+        CREATE TABLE IF NOT EXISTS ""MediaTrackRecords"" (
+            ""Id"" INTEGER NOT NULL CONSTRAINT ""PK_MediaTrackRecords"" PRIMARY KEY AUTOINCREMENT,
+            ""LocationKey"" TEXT NOT NULL DEFAULT '',
+            ""Url"" TEXT NOT NULL DEFAULT '',
+            ""Domain"" TEXT NOT NULL DEFAULT '',
+            ""PlayedAtUtc"" TEXT NOT NULL DEFAULT '0001-01-01 00:00:00',
+            ""OwnerId"" TEXT NOT NULL DEFAULT ''
+        );
+    ");
+
+    try
+    {
+        db.Database.Migrate();
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"Database migration warning/fallback: {ex.Message}");
+        db.Database.EnsureCreated();
+    }
 }
 
 // Configure the HTTP request pipeline.

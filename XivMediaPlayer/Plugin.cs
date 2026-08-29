@@ -57,6 +57,9 @@ namespace XivMediaPlayer
         private readonly SettingsWindow _settingsWindow;
         private readonly ScreenSettingsWindow _screenSettingsWindow;
         internal ScreenSettingsWindow ScreenSettingsWindow => _screenSettingsWindow;
+        private readonly WatchPartyWindow _watchPartyWindow;
+        internal WatchPartyWindow WatchPartyWindow => _watchPartyWindow;
+        public ITextureProvider TextureProvider => _textureProvider;
         private WorldVideoRenderer _worldRenderer;
         internal WorldVideoRenderer WorldRenderer => _worldRenderer;
         internal string CurrentStreamer => _currentStreamer;
@@ -177,6 +180,7 @@ namespace XivMediaPlayer
         private bool _refreshQueued;
 
         public Networking.ServerClient ServerClient { get; private set; }
+        public Networking.DiscordAuthClient DiscordAuthClient { get; private set; }
         public Configuration Config => _config;
         public YtDlpManager YtDlpManager => _ytDlpManager;
         internal int TranslationRevision => _translationRevision;
@@ -495,6 +499,13 @@ namespace XivMediaPlayer
                 HelpMessage = GetMediaCommandHelpText(),
                 ShowInHelp = true,
             });
+
+            _commandManager.RemoveHandler("/watchparty");
+            _commandManager.AddHandler("/watchparty", new Dalamud.Game.Command.CommandInfo((cmd, args) => ToggleWatchPartyWindow())
+            {
+                HelpMessage = "Open the Watch Party community directory",
+                ShowInHelp = true,
+            });
         }
 
         private void InitializeLocalization()
@@ -719,6 +730,7 @@ namespace XivMediaPlayer
             _worldRenderer = new WorldVideoRenderer(_config.WorldScreen, _gameGui);
 
             ServerClient = new Networking.ServerClient(_config.ServerUrl, _pluginLog);
+            DiscordAuthClient = new Networking.DiscordAuthClient(ServerClient, _config, _pluginLog);
             _config.OnConfigurationChanged += (s, e) =>
             {
                 // Only recreate ServerClient if the ServerUrl actually changed!
@@ -727,6 +739,10 @@ namespace XivMediaPlayer
                 {
                     ServerClient?.Dispose();
                     ServerClient = new Networking.ServerClient(_config.ServerUrl, _pluginLog);
+                    if (!string.IsNullOrEmpty(_config.DiscordSessionToken))
+                    {
+                        ServerClient.SetDiscordSessionToken(_config.DiscordSessionToken);
+                    }
                 }
             };
 
@@ -773,6 +789,8 @@ namespace XivMediaPlayer
             _depthPreviewWindow.UICapture = _uiCapture;
             _depthPreviewWindow.Config = _config;
 
+            _watchPartyWindow = new WatchPartyWindow(this);
+
             // Initialize command manager for dependency updates
             var updateCommandManager = new CommandManager(commandManager, _pluginLog, depUpdateManager);
 
@@ -780,6 +798,7 @@ namespace XivMediaPlayer
             _windowSystem.AddWindow(_settingsWindow);
             _windowSystem.AddWindow(_screenSettingsWindow);
             _windowSystem.AddWindow(_depthPreviewWindow);
+            _windowSystem.AddWindow(_watchPartyWindow);
 
             // Register draw + config UI
             _pluginInterface.UiBuilder.Draw += OnDraw;
@@ -1154,6 +1173,52 @@ namespace XivMediaPlayer
             }
         }
 
+        public unsafe (string DataCenter, string World, string HousingZone, int Ward, int Plot, int Room, string LocationKey) GetDetailedLocationInfo()
+        {
+            string locKey = GetLocationKey() ?? string.Empty;
+            string dataCenter = string.Empty;
+            string worldName = string.Empty;
+            string housingZone = "Unknown Zone";
+            int ward = 0;
+            int plot = 0;
+            int room = 0;
+
+            try
+            {
+                var player = GetLocalPlayer();
+                if (player is Dalamud.Game.ClientState.Objects.SubKinds.IPlayerCharacter pc && pc.CurrentWorld.IsValid)
+                {
+                    worldName = pc.CurrentWorld.Value.Name.ExtractText();
+                    var dc = pc.CurrentWorld.Value.DataCenter;
+                    if (dc.IsValid)
+                    {
+                        dataCenter = dc.Value.Name.ExtractText();
+                    }
+                }
+
+                var territoryId = _clientState.TerritoryType;
+                if (territoryId == 339 || territoryId == 344) housingZone = "Mist";
+                else if (territoryId == 340 || territoryId == 345) housingZone = "The Lavender Beds";
+                else if (territoryId == 341 || territoryId == 346) housingZone = "The Goblet";
+                else if (territoryId == 641 || territoryId == 650) housingZone = "Shirogane";
+                else if (territoryId == 979 || territoryId == 980) housingZone = "Empyreum";
+
+                var housingMgr = FFXIVClientStructs.FFXIV.Client.Game.HousingManager.Instance();
+                if (housingMgr != null)
+                {
+                    short w = housingMgr->GetCurrentWard();
+                    short p = housingMgr->GetCurrentPlot();
+                    short r = housingMgr->GetCurrentRoom();
+                    if (w >= 0) ward = w + 1; // 1-indexed for display
+                    if (p >= 0) plot = p + 1; // 1-indexed for display
+                    if (r >= 0) room = r;
+                }
+            }
+            catch { }
+
+            return (dataCenter, worldName, housingZone, ward, plot, room, locKey);
+        }
+
         private bool _localPlayerNullLogged;
 
         private unsafe void InitializeMediaManager()
@@ -1207,6 +1272,55 @@ namespace XivMediaPlayer
                 _pluginLog.Warning(e, "[Media Player] Failed to get LocalPlayer from ObjectTable");
             }
             return null;
+        }
+
+        public static string ComputePlayerIdHash(string characterName, uint worldId)
+        {
+            if (string.IsNullOrWhiteSpace(characterName)) return string.Empty;
+            string raw = $"{characterName.Trim().ToLowerInvariant()}@{worldId}";
+            using var sha = System.Security.Cryptography.SHA256.Create();
+            byte[] bytes = sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes(raw));
+            return Convert.ToHexString(bytes).ToLowerInvariant();
+        }
+
+        public List<(string DisplayName, string PlayerHash)> GetNearbyPlayersWithHashes()
+        {
+            var list = new List<(string DisplayName, string PlayerHash)>();
+            foreach (var obj in _objectTable)
+            {
+                if (obj is Dalamud.Game.ClientState.Objects.SubKinds.IPlayerCharacter pc && obj.Address != _objectTable[0]?.Address)
+                {
+                    string name = pc.Name.TextValue;
+                    uint worldId = pc.CurrentWorld.RowId;
+                    string worldName = pc.CurrentWorld.Value.Name.ExtractText();
+                    if (!string.IsNullOrWhiteSpace(name))
+                    {
+                        string hash = ComputePlayerIdHash(name, worldId);
+                        if (!list.Any(x => x.PlayerHash == hash))
+                        {
+                            list.Add(($"{name} ({worldName})", hash));
+                        }
+                    }
+                }
+            }
+            return list;
+        }
+
+        public List<string> GetNearbyPlayerNames()
+        {
+            var list = new List<string>();
+            foreach (var obj in _objectTable)
+            {
+                if (obj is Dalamud.Game.ClientState.Objects.SubKinds.IPlayerCharacter pc && obj.Address != _objectTable[0]?.Address)
+                {
+                    string name = pc.Name.TextValue;
+                    if (!string.IsNullOrWhiteSpace(name) && !list.Contains(name))
+                    {
+                        list.Add(name);
+                    }
+                }
+            }
+            return list;
         }
 
         #endregion
@@ -4781,6 +4895,10 @@ namespace XivMediaPlayer
         private void OnMediaError(object? sender, MediaError e)
         {
             string errorMsg = e.Exception?.Message ?? string.Empty;
+            if (errorMsg.Contains('\n') || errorMsg.Contains('\r'))
+            {
+                errorMsg = errorMsg.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries).FirstOrDefault() ?? string.Empty;
+            }
 
             // Harmless on live/HLS demuxers. Querying playback time is unsupported.
             if (errorMsg.Contains("DEMUX_GET_TIME", StringComparison.OrdinalIgnoreCase)
@@ -5820,6 +5938,11 @@ namespace XivMediaPlayer
         private void OnOpenConfig()
         {
             _settingsWindow.Toggle();
+        }
+
+        public void ToggleWatchPartyWindow()
+        {
+            _watchPartyWindow.Toggle();
         }
 
         public void ToggleConfigUi()

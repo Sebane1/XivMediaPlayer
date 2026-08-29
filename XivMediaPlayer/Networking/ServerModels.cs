@@ -29,6 +29,8 @@ namespace XivMediaPlayer.Networking.Models
         public int VisualEffectMode { get; set; } = 0;
         public float EffectIntensity { get; set; } = 0.65f;
         public float EffectSpeed { get; set; } = 1.0f;
+        public string? DiscordOwnerId { get; set; }
+        public string? AllowedDiscordOwnerIdsJson { get; set; }
         public DateTime LastUpdated { get; set; } = DateTime.UtcNow;
     }
 
@@ -59,6 +61,8 @@ namespace XivMediaPlayer.Networking.Models
         public string LocationKey { get; set; } = string.Empty;
         public string IdleBrandingUrl { get; set; } = string.Empty;
         public string OwnerId { get; set; } = string.Empty;
+        public string? DiscordOwnerId { get; set; }
+        public string? AllowedDiscordOwnerIdsJson { get; set; }
         public DateTime LastUpdated { get; set; } = DateTime.UtcNow;
         public bool BypassLock { get; set; } = false;
     }
@@ -81,7 +85,28 @@ namespace XivMediaPlayer.Networking.Models
         public float EffectIntensity { get; set; } = 0.65f;
         public float EffectSpeed { get; set; } = 1.0f;
         public string OwnerId { get; set; } = string.Empty;
+        public string? DiscordOwnerId { get; set; }
+        public string? AllowedDiscordOwnerIdsJson { get; set; }
         public DateTime LastUpdated { get; set; } = DateTime.UtcNow;
         public bool BypassLock { get; set; } = false;
+    }
+
+    public class WatchPartyEvent
+    {
+        public string Id { get; set; } = Guid.NewGuid().ToString("N");
+        public string Title { get; set; } = string.Empty;
+        public string Description { get; set; } = string.Empty;
+        public string BannerUrl { get; set; } = string.Empty;
+        public string LocationKey { get; set; } = string.Empty;
+        public string DataCenter { get; set; } = string.Empty;
+        public string World { get; set; } = string.Empty;
+        public string HousingZone { get; set; } = string.Empty;
+        public int Ward { get; set; }
+        public int Plot { get; set; }
+        public int Room { get; set; }
+        public DateTime StartTimeUtc { get; set; } = DateTime.UtcNow;
+        public DateTime EndTimeUtc { get; set; } = DateTime.UtcNow.AddHours(2);
+        public string DiscordOwnerId { get; set; } = string.Empty;
+        public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
     }
 }

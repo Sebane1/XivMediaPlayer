@@ -86,6 +86,70 @@ Control operations are represented by state updates:
 Use integer milliseconds. `durationMs` may be `null` when unknown (especially
 for live streams). Live streams should generally not be timecode-controlled.
 
+## Authentication (Bot API Keys)
+
+Discord bots can authenticate with the server using **Bot API Keys** created by venue owners inside the XivMediaPlayer plugin settings UI (`Settings -> Discord Authentication & Owner Claim -> Discord Bot API Keys`).
+
+Attach the Bot API Key in your request headers using either:
+
+```http
+X-Bot-Api-Key: xiv_bot_your_generated_api_key_here
+```
+OR
+```http
+Authorization: Bearer xiv_bot_your_generated_api_key_here
+```
+
+When authenticated with a Bot API Key, all room control operations, screen placement modifications, and watch party event listings are authorized under the human owner's **Discord User ID** linked to that key.
+
+## Watch Party Events API
+
+Bots can query, publish, and delete community Watch Party event listings.
+
+### List Active Watch Parties
+
+```http
+GET /api/events?datacenter=Crystal&world=Goblin
+```
+
+`200 OK` returns active community events (events past their `endTimeUtc` are auto-purged by the server).
+
+### Publish Watch Party Event
+
+```http
+POST /api/events
+Content-Type: application/json
+X-Bot-Api-Key: xiv_bot_your_generated_api_key_here
+```
+
+Example request body:
+
+```json
+{
+  "title": "Jet Set Radio Future Watch Party",
+  "description": "The concept of love! Live stream music party.",
+  "bannerUrl": "https://example.com/banner.jpg",
+  "locationKey": "house_87_1251_18_36_0_24491076049043492",
+  "dataCenter": "Crystal",
+  "world": "Goblin",
+  "housingZone": "Empyreum",
+  "ward": 24,
+  "plot": 57,
+  "room": 0,
+  "startTimeUtc": "2026-08-29T20:00:00Z",
+  "endTimeUtc": "2026-08-29T23:00:00Z"
+}
+```
+
+### Delete Watch Party Event
+
+```http
+DELETE /api/events/{eventId}
+X-Bot-Api-Key: xiv_bot_your_generated_api_key_here
+```
+
+`200 OK` deletes the event listing if the caller's Bot API Key is owned by the event creator.
+
 ## Ownership and responses
 
 Every controller should persist a stable random `ownerId` (UUID) and reuse it.
@@ -108,7 +172,7 @@ updates are periodic heartbeats and must not overwrite a newer owner.
 1. `GET` the room state before issuing a command.
 2. For a command, use the returned `ownerId` only as an observation; send the
    bot's own stable `ownerId` in the POST body.
-3. POST the command as a foreground update.
+3. POST the command as a foreground update using `X-Bot-Api-Key` or `Authorization: Bearer`.
 4. Treat the returned JSON as authoritative and report `403`/`409` clearly.
 5. For display-only status, poll `GET` about every 2–5 seconds. Derive the
    playhead using `dataAgeMs`; do not repeatedly POST just to keep time moving.
@@ -129,11 +193,7 @@ client/server clock offset, although normal playback display should use the
 
 ## Security and compatibility notes
 
-The current API has no bot-specific authentication layer. Anyone who can reach
-the server and knows a location key can attempt control, subject to room/TV
-locks. Deployments should protect the API at the reverse proxy or add bot
-authentication before exposing it publicly. Do not log media URLs containing
-API keys.
+Authenticated bot requests using `X-Bot-Api-Key` or `Authorization: Bearer` pass through venue locks if the key owner is authorized for that room or TV. Unauthenticated calls are subject to room/TV locks. Do not log media URLs containing API keys.
 
 The API transports original media URLs, not the plugin's local VLC proxy URLs
 (`127.0.0.1` URLs are ephemeral and must never be shared).
