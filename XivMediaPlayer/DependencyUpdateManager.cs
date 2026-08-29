@@ -36,14 +36,10 @@ namespace XivMediaPlayer
                 // Check dependencies directory structure - can be extended to actual update logic later
                 bool updated = false;
 
-                // Log current state of key components
                 if (Directory.Exists(_dependenciesDir))
                 {
                     var files = Directory.GetFiles(_dependenciesDir, "*", SearchOption.AllDirectories);
-                    foreach (var file in files)
-                    {
-                        _pluginLog.Information($"Dependency file: {file}");
-                    }
+                    _pluginLog.Verbose($"Dependencies directory contains {files.Length} files.");
                 }
 
                 return updated;

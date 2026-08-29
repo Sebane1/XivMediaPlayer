@@ -3268,7 +3268,13 @@ namespace MediaPlayerCore.YtDlp
                 if (string.IsNullOrEmpty(e.Data)) return;
                 AppendBgutilServerLog(e.Data);
                 if (e.Data.Contains("EADDRINUSE", StringComparison.OrdinalIgnoreCase)
-                    || e.Data.Contains("falling back", StringComparison.OrdinalIgnoreCase))
+                    || e.Data.Contains("falling back", StringComparison.OrdinalIgnoreCase)
+                    || e.Data.Contains("Fossilize", StringComparison.OrdinalIgnoreCase)
+                    || e.Data.Contains("Vulkan", StringComparison.OrdinalIgnoreCase)
+                    || e.Data.Contains("Shader", StringComparison.OrdinalIgnoreCase)
+                    || e.Data.Contains("letting recording go through", StringComparison.OrdinalIgnoreCase)
+                    || e.Data.StartsWith("WARN", StringComparison.OrdinalIgnoreCase)
+                    || e.Data.StartsWith("INFO", StringComparison.OrdinalIgnoreCase))
                 {
                     return;
                 }
