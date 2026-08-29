@@ -255,7 +255,7 @@ namespace XivMediaPlayer
                 Status = "Downloading FFmpeg...";
                 _pluginLog.Information("Downloading FFmpeg...");
                 string zipPath = Path.Combine(DependenciesDir, "ffmpeg.zip");
-                string url = "https://github.com/ffbinaries/ffbinaries-prebuilt/releases/download/v4.4.1/ffmpeg-4.4.1-win-64.zip";
+                string url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip";
 
                 using (var client = new HttpClient())
                 using (var response = await client.GetAsync(url))
@@ -268,8 +268,19 @@ namespace XivMediaPlayer
                 Status = "Extracting FFmpeg...";
                 await Task.Run(() =>
                 {
-                    ZipFile.ExtractToDirectory(zipPath, DependenciesDir, true);
-                    File.Delete(zipPath);
+                    using (var archive = ZipFile.OpenRead(zipPath))
+                    {
+                        var entry = System.Linq.Enumerable.FirstOrDefault(archive.Entries, e => e.FullName.EndsWith("bin/ffmpeg.exe", StringComparison.OrdinalIgnoreCase) || e.FullName.Equals("ffmpeg.exe", StringComparison.OrdinalIgnoreCase));
+                        if (entry != null)
+                        {
+                            entry.ExtractToFile(Path.Combine(DependenciesDir, "ffmpeg.exe"), true);
+                        }
+                        else
+                        {
+                            ZipFile.ExtractToDirectory(zipPath, DependenciesDir, true);
+                        }
+                    }
+                    if (File.Exists(zipPath)) File.Delete(zipPath);
                 });
 
                 CheckDependencies();

@@ -647,6 +647,22 @@ namespace XivMediaPlayer
             Compositing.ShaderCompileHelper.LogIssue = message => _pluginLog.Warning(message);
             _dependencyManager = new DependencyManager(configDir, pluginDir, version, _pluginLog);
 
+            // Initialize dependency update manager
+            var depUpdateManager = new DependencyUpdateManager(configDir, pluginDir, _pluginLog);
+            
+            // Check and update dependencies on startup (in background)
+            Task.Run(async () => 
+            {
+                try
+                {
+                    await depUpdateManager.CheckAndUpdateDependenciesAsync();
+                }
+                catch (Exception ex)
+                {
+                    _pluginLog.Error($"Error during dependency update check: {ex.Message}");
+                }
+            });
+
             // Bypass Dalamud's assembly resolver for CefSharp natively (just in case)
             AppDomain.CurrentDomain.AssemblyResolve += (sender, args) => { return null; };
 
@@ -756,6 +772,9 @@ namespace XivMediaPlayer
             _depthPreviewWindow.Capture = _depthCapture;
             _depthPreviewWindow.UICapture = _uiCapture;
             _depthPreviewWindow.Config = _config;
+
+            // Initialize command manager for dependency updates
+            var updateCommandManager = new CommandManager(commandManager, _pluginLog, depUpdateManager);
 
             _windowSystem.AddWindow(_videoWindow);
             _windowSystem.AddWindow(_settingsWindow);
@@ -1927,10 +1946,13 @@ namespace XivMediaPlayer
                 var host = uri.Host.ToLowerInvariant();
                 
                 string[] safeDomains = {
-                    "youtube.com", "youtu.be",
+                    "youtube.com", 
+                    "youtu.be",
                     "twitch.tv",
                     "vimeo.com",
-                    "soundcloud.com"
+                    "soundcloud.com",
+                    "bilibili.com",
+                    "b23.tv"
                 };
                 
                 foreach (var domain in safeDomains)
