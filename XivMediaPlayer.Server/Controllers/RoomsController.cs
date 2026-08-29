@@ -29,6 +29,14 @@ namespace XivMediaPlayer.Server.Controllers
         private const float MinEffectSpeed = 0.1f;
         private const float MaxEffectSpeed = 3f;
 
+        /// <summary>
+        /// Returns true if the location key represents an ephemeral outdoor grid cell
+        /// (zone_..._grid_...) rather than a persistent plot or housing location.
+        /// Only grid keys have their ownership claims automatically forfeited after inactivity.
+        /// </summary>
+        private static bool IsEphemeralGridKey(string locationKey)
+            => locationKey.StartsWith("zone_") && locationKey.Contains("_grid_");
+
         private static void NormalizeVisualFx(TvPlacement placement)
         {
             placement.VisualEffectMode = Math.Clamp(placement.VisualEffectMode, 0, MaxVisualEffectMode);
@@ -50,7 +58,7 @@ namespace XivMediaPlayer.Server.Controllers
                 .Where(t => t.LocationKey == locationKey)
                 .ToListAsync();
 
-            if (locationKey.StartsWith("zone_"))
+            if (IsEphemeralGridKey(locationKey))
             {
                 var lastFetch = _lastFetchTimes.TryGetValue(locationKey, out var lf) ? lf : DateTime.MinValue;
                 bool gridEmpty = lastFetch != DateTime.MinValue && (DateTime.UtcNow - lastFetch).TotalMinutes >= 2.0;
@@ -122,7 +130,7 @@ namespace XivMediaPlayer.Server.Controllers
             if (existing != null)
             {
                 bool isForfeited = false;
-                if (locationKey.StartsWith("zone_"))
+                if (IsEphemeralGridKey(locationKey))
                 {
                     var lastFetch = _lastFetchTimes.TryGetValue(locationKey, out var lf) ? lf : DateTime.MinValue;
                     if (lastFetch != DateTime.MinValue && (DateTime.UtcNow - lastFetch).TotalMinutes >= 2.0)
@@ -132,7 +140,7 @@ namespace XivMediaPlayer.Server.Controllers
                 }
 
                 // Check 45-day Discord owner claim expiration for housing
-                if (!string.IsNullOrEmpty(existing.DiscordOwnerId) && !locationKey.StartsWith("zone_"))
+                if (!string.IsNullOrEmpty(existing.DiscordOwnerId) && !IsEphemeralGridKey(locationKey))
                 {
                     if (existing.LastOwnerActivityUtc.HasValue && (DateTime.UtcNow - existing.LastOwnerActivityUtc.Value).TotalDays >= 45.0)
                     {
