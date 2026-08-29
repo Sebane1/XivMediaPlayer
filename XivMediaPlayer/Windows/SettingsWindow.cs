@@ -121,6 +121,8 @@ namespace XivMediaPlayer.Windows {
         }
       }
 
+      DrawDiscordAuthSection();
+
       ImGui.Spacing();
       ImGui.TextColored(new Vector4(0.7f, 0.9f, 1.0f, 1.0f), Localize("Audio"));
       ImGui.Separator();
@@ -566,7 +568,47 @@ namespace XivMediaPlayer.Windows {
         if (ImGui.Button(Localize("Cancel"), new Vector2(120, 0))) {
           ImGui.CloseCurrentPopup();
         }
-        ImGui.EndPopup();
+      }
+    }
+
+    private string _discordAuthStatus = string.Empty;
+
+    private void DrawDiscordAuthSection()
+    {
+      ImGui.Spacing();
+      ImGui.TextColored(new Vector4(0.7f, 0.9f, 1.0f, 1.0f), Localize("Discord Authentication & Owner Claim"));
+      ImGui.Separator();
+
+      if (_plugin.DiscordAuthClient != null && _plugin.DiscordAuthClient.IsLoggedIn)
+      {
+        ImGui.TextColored(new Vector4(0.4f, 1.0f, 0.5f, 1.0f), string.Format(Localize("Authenticated as: {0}"), _plugin.Config.DiscordUsername));
+        if (ImGui.Button(Localize("Unlink Discord Account")))
+        {
+          _ = Task.Run(async () =>
+          {
+            await _plugin.DiscordAuthClient.LogoutAsync();
+            _discordAuthStatus = Localize("Unlinked Discord account.");
+          });
+        }
+      }
+      else
+      {
+        ImGui.TextWrapped(Localize("Link your Discord account to claim screen ownership. Discord-authenticated screen claims stay protected under your account until 45 days of inactivity."));
+        if (ImGui.Button(Localize("Link Discord Account")))
+        {
+          _ = Task.Run(async () =>
+          {
+            await _plugin.DiscordAuthClient.StartLoginFlowAsync(status =>
+            {
+              _discordAuthStatus = status;
+            });
+          });
+        }
+      }
+
+      if (!string.IsNullOrEmpty(_discordAuthStatus))
+      {
+        ImGui.TextColored(new Vector4(1.0f, 0.85f, 0.3f, 1.0f), _discordAuthStatus);
       }
     }
   }

@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -13,7 +14,10 @@ var connectionString = builder.Configuration.GetConnectionString("DefaultConnect
     ?? "Data Source=XivMediaPlayer.db;Cache=Shared;";
 
 builder.Services.AddDbContext<XivMediaPlayer.Server.Models.AppDbContext>(options =>
-    options.UseSqlite(connectionString));
+    options.UseSqlite(connectionString)
+           .ConfigureWarnings(w => w.Ignore(RelationalEventId.PendingModelChangesWarning)));
+
+builder.Services.AddHostedService<XivMediaPlayer.Server.Services.HouseClaimCleanupService>();
 
 // Learn more about configuring OpenAPI at https://aka.ms/aspnet/openapi
 builder.Services.AddOpenApi();
@@ -109,9 +113,78 @@ using (var scope = app.Services.CreateScope())
         {
             db.Database.ExecuteSqlRaw("INSERT INTO \"__EFMigrationsHistory\" (\"MigrationId\", \"ProductVersion\") VALUES ('20260812070000_VisualEffectSettings', '10.0.8');");
         }
+
+        var discordCols = db.Database.SqlQueryRaw<string>("SELECT name FROM pragma_table_info('TvPlacements') WHERE name='DiscordOwnerId'").ToList();
+        if (!discordCols.Any())
+        {
+            db.Database.ExecuteSqlRaw("ALTER TABLE \"TvPlacements\" ADD COLUMN \"DiscordOwnerId\" TEXT NULL;");
+            db.Database.ExecuteSqlRaw("ALTER TABLE \"TvPlacements\" ADD COLUMN \"LastOwnerActivityUtc\" TEXT NULL;");
+        }
+
+        var coOwnerCols = db.Database.SqlQueryRaw<string>("SELECT name FROM pragma_table_info('TvPlacements') WHERE name='AllowedDiscordOwnerIdsJson'").ToList();
+        if (!coOwnerCols.Any())
+        {
+            db.Database.ExecuteSqlRaw("ALTER TABLE \"TvPlacements\" ADD COLUMN \"AllowedDiscordOwnerIdsJson\" TEXT NULL;");
+        }
+
+        var venueDiscordCols = db.Database.SqlQueryRaw<string>("SELECT name FROM pragma_table_info('RoomVenueSettings') WHERE name='DiscordOwnerId'").ToList();
+        if (!venueDiscordCols.Any() && venueTables.Any())
+        {
+            db.Database.ExecuteSqlRaw("ALTER TABLE \"RoomVenueSettings\" ADD COLUMN \"DiscordOwnerId\" TEXT NULL;");
+            db.Database.ExecuteSqlRaw("ALTER TABLE \"RoomVenueSettings\" ADD COLUMN \"LastOwnerActivityUtc\" TEXT NULL;");
+            db.Database.ExecuteSqlRaw("ALTER TABLE \"RoomVenueSettings\" ADD COLUMN \"AllowedDiscordOwnerIdsJson\" TEXT NULL;");
+        }
+
+        if (bannerTables.Any())
+        {
+            var bannerDiscordCols = db.Database.SqlQueryRaw<string>("SELECT name FROM pragma_table_info('BannerPlacements') WHERE name='DiscordOwnerId'").ToList();
+            if (!bannerDiscordCols.Any())
+            {
+                db.Database.ExecuteSqlRaw("ALTER TABLE \"BannerPlacements\" ADD COLUMN \"DiscordOwnerId\" TEXT NULL;");
+                db.Database.ExecuteSqlRaw("ALTER TABLE \"BannerPlacements\" ADD COLUMN \"LastOwnerActivityUtc\" TEXT NULL;");
+                db.Database.ExecuteSqlRaw("ALTER TABLE \"BannerPlacements\" ADD COLUMN \"AllowedDiscordOwnerIdsJson\" TEXT NULL;");
+         }
+        }
     }
 
-    db.Database.Migrate();
+    // Create Discord auth tables if they don't exist
+    db.Database.ExecuteSqlRaw(@"
+        CREATE TABLE IF NOT EXISTS ""DiscordUsers"" (
+            ""DiscordId"" TEXT NOT NULL CONSTRAINT ""PK_DiscordUsers"" PRIMARY KEY,
+            ""Username"" TEXT NOT NULL DEFAULT '',
+            ""PlayerHashesJson"" TEXT NOT NULL DEFAULT '[]',
+            ""AvatarUrl"" TEXT NOT NULL DEFAULT '',
+            ""LastSeenUtc"" TEXT NOT NULL DEFAULT '0001-01-01 00:00:00',
+            ""CreatedAtUtc"" TEXT NOT NULL DEFAULT '0001-01-01 00:00:00'
+        );
+    ");
+
+    // Migrate: add PlayerHashesJson column if missing (existing DBs)
+    var phCols = db.Database.SqlQueryRaw<string>("SELECT name FROM pragma_table_info('DiscordUsers') WHERE name='PlayerHashesJson'").ToList();
+    if (!phCols.Any())
+    {
+        db.Database.ExecuteSqlRaw("ALTER TABLE \"DiscordUsers\" ADD COLUMN \"PlayerHashesJson\" TEXT NOT NULL DEFAULT '[]';");
+    }
+
+    db.Database.ExecuteSqlRaw(@"
+        CREATE TABLE IF NOT EXISTS ""UserSessions"" (
+            ""Token"" TEXT NOT NULL CONSTRAINT ""PK_UserSessions"" PRIMARY KEY,
+            ""DiscordId"" TEXT NOT NULL DEFAULT '',
+            ""CreatedAtUtc"" TEXT NOT NULL DEFAULT '0001-01-01 00:00:00',
+            ""LastUsedUtc"" TEXT NOT NULL DEFAULT '0001-01-01 00:00:00',
+            ""ExpiresUtc"" TEXT NOT NULL DEFAULT '0001-01-01 00:00:00'
+        );
+    ");
+
+    try
+    {
+        db.Database.Migrate();
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"Database migration warning/fallback: {ex.Message}");
+        db.Database.EnsureCreated();
+    }
 }
 
 // Configure the HTTP request pipeline.

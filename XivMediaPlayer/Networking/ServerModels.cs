@@ -29,6 +29,8 @@ namespace XivMediaPlayer.Networking.Models
         public int VisualEffectMode { get; set; } = 0;
         public float EffectIntensity { get; set; } = 0.65f;
         public float EffectSpeed { get; set; } = 1.0f;
+        public string? DiscordOwnerId { get; set; }
+        public string? AllowedDiscordOwnerIdsJson { get; set; }
         public DateTime LastUpdated { get; set; } = DateTime.UtcNow;
     }
 
@@ -59,6 +61,8 @@ namespace XivMediaPlayer.Networking.Models
         public string LocationKey { get; set; } = string.Empty;
         public string IdleBrandingUrl { get; set; } = string.Empty;
         public string OwnerId { get; set; } = string.Empty;
+        public string? DiscordOwnerId { get; set; }
+        public string? AllowedDiscordOwnerIdsJson { get; set; }
         public DateTime LastUpdated { get; set; } = DateTime.UtcNow;
         public bool BypassLock { get; set; } = false;
     }
@@ -81,6 +85,8 @@ namespace XivMediaPlayer.Networking.Models
         public float EffectIntensity { get; set; } = 0.65f;
         public float EffectSpeed { get; set; } = 1.0f;
         public string OwnerId { get; set; } = string.Empty;
+        public string? DiscordOwnerId { get; set; }
+        public string? AllowedDiscordOwnerIdsJson { get; set; }
         public DateTime LastUpdated { get; set; } = DateTime.UtcNow;
         public bool BypassLock { get; set; } = false;
     }

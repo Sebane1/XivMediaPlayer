@@ -177,6 +177,7 @@ namespace XivMediaPlayer
         private bool _refreshQueued;
 
         public Networking.ServerClient ServerClient { get; private set; }
+        public Networking.DiscordAuthClient DiscordAuthClient { get; private set; }
         public Configuration Config => _config;
         public YtDlpManager YtDlpManager => _ytDlpManager;
         internal int TranslationRevision => _translationRevision;
@@ -719,6 +720,7 @@ namespace XivMediaPlayer
             _worldRenderer = new WorldVideoRenderer(_config.WorldScreen, _gameGui);
 
             ServerClient = new Networking.ServerClient(_config.ServerUrl, _pluginLog);
+            DiscordAuthClient = new Networking.DiscordAuthClient(ServerClient, _config, _pluginLog);
             _config.OnConfigurationChanged += (s, e) =>
             {
                 // Only recreate ServerClient if the ServerUrl actually changed!
@@ -727,6 +729,10 @@ namespace XivMediaPlayer
                 {
                     ServerClient?.Dispose();
                     ServerClient = new Networking.ServerClient(_config.ServerUrl, _pluginLog);
+                    if (!string.IsNullOrEmpty(_config.DiscordSessionToken))
+                    {
+                        ServerClient.SetDiscordSessionToken(_config.DiscordSessionToken);
+                    }
                 }
             };
 
@@ -1207,6 +1213,55 @@ namespace XivMediaPlayer
                 _pluginLog.Warning(e, "[Media Player] Failed to get LocalPlayer from ObjectTable");
             }
             return null;
+        }
+
+        public static string ComputePlayerIdHash(string characterName, uint worldId)
+        {
+            if (string.IsNullOrWhiteSpace(characterName)) return string.Empty;
+            string raw = $"{characterName.Trim().ToLowerInvariant()}@{worldId}";
+            using var sha = System.Security.Cryptography.SHA256.Create();
+            byte[] bytes = sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes(raw));
+            return Convert.ToHexString(bytes).ToLowerInvariant();
+        }
+
+        public List<(string DisplayName, string PlayerHash)> GetNearbyPlayersWithHashes()
+        {
+            var list = new List<(string DisplayName, string PlayerHash)>();
+            foreach (var obj in _objectTable)
+            {
+                if (obj is Dalamud.Game.ClientState.Objects.SubKinds.IPlayerCharacter pc && obj.Address != _objectTable[0]?.Address)
+                {
+                    string name = pc.Name.TextValue;
+                    uint worldId = pc.CurrentWorld.RowId;
+                    string worldName = pc.CurrentWorld.Value.Name.ExtractText();
+                    if (!string.IsNullOrWhiteSpace(name))
+                    {
+                        string hash = ComputePlayerIdHash(name, worldId);
+                        if (!list.Any(x => x.PlayerHash == hash))
+                        {
+                            list.Add(($"{name} ({worldName})", hash));
+                        }
+                    }
+                }
+            }
+            return list;
+        }
+
+        public List<string> GetNearbyPlayerNames()
+        {
+            var list = new List<string>();
+            foreach (var obj in _objectTable)
+            {
+                if (obj is Dalamud.Game.ClientState.Objects.SubKinds.IPlayerCharacter pc && obj.Address != _objectTable[0]?.Address)
+                {
+                    string name = pc.Name.TextValue;
+                    if (!string.IsNullOrWhiteSpace(name) && !list.Contains(name))
+                    {
+                        list.Add(name);
+                    }
+                }
+            }
+            return list;
         }
 
         #endregion
@@ -4781,6 +4836,10 @@ namespace XivMediaPlayer
         private void OnMediaError(object? sender, MediaError e)
         {
             string errorMsg = e.Exception?.Message ?? string.Empty;
+            if (errorMsg.Contains('\n') || errorMsg.Contains('\r'))
+            {
+                errorMsg = errorMsg.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries).FirstOrDefault() ?? string.Empty;
+            }
 
             // Harmless on live/HLS demuxers. Querying playback time is unsupported.
             if (errorMsg.Contains("DEMUX_GET_TIME", StringComparison.OrdinalIgnoreCase)

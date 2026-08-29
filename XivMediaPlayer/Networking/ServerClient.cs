@@ -23,6 +23,18 @@ namespace XivMediaPlayer.Networking
             _httpClient = new HttpClient();
         }
 
+        public void SetDiscordSessionToken(string? token)
+        {
+            if (!string.IsNullOrWhiteSpace(token))
+            {
+                _httpClient.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
+            }
+            else
+            {
+                _httpClient.DefaultRequestHeaders.Authorization = null;
+            }
+        }
+
         public async Task<long> GetServerTimeAsync()
         {
             try
