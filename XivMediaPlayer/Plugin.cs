@@ -59,6 +59,7 @@ namespace XivMediaPlayer
         internal ScreenSettingsWindow ScreenSettingsWindow => _screenSettingsWindow;
         private readonly WatchPartyWindow _watchPartyWindow;
         internal WatchPartyWindow WatchPartyWindow => _watchPartyWindow;
+        public ITextureProvider TextureProvider => _textureProvider;
         private WorldVideoRenderer _worldRenderer;
         internal WorldVideoRenderer WorldRenderer => _worldRenderer;
         internal string CurrentStreamer => _currentStreamer;

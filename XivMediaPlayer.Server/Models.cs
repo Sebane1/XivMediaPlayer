@@ -89,6 +89,16 @@ namespace XivMediaPlayer.Server.Models
         public DateTime ExpiresUtc { get; set; } = DateTime.UtcNow.AddDays(60);
     }
 
+    public class BotApiKey
+    {
+        public string KeyHash { get; set; } = string.Empty;
+        public string DiscordId { get; set; } = string.Empty;
+        public string Label { get; set; } = "Bot Key";
+        public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
+        public DateTime? LastUsedUtc { get; set; }
+        public bool IsRevoked { get; set; } = false;
+    }
+
     public class RoomClaimRequest
     {
         public string LocationKey { get; set; } = string.Empty;
@@ -247,6 +257,7 @@ namespace XivMediaPlayer.Server.Models
         public Microsoft.EntityFrameworkCore.DbSet<BannerPlacement> BannerPlacements { get; set; } = null!;
         public Microsoft.EntityFrameworkCore.DbSet<DiscordUser> DiscordUsers { get; set; } = null!;
         public Microsoft.EntityFrameworkCore.DbSet<UserSession> UserSessions { get; set; } = null!;
+        public Microsoft.EntityFrameworkCore.DbSet<BotApiKey> BotApiKeys { get; set; } = null!;
         public Microsoft.EntityFrameworkCore.DbSet<WatchPartyEvent> WatchPartyEvents { get; set; } = null!;
 
         public AppDbContext(Microsoft.EntityFrameworkCore.DbContextOptions<AppDbContext> options) : base(options) { }
@@ -290,6 +301,12 @@ namespace XivMediaPlayer.Server.Models
 
             modelBuilder.Entity<UserSession>()
                 .HasIndex(s => s.DiscordId);
+
+            modelBuilder.Entity<BotApiKey>()
+                .HasKey(b => b.KeyHash);
+
+            modelBuilder.Entity<BotApiKey>()
+                .HasIndex(b => b.DiscordId);
 
             modelBuilder.Entity<WatchPartyEvent>()
                 .HasKey(e => e.Id);

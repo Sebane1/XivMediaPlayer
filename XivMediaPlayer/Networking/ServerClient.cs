@@ -398,7 +398,8 @@ namespace XivMediaPlayer.Networking
         {
             try
             {
-                string url = $"{_baseUrl}/api/events";
+                string cleanBase = _baseUrl.TrimEnd('/');
+                string url = $"{cleanBase}/api/events";
                 var queryParams = new List<string>();
                 if (!string.IsNullOrWhiteSpace(datacenter)) queryParams.Add($"datacenter={Uri.EscapeDataString(datacenter)}");
                 if (!string.IsNullOrWhiteSpace(world)) queryParams.Add($"world={Uri.EscapeDataString(world)}");
@@ -423,7 +424,8 @@ namespace XivMediaPlayer.Networking
         {
             try
             {
-                var response = await _httpClient.PostAsJsonAsync($"{_baseUrl}/api/events", watchEvent);
+                string cleanBase = _baseUrl.TrimEnd('/');
+                var response = await _httpClient.PostAsJsonAsync($"{cleanBase}/api/events", watchEvent);
                 if (response.IsSuccessStatusCode)
                 {
                     return await response.Content.ReadFromJsonAsync<WatchPartyEvent>();
@@ -442,12 +444,80 @@ namespace XivMediaPlayer.Networking
         {
             try
             {
-                var response = await _httpClient.DeleteAsync($"{_baseUrl}/api/events/{Uri.EscapeDataString(eventId)}");
+                string cleanBase = _baseUrl.TrimEnd('/');
+                var response = await _httpClient.DeleteAsync($"{cleanBase}/api/events/{Uri.EscapeDataString(eventId)}");
                 return response.IsSuccessStatusCode;
             }
             catch (Exception ex)
             {
                 _log.Error(ex, $"Failed to delete watch party event {eventId}");
+            }
+            return false;
+        }
+
+        public class BotApiKeyDto
+        {
+            public string KeyHashPrefix { get; set; } = string.Empty;
+            public string Label { get; set; } = string.Empty;
+            public DateTime CreatedAtUtc { get; set; }
+            public DateTime? LastUsedUtc { get; set; }
+        }
+
+        public class GenerateBotKeyResult
+        {
+            public string ApiKey { get; set; } = string.Empty;
+            public string Label { get; set; } = string.Empty;
+            public string DiscordId { get; set; } = string.Empty;
+            public string Message { get; set; } = string.Empty;
+        }
+
+        public async Task<GenerateBotKeyResult?> GenerateBotApiKeyAsync(string label)
+        {
+            try
+            {
+                string cleanBase = _baseUrl.TrimEnd('/');
+                var response = await _httpClient.PostAsJsonAsync($"{cleanBase}/api/auth/bot-key/generate", new { label });
+                if (response.IsSuccessStatusCode)
+                {
+                    return await response.Content.ReadFromJsonAsync<GenerateBotKeyResult>();
+                }
+            }
+            catch (Exception ex)
+            {
+                _log.Error(ex, "Failed to generate Bot API Key");
+            }
+            return null;
+        }
+
+        public async Task<List<BotApiKeyDto>> ListBotApiKeysAsync()
+        {
+            try
+            {
+                string cleanBase = _baseUrl.TrimEnd('/');
+                var response = await _httpClient.GetAsync($"{cleanBase}/api/auth/bot-key/list");
+                if (response.IsSuccessStatusCode)
+                {
+                    return await response.Content.ReadFromJsonAsync<List<BotApiKeyDto>>() ?? new List<BotApiKeyDto>();
+                }
+            }
+            catch (Exception ex)
+            {
+                _log.Error(ex, "Failed to list Bot API Keys");
+            }
+            return new List<BotApiKeyDto>();
+        }
+
+        public async Task<bool> RevokeBotApiKeyAsync(string keyHashPrefix)
+        {
+            try
+            {
+                string cleanBase = _baseUrl.TrimEnd('/');
+                var response = await _httpClient.PostAsync($"{cleanBase}/api/auth/bot-key/revoke?keyHashPrefix={Uri.EscapeDataString(keyHashPrefix)}", null);
+                return response.IsSuccessStatusCode;
+            }
+            catch (Exception ex)
+            {
+                _log.Error(ex, "Failed to revoke Bot API Key");
             }
             return false;
         }

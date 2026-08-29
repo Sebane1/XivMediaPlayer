@@ -208,27 +208,48 @@ namespace XivMediaPlayer.Server.Controllers
             return BadRequest("Multiple TVs exist for this location. Pass create=true to add another screen.");
         }
 
-        private async Task<(string? DiscordId, List<string> PlayerHashes)> GetAuthenticatedDiscordInfoAsync()
+        private async Task<(string? authenticatedDiscordId, List<string> callerPlayerHashes)> GetAuthenticatedDiscordInfoAsync()
         {
-            if (Request.Headers.TryGetValue("Authorization", out var authHeader))
+            string? token = null;
+
+            if (Request.Headers.TryGetValue("X-Bot-Api-Key", out var apiKeyHeader))
+            {
+                token = apiKeyHeader.ToString().Trim();
+            }
+            else if (Request.Headers.TryGetValue("Authorization", out var authHeader))
             {
                 string raw = authHeader.ToString();
                 if (raw.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
                 {
-                    string token = raw.Substring(7).Trim();
-                    using var sha256 = System.Security.Cryptography.SHA256.Create();
-                    string hashedToken = Convert.ToHexString(sha256.ComputeHash(System.Text.Encoding.UTF8.GetBytes(token))).ToLowerInvariant();
-
-                    var session = await _db.UserSessions.FirstOrDefaultAsync(s => s.Token == hashedToken);
-                    if (session != null && session.ExpiresUtc > DateTime.UtcNow)
-                    {
-                        session.LastUsedUtc = DateTime.UtcNow;
-                        var discordUser = await _db.DiscordUsers.FirstOrDefaultAsync(u => u.DiscordId == session.DiscordId);
-                        var playerHashes = discordUser?.GetPlayerHashes() ?? new List<string>();
-                        return (session.DiscordId, playerHashes);
-                    }
+                    token = raw.Substring(7).Trim();
                 }
             }
+
+            if (string.IsNullOrEmpty(token)) return (null, new List<string>());
+
+            using var sha256 = System.Security.Cryptography.SHA256.Create();
+            string hashedToken = Convert.ToHexString(sha256.ComputeHash(System.Text.Encoding.UTF8.GetBytes(token))).ToLowerInvariant();
+
+            // 1. Check User Sessions
+            var session = await _db.UserSessions.FirstOrDefaultAsync(s => s.Token == hashedToken);
+            if (session != null && session.ExpiresUtc > DateTime.UtcNow)
+            {
+                session.LastUsedUtc = DateTime.UtcNow;
+                var discordUser = await _db.DiscordUsers.FirstOrDefaultAsync(u => u.DiscordId == session.DiscordId);
+                var playerHashes = discordUser?.GetPlayerHashes() ?? new List<string>();
+                return (session.DiscordId, playerHashes);
+            }
+
+            // 2. Check Bot API Keys
+            var botKey = await _db.BotApiKeys.FirstOrDefaultAsync(b => b.KeyHash == hashedToken && !b.IsRevoked);
+            if (botKey != null)
+            {
+                botKey.LastUsedUtc = DateTime.UtcNow;
+                var discordUser = await _db.DiscordUsers.FirstOrDefaultAsync(u => u.DiscordId == botKey.DiscordId);
+                var playerHashes = discordUser?.GetPlayerHashes() ?? new List<string>();
+                return (botKey.DiscordId, playerHashes);
+            }
+
             return (null, new List<string>());
         }
 

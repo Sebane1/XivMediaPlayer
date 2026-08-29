@@ -5,7 +5,7 @@ using XivMediaPlayer.Server.Models;
 namespace XivMediaPlayer.Server.Controllers
 {
     [ApiController]
-    [Route("api/[controller]")]
+    [Route("api/events")]
     public class EventsController : ControllerBase
     {
         private readonly AppDbContext _db;
@@ -19,23 +19,42 @@ namespace XivMediaPlayer.Server.Controllers
 
         private async Task<string?> GetAuthenticatedDiscordIdAsync()
         {
-            if (Request.Headers.TryGetValue("Authorization", out var authHeader))
+            string? token = null;
+
+            if (Request.Headers.TryGetValue("X-Bot-Api-Key", out var apiKeyHeader))
+            {
+                token = apiKeyHeader.ToString().Trim();
+            }
+            else if (Request.Headers.TryGetValue("Authorization", out var authHeader))
             {
                 string raw = authHeader.ToString();
                 if (raw.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
                 {
-                    string token = raw.Substring(7).Trim();
-                    using var sha256 = System.Security.Cryptography.SHA256.Create();
-                    string hashedToken = Convert.ToHexString(sha256.ComputeHash(System.Text.Encoding.UTF8.GetBytes(token))).ToLowerInvariant();
-
-                    var session = await _db.UserSessions.FirstOrDefaultAsync(s => s.Token == hashedToken);
-                    if (session != null && session.ExpiresUtc > DateTime.UtcNow)
-                    {
-                        session.LastUsedUtc = DateTime.UtcNow;
-                        return session.DiscordId;
-                    }
+                    token = raw.Substring(7).Trim();
                 }
             }
+
+            if (string.IsNullOrEmpty(token)) return null;
+
+            using var sha256 = System.Security.Cryptography.SHA256.Create();
+            string hashedToken = Convert.ToHexString(sha256.ComputeHash(System.Text.Encoding.UTF8.GetBytes(token))).ToLowerInvariant();
+
+            // 1. Check User Sessions
+            var session = await _db.UserSessions.FirstOrDefaultAsync(s => s.Token == hashedToken);
+            if (session != null && session.ExpiresUtc > DateTime.UtcNow)
+            {
+                session.LastUsedUtc = DateTime.UtcNow;
+                return session.DiscordId;
+            }
+
+            // 2. Check Bot API Keys
+            var botKey = await _db.BotApiKeys.FirstOrDefaultAsync(b => b.KeyHash == hashedToken && !b.IsRevoked);
+            if (botKey != null)
+            {
+                botKey.LastUsedUtc = DateTime.UtcNow;
+                return botKey.DiscordId;
+            }
+
             return null;
         }
 
@@ -81,7 +100,7 @@ namespace XivMediaPlayer.Server.Controllers
             string? discordId = await GetAuthenticatedDiscordIdAsync();
             if (string.IsNullOrEmpty(discordId))
             {
-                return Unauthorized("Discord login required to post a watch party event.");
+                return StatusCode(401, "Discord login required to post a watch party event.");
             }
 
             if (string.IsNullOrWhiteSpace(watchEvent.Title))
@@ -117,7 +136,7 @@ namespace XivMediaPlayer.Server.Controllers
             string? discordId = await GetAuthenticatedDiscordIdAsync();
             if (string.IsNullOrEmpty(discordId))
             {
-                return Unauthorized("Discord login required.");
+                return StatusCode(401, "Discord login required.");
             }
 
             var watchEvent = await _db.WatchPartyEvents.FindAsync(id);
@@ -128,7 +147,7 @@ namespace XivMediaPlayer.Server.Controllers
 
             if (!string.Equals(watchEvent.DiscordOwnerId, discordId, StringComparison.OrdinalIgnoreCase))
             {
-                return Forbid();
+                return StatusCode(403, "Only the event creator can delete this watch party.");
             }
 
             _db.WatchPartyEvents.Remove(watchEvent);

@@ -1,9 +1,16 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Drawing;
+using System.Drawing.Imaging;
 using System.Linq;
+using System.Net.Http;
 using System.Numerics;
+using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using Dalamud.Bindings.ImGui;
+using Dalamud.Interface.Textures;
+using Dalamud.Interface.Textures.TextureWraps;
 using Dalamud.Interface.Windowing;
 using XivMediaPlayer.Networking.Models;
 
@@ -21,6 +28,11 @@ namespace XivMediaPlayer.Windows
         private string _descriptionInput = string.Empty;
         private string _bannerUrlInput = string.Empty;
         private bool _isPosting = false;
+
+        // Banner image cache
+        private readonly ConcurrentDictionary<string, IDalamudTextureWrap?> _bannerCache = new();
+        private readonly ConcurrentDictionary<string, bool> _bannerLoading = new();
+        private readonly HttpClient _bannerHttpClient = new HttpClient();
 
         // Date/Time controls (Local Time)
         private int _startYear = DateTime.Now.Year;
@@ -119,54 +131,93 @@ namespace XivMediaPlayer.Windows
                 ImGui.TextColored(new Vector4(0.7f, 0.7f, 0.7f, 1.0f), _statusMessage);
             }
 
-            ImGui.BeginChild("EventsListChild", new Vector2(0, 0), true);
+            ImGui.BeginChild("EventsListChild", new Vector2(0, 0), true, ImGuiWindowFlags.HorizontalScrollbar);
 
-            foreach (var watchEvent in _events)
+            if (_events.Count == 0 && !_isLoading)
             {
-                ImGui.PushID(watchEvent.Id);
+                ImGui.Spacing();
+                ImGui.TextColored(new Vector4(0.6f, 0.6f, 0.6f, 1.0f), "No active watch parties at the moment. Host one in the next tab!");
+            }
+            else
+            {
+                float availWidth = ImGui.GetContentRegionAvail().X;
+                float minCardWidth = 320f;
+                float spacing = 12f;
+                int columns = Math.Max(1, (int)((availWidth + spacing) / (minCardWidth + spacing)));
+                float cardWidth = Math.Max(minCardWidth, (availWidth - (spacing * (columns - 1))) / columns);
 
-                // Event Title Header
-                ImGui.TextColored(new Vector4(0.2f, 0.8f, 1.0f, 1.0f), watchEvent.Title);
-
-                // Location badge
-                string locStr = $"{watchEvent.World} ({watchEvent.DataCenter}) • {watchEvent.HousingZone} Ward {watchEvent.Ward}, Plot {watchEvent.Plot}";
-                if (watchEvent.Room > 0) locStr += $" (Room {watchEvent.Room})";
-                ImGui.TextColored(new Vector4(0.9f, 0.9f, 0.4f, 1.0f), locStr);
-
-                // Time Slot
-                string timeStr = $"Time: {watchEvent.StartTimeUtc.ToLocalTime():g} - {watchEvent.EndTimeUtc.ToLocalTime():t}";
-                ImGui.TextColored(new Vector4(0.6f, 1.0f, 0.6f, 1.0f), timeStr);
-
-                if (!string.IsNullOrWhiteSpace(watchEvent.Description))
+                for (int i = 0; i < _events.Count; i++)
                 {
-                    ImGui.TextWrapped(watchEvent.Description);
-                }
+                    var watchEvent = _events[i];
 
-                if (!string.IsNullOrWhiteSpace(watchEvent.BannerUrl))
-                {
-                    ImGui.TextColored(new Vector4(0.5f, 0.5f, 0.5f, 1.0f), $"Banner: {watchEvent.BannerUrl}");
-                }
-
-                // Delete button if current user is owner
-                if (_plugin.DiscordAuthClient.IsLoggedIn && !string.IsNullOrEmpty(_plugin.Config.DiscordUserId))
-                {
-                    if (string.Equals(watchEvent.DiscordOwnerId, _plugin.Config.DiscordUserId, StringComparison.OrdinalIgnoreCase))
+                    if (i % columns != 0)
                     {
-                        ImGui.SameLine();
-                        if (ImGui.Button("Delete Listing"))
+                        ImGui.SameLine(0, spacing);
+                    }
+
+                    ImGui.PushID(watchEvent.Id);
+
+                    // Fixed-size styled card container for uniform grid layout
+                    ImGui.BeginChild($"Card_{watchEvent.Id}", new Vector2(cardWidth, 320), true);
+
+                    // 1. Banner Image Header (or fallback space)
+                    if (!string.IsNullOrWhiteSpace(watchEvent.BannerUrl))
+                    {
+                        DrawBannerImage(watchEvent.BannerUrl, cardWidth - 16, 120);
+                    }
+                    else
+                    {
+                        // Stylized default banner header slot
+                        ImGui.Dummy(new Vector2(0, 4));
+                    }
+
+                    ImGui.Spacing();
+
+                    // 2. Title Header
+                    ImGui.TextColored(new Vector4(0.3f, 0.85f, 1.0f, 1.0f), watchEvent.Title);
+
+                    // 3. Location Badge
+                    string locStr = $"{watchEvent.World} ({watchEvent.DataCenter}) • {watchEvent.HousingZone} W{watchEvent.Ward} P{watchEvent.Plot}";
+                    if (watchEvent.Room > 0) locStr += $" R{watchEvent.Room}";
+                    ImGui.TextColored(new Vector4(0.95f, 0.82f, 0.35f, 1.0f), locStr);
+
+                    // 4. Time Badge
+                    string timeStr = $"Time: {watchEvent.StartTimeUtc.ToLocalTime():g} - {watchEvent.EndTimeUtc.ToLocalTime():t}";
+                    ImGui.TextColored(new Vector4(0.4f, 0.95f, 0.55f, 1.0f), timeStr);
+
+                    ImGui.Separator();
+
+                    // 5. Description Body
+                    if (!string.IsNullOrWhiteSpace(watchEvent.Description))
+                    {
+                        ImGui.TextWrapped(watchEvent.Description);
+                    }
+                    else
+                    {
+                        ImGui.TextColored(new Vector4(0.5f, 0.5f, 0.5f, 1.0f), "No description provided.");
+                    }
+
+                    // 6. Footer (Delete button for owner)
+                    if (_plugin.DiscordAuthClient.IsLoggedIn && !string.IsNullOrEmpty(_plugin.Config.DiscordUserId))
+                    {
+                        if (string.Equals(watchEvent.DiscordOwnerId, _plugin.Config.DiscordUserId, StringComparison.OrdinalIgnoreCase))
                         {
-                            var idToDelete = watchEvent.Id;
-                            Task.Run(async () =>
+                            ImGui.Spacing();
+                            if (ImGui.Button("Delete Listing"))
                             {
-                                bool ok = await _plugin.ServerClient.DeleteEventAsync(idToDelete);
-                                if (ok) RefreshEvents();
-                            });
+                                var idToDelete = watchEvent.Id;
+                                Task.Run(async () =>
+                                {
+                                    bool ok = await _plugin.ServerClient.DeleteEventAsync(idToDelete);
+                                    if (ok) RefreshEvents();
+                                });
+                            }
                         }
                     }
-                }
 
-                ImGui.Separator();
-                ImGui.PopID();
+                    ImGui.EndChild();
+                    ImGui.PopID();
+                }
             }
 
             ImGui.EndChild();
@@ -364,6 +415,93 @@ namespace XivMediaPlayer.Windows
             {
                 ImGui.TextColored(new Vector4(0.8f, 0.8f, 0.2f, 1.0f), _statusMessage);
             }
+        }
+
+        private void DrawBannerImage(string url, float targetW = 560f, float maxH = 200f)
+        {
+            // Already cached?
+            if (_bannerCache.TryGetValue(url, out var wrap))
+            {
+                if (wrap != null)
+                {
+                    float aspect = (float)wrap.Width / wrap.Height;
+                    float drawW = targetW;
+                    float drawH = drawW / aspect;
+                    if (drawH > maxH)
+                    {
+                        drawH = maxH;
+                        drawW = drawH * aspect;
+                    }
+                    float offsetX = Math.Max(0, (targetW - drawW) * 0.5f);
+                    if (offsetX > 0)
+                    {
+                        ImGui.SetCursorPosX(ImGui.GetCursorPosX() + offsetX);
+                    }
+                    ImGui.Image(wrap.Handle, new Vector2(drawW, drawH));
+                }
+                else
+                {
+                    ImGui.TextColored(new Vector4(0.5f, 0.5f, 0.5f, 1.0f), "(Banner failed to load)");
+                }
+                return;
+            }
+
+            // Start async download if not already in progress
+            if (_bannerLoading.TryAdd(url, true))
+            {
+                Task.Run(async () =>
+                {
+                    try
+                    {
+                        byte[] imgBytes = await _bannerHttpClient.GetByteArrayAsync(url);
+                        using var ms = new System.IO.MemoryStream(imgBytes);
+                        using var bmp = new Bitmap(ms);
+
+                        int w = bmp.Width;
+                        int h = bmp.Height;
+
+                        // Convert to BGRA32 raw pixel data
+                        var bmpData = bmp.LockBits(
+                            new Rectangle(0, 0, w, h),
+                            ImageLockMode.ReadOnly,
+                            PixelFormat.Format32bppArgb);
+                        try
+                        {
+                            int bytes = Math.Abs(bmpData.Stride) * h;
+                            var rawData = new byte[bytes];
+                            Marshal.Copy(bmpData.Scan0, rawData, 0, bytes);
+
+                            var tex = _plugin.TextureProvider.CreateFromRaw(
+                                RawImageSpecification.Bgra32(w, h), rawData);
+                            _bannerCache[url] = tex;
+                        }
+                        finally
+                        {
+                            bmp.UnlockBits(bmpData);
+                        }
+                    }
+                    catch
+                    {
+                        _bannerCache[url] = null; // Mark as failed
+                    }
+                    finally
+                    {
+                        _bannerLoading.TryRemove(url, out _);
+                    }
+                });
+            }
+
+            ImGui.TextColored(new Vector4(0.5f, 0.5f, 0.5f, 1.0f), "Loading banner...");
+        }
+
+        public void Dispose()
+        {
+            foreach (var kvp in _bannerCache)
+            {
+                kvp.Value?.Dispose();
+            }
+            _bannerCache.Clear();
+            _bannerHttpClient.Dispose();
         }
     }
 }

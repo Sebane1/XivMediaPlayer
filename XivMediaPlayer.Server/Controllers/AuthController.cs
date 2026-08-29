@@ -287,6 +287,96 @@ namespace XivMediaPlayer.Server.Controllers
             return Ok(new { message = "Logged out successfully." });
         }
 
+        public class GenerateBotKeyRequest
+        {
+            public string Label { get; set; } = "Bot Key";
+        }
+
+        [HttpPost("bot-key/generate")]
+        public async Task<IActionResult> GenerateBotKey([FromBody] GenerateBotKeyRequest? request)
+        {
+            var session = await GetValidSessionAsync();
+            if (session == null)
+            {
+                return StatusCode(401, "Authentication required to generate Bot API Key.");
+            }
+
+            string rawKey = "xiv_bot_" + Guid.NewGuid().ToString("N") + Guid.NewGuid().ToString("N");
+            string keyHash = HashToken(rawKey);
+
+            var botKey = new BotApiKey
+            {
+                KeyHash = keyHash,
+                DiscordId = session.DiscordId,
+                Label = string.IsNullOrWhiteSpace(request?.Label) ? "Bot Key" : request.Label.Trim(),
+                CreatedAtUtc = DateTime.UtcNow,
+                IsRevoked = false
+            };
+
+            _db.BotApiKeys.Add(botKey);
+            await _db.SaveChangesAsync();
+
+            return Ok(new
+            {
+                apiKey = rawKey,
+                label = botKey.Label,
+                discordId = botKey.DiscordId,
+                message = "Bot API key generated successfully. Save this key now; it will not be shown again!"
+            });
+        }
+
+        [HttpGet("bot-key/list")]
+        public async Task<IActionResult> ListBotKeys()
+        {
+            var session = await GetValidSessionAsync();
+            if (session == null)
+            {
+                return StatusCode(401, "Authentication required.");
+            }
+
+            var keys = await _db.BotApiKeys
+                .Where(k => k.DiscordId == session.DiscordId && !k.IsRevoked)
+                .Select(k => new
+                {
+                    keyHashPrefix = k.KeyHash.Substring(0, 8),
+                    label = k.Label,
+                    createdAtUtc = k.CreatedAtUtc,
+                    lastUsedUtc = k.LastUsedUtc
+                })
+                .ToListAsync();
+
+            return Ok(keys);
+        }
+
+        [HttpPost("bot-key/revoke")]
+        public async Task<IActionResult> RevokeBotKey([FromQuery] string keyHashPrefix)
+        {
+            var session = await GetValidSessionAsync();
+            if (session == null)
+            {
+                return StatusCode(401, "Authentication required.");
+            }
+
+            if (string.IsNullOrEmpty(keyHashPrefix))
+            {
+                return BadRequest("keyHashPrefix is required.");
+            }
+
+            var keys = await _db.BotApiKeys
+                .Where(k => k.DiscordId == session.DiscordId && !k.IsRevoked)
+                .ToListAsync();
+
+            var target = keys.FirstOrDefault(k => k.KeyHash.StartsWith(keyHashPrefix, StringComparison.OrdinalIgnoreCase));
+            if (target != null)
+            {
+                target.IsRevoked = true;
+                await _db.SaveChangesAsync();
+                return Ok(new { message = "Bot key revoked successfully." });
+            }
+
+            return NotFound("Bot key not found.");
+        }
+
         private async Task<UserSession?> GetValidSessionAsync()
         {
             string? token = null;

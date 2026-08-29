@@ -1,6 +1,7 @@
 using Dalamud.Interface.Windowing;
 using Dalamud.Bindings.ImGui;
 using System;
+using System.Collections.Generic;
 using System.Numerics;
 using System.Threading.Tasks;
 using XivMediaPlayer.Localization;
@@ -579,6 +580,10 @@ namespace XivMediaPlayer.Windows {
     }
 
     private string _discordAuthStatus = string.Empty;
+    private string _newBotKeyLabel = "Discord Bot";
+    private string _generatedBotKeyPopup = string.Empty;
+    private List<XivMediaPlayer.Networking.ServerClient.BotApiKeyDto> _userBotKeys = new();
+    private bool _isLoadingBotKeys = false;
 
     private void DrawDiscordAuthSection()
     {
@@ -589,6 +594,7 @@ namespace XivMediaPlayer.Windows {
       if (_plugin.DiscordAuthClient != null && _plugin.DiscordAuthClient.IsLoggedIn)
       {
         ImGui.TextColored(new Vector4(0.4f, 1.0f, 0.5f, 1.0f), string.Format(Localize("Authenticated as: {0}"), _plugin.Config.DiscordUsername));
+        ImGui.SameLine();
         if (ImGui.Button(Localize("Unlink Discord Account")))
         {
           _ = Task.Run(async () =>
@@ -596,6 +602,69 @@ namespace XivMediaPlayer.Windows {
             await _plugin.DiscordAuthClient.LogoutAsync();
             _discordAuthStatus = Localize("Unlinked Discord account.");
           });
+        }
+
+        // --- Bot API Keys Management Sub-Section ---
+        ImGui.Spacing();
+        ImGui.TextColored(new Vector4(0.3f, 0.85f, 1.0f, 1.0f), Localize("Discord Bot API Keys"));
+        ImGui.TextWrapped(Localize("Generate API keys for your Discord bots to manage venue screens or post watch parties under your account identity."));
+
+        ImGui.InputText("##NewBotKeyLabel", ref _newBotKeyLabel, 50);
+        ImGui.SameLine();
+        if (ImGui.Button(Localize("Generate Bot Key")))
+        {
+          string labelToUse = _newBotKeyLabel;
+          Task.Run(async () =>
+          {
+            var res = await _plugin.ServerClient.GenerateBotApiKeyAsync(labelToUse);
+            if (res != null)
+            {
+              _generatedBotKeyPopup = res.ApiKey;
+              RefreshBotKeysList();
+            }
+          });
+        }
+
+        if (!string.IsNullOrEmpty(_generatedBotKeyPopup))
+        {
+          ImGui.Spacing();
+          ImGui.TextColored(new Vector4(0.9f, 0.8f, 0.3f, 1.0f), Localize("NEW BOT KEY GENERATED (Copy now; won't be shown again):"));
+          ImGui.InputText("##GenKeyVal", ref _generatedBotKeyPopup, 200, ImGuiInputTextFlags.ReadOnly);
+          ImGui.SameLine();
+          if (ImGui.Button(Localize("Copy Key")))
+          {
+            ImGui.SetClipboardText(_generatedBotKeyPopup);
+          }
+        }
+
+        ImGui.Spacing();
+        if (ImGui.Button(Localize("Refresh Key List")) && !_isLoadingBotKeys)
+        {
+          RefreshBotKeysList();
+        }
+
+        if (_userBotKeys.Count > 0)
+        {
+          ImGui.BeginChild("BotKeysListChild", new Vector2(0, 100), true);
+          foreach (var key in _userBotKeys)
+          {
+            ImGui.PushID(key.KeyHashPrefix);
+            ImGui.TextColored(new Vector4(0.95f, 0.82f, 0.35f, 1.0f), $"{key.Label} ({key.KeyHashPrefix}...)");
+            ImGui.SameLine();
+            ImGui.TextColored(new Vector4(0.6f, 0.6f, 0.6f, 1.0f), $"Created: {key.CreatedAtUtc.ToLocalTime():d}");
+            ImGui.SameLine();
+            if (ImGui.Button(Localize("Revoke")))
+            {
+              string prefixToRevoke = key.KeyHashPrefix;
+              Task.Run(async () =>
+              {
+                bool ok = await _plugin.ServerClient.RevokeBotApiKeyAsync(prefixToRevoke);
+                if (ok) RefreshBotKeysList();
+              });
+            }
+            ImGui.PopID();
+          }
+          ImGui.EndChild();
         }
       }
       else
@@ -617,6 +686,17 @@ namespace XivMediaPlayer.Windows {
       {
         ImGui.TextColored(new Vector4(1.0f, 0.85f, 0.3f, 1.0f), _discordAuthStatus);
       }
+    }
+
+    private void RefreshBotKeysList()
+    {
+      _isLoadingBotKeys = true;
+      Task.Run(async () =>
+      {
+        var list = await _plugin.ServerClient.ListBotApiKeysAsync();
+        _userBotKeys = list ?? new();
+        _isLoadingBotKeys = false;
+      });
     }
   }
 }
