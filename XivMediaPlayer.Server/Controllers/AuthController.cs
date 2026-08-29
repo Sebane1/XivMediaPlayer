@@ -7,7 +7,7 @@ using System.Text.Json.Serialization;
 namespace XivMediaPlayer.Server.Controllers
 {
     [ApiController]
-    [Route("api/[controller]")]
+    [Route("api/auth")]
     public class AuthController : ControllerBase
     {
         private readonly AppDbContext _db;
@@ -78,8 +78,11 @@ namespace XivMediaPlayer.Server.Controllers
         [HttpGet("discord/callback")]
         public async Task<IActionResult> DiscordCallback([FromQuery] string code, [FromQuery] string? redirectUri = null)
         {
+            _logger.LogInformation("DiscordCallback invoked with code length {CodeLength}, redirectUri={RedirectUri}", code?.Length ?? 0, redirectUri);
+
             if (string.IsNullOrEmpty(code))
             {
+                _logger.LogWarning("DiscordCallback failed: Missing authorization code.");
                 return BadRequest("Missing OAuth authorization code.");
             }
 
@@ -89,6 +92,7 @@ namespace XivMediaPlayer.Server.Controllers
 
             if (string.IsNullOrEmpty(clientId) || string.IsNullOrEmpty(clientSecret))
             {
+                _logger.LogError("DiscordCallback failed: Discord ClientId or ClientSecret is not configured on server.");
                 return BadRequest("Discord Client configuration missing on server.");
             }
 
@@ -113,13 +117,14 @@ namespace XivMediaPlayer.Server.Controllers
                 if (!tokenResp.IsSuccessStatusCode)
                 {
                     string errContent = await tokenResp.Content.ReadAsStringAsync();
-                    _logger.LogError("Discord token exchange failed: {Error}", errContent);
-                    return BadRequest("Failed to exchange Discord authorization code.");
+                    _logger.LogError("Discord token exchange failed ({StatusCode}): {Error}", tokenResp.StatusCode, errContent);
+                    return BadRequest($"Failed to exchange Discord authorization code ({tokenResp.StatusCode}): {errContent}");
                 }
 
                 var tokenData = JsonSerializer.Deserialize<DiscordTokenResponse>(await tokenResp.Content.ReadAsStringAsync());
                 if (tokenData == null || string.IsNullOrEmpty(tokenData.AccessToken))
                 {
+                    _logger.LogError("Discord token exchange returned empty token.");
                     return BadRequest("Invalid token response from Discord.");
                 }
 
@@ -130,14 +135,19 @@ namespace XivMediaPlayer.Server.Controllers
                 var userResp = await _httpClient.SendAsync(userReq);
                 if (!userResp.IsSuccessStatusCode)
                 {
-                    return BadRequest("Failed to fetch Discord user profile.");
+                    string userErr = await userResp.Content.ReadAsStringAsync();
+                    _logger.LogError("Failed to fetch Discord user profile ({StatusCode}): {Error}", userResp.StatusCode, userErr);
+                    return BadRequest($"Failed to fetch Discord user profile ({userResp.StatusCode}): {userErr}");
                 }
 
                 var profile = JsonSerializer.Deserialize<DiscordUserProfile>(await userResp.Content.ReadAsStringAsync());
                 if (profile == null || string.IsNullOrEmpty(profile.Id))
                 {
+                    _logger.LogError("Invalid profile payload returned from Discord API.");
                     return BadRequest("Invalid profile returned from Discord.");
                 }
+
+                _logger.LogInformation("Discord auth successful for Discord ID {DiscordId} ({Username})", profile.Id, profile.Username);
 
                 string displayName = profile.GlobalName ?? profile.Username;
                 string avatarUrl = !string.IsNullOrEmpty(profile.Avatar)
@@ -374,7 +384,7 @@ namespace XivMediaPlayer.Server.Controllers
                 return Ok(new { message = "Bot key revoked successfully." });
             }
 
-            return NotFound("Bot key not found.");
+            return StatusCode(404, "Bot key with specified prefix was not found.");
         }
 
         private async Task<UserSession?> GetValidSessionAsync()

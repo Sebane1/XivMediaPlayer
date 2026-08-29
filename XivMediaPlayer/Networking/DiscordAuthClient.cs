@@ -56,11 +56,13 @@ namespace XivMediaPlayer.Networking
                 string redirectUri = "http://localhost:59123/callback/";
 
                 statusCallback("Requesting authentication URL...");
-                string loginApi = $"{_serverClient.BaseUrl}/api/auth/discord/login?redirectUri={Uri.EscapeDataString(redirectUri)}";
+                string cleanBase = _serverClient.BaseUrl.TrimEnd('/');
+                string loginApi = $"{cleanBase}/api/auth/discord/login?redirectUri={Uri.EscapeDataString(redirectUri)}";
                 var resp = await _httpClient.GetAsync(loginApi);
                 if (!resp.IsSuccessStatusCode)
                 {
-                    statusCallback("Server returned error when requesting login URL.");
+                    string errReason = await resp.Content.ReadAsStringAsync();
+                    statusCallback($"Server error requesting login URL ({resp.StatusCode}): {errReason}");
                     return false;
                 }
 
@@ -130,7 +132,8 @@ namespace XivMediaPlayer.Networking
                                 statusCallback("Exchanging authorization code...");
                                 try
                                 {
-                                    string cbUrl = $"{_serverClient.BaseUrl}/api/auth/discord/callback?code={Uri.EscapeDataString(reqCode)}&redirectUri={Uri.EscapeDataString(prefix)}&json=1";
+                                    string cleanBase = _serverClient.BaseUrl.TrimEnd('/');
+                                    string cbUrl = $"{cleanBase}/api/auth/discord/callback?code={Uri.EscapeDataString(reqCode)}&redirectUri={Uri.EscapeDataString(prefix)}&json=1";
                                     using var cbReq = new HttpRequestMessage(HttpMethod.Get, cbUrl);
                                     cbReq.Headers.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/json"));
                                     var cbResp = await _httpClient.SendAsync(cbReq);
@@ -180,6 +183,7 @@ namespace XivMediaPlayer.Networking
                                             _config.DiscordSessionToken = authResult.token;
                                             _config.DiscordUsername = authResult.username;
                                             _config.DiscordUserId = authResult.discordId;
+                                            _config.Save();
                                             _serverClient.SetDiscordSessionToken(authResult.token);
 
                                             statusCallback($"Logged in as {authResult.username}");
@@ -234,7 +238,8 @@ namespace XivMediaPlayer.Networking
         {
             try
             {
-                using var req = new HttpRequestMessage(HttpMethod.Get, $"{_serverClient.BaseUrl}/api/auth/me");
+                string cleanBase = _serverClient.BaseUrl.TrimEnd('/');
+                using var req = new HttpRequestMessage(HttpMethod.Get, $"{cleanBase}/api/auth/me");
                 req.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
 
                 var resp = await _httpClient.SendAsync(req);
@@ -246,6 +251,7 @@ namespace XivMediaPlayer.Networking
                         _config.DiscordSessionToken = token;
                         _config.DiscordUsername = userInfo.username;
                         _config.DiscordUserId = userInfo.discordId;
+                        _config.Save();
                         _serverClient.SetDiscordSessionToken(token);
 
                         statusCallback($"Logged in as {userInfo.username}");
@@ -269,7 +275,8 @@ namespace XivMediaPlayer.Networking
 
             try
             {
-                using var req = new HttpRequestMessage(HttpMethod.Post, $"{_serverClient.BaseUrl}/api/auth/playerhash?hash={Uri.EscapeDataString(playerHash)}");
+                string cleanBase = _serverClient.BaseUrl.TrimEnd('/');
+                using var req = new HttpRequestMessage(HttpMethod.Post, $"{cleanBase}/api/auth/playerhash?hash={Uri.EscapeDataString(playerHash)}");
                 req.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", _config.DiscordSessionToken);
                 await _httpClient.SendAsync(req);
             }
@@ -282,7 +289,8 @@ namespace XivMediaPlayer.Networking
             {
                 if (!string.IsNullOrEmpty(_config.DiscordSessionToken))
                 {
-                    using var req = new HttpRequestMessage(HttpMethod.Post, $"{_serverClient.BaseUrl}/api/auth/logout");
+                    string cleanBase = _serverClient.BaseUrl.TrimEnd('/');
+                    using var req = new HttpRequestMessage(HttpMethod.Post, $"{cleanBase}/api/auth/logout");
                     req.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", _config.DiscordSessionToken);
                     await _httpClient.SendAsync(req);
                 }
@@ -292,6 +300,7 @@ namespace XivMediaPlayer.Networking
             _config.DiscordSessionToken = string.Empty;
             _config.DiscordUsername = string.Empty;
             _config.DiscordUserId = string.Empty;
+            _config.Save();
             _serverClient.SetDiscordSessionToken(null);
         }
 

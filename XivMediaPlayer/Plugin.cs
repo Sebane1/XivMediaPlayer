@@ -730,6 +730,10 @@ namespace XivMediaPlayer
             _worldRenderer = new WorldVideoRenderer(_config.WorldScreen, _gameGui);
 
             ServerClient = new Networking.ServerClient(_config.ServerUrl, _pluginLog);
+            if (!string.IsNullOrEmpty(_config.DiscordSessionToken))
+            {
+                ServerClient.SetDiscordSessionToken(_config.DiscordSessionToken);
+            }
             DiscordAuthClient = new Networking.DiscordAuthClient(ServerClient, _config, _pluginLog);
             _config.OnConfigurationChanged += (s, e) =>
             {
