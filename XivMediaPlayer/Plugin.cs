@@ -57,6 +57,8 @@ namespace XivMediaPlayer
         private readonly SettingsWindow _settingsWindow;
         private readonly ScreenSettingsWindow _screenSettingsWindow;
         internal ScreenSettingsWindow ScreenSettingsWindow => _screenSettingsWindow;
+        private readonly WatchPartyWindow _watchPartyWindow;
+        internal WatchPartyWindow WatchPartyWindow => _watchPartyWindow;
         private WorldVideoRenderer _worldRenderer;
         internal WorldVideoRenderer WorldRenderer => _worldRenderer;
         internal string CurrentStreamer => _currentStreamer;
@@ -496,6 +498,13 @@ namespace XivMediaPlayer
                 HelpMessage = GetMediaCommandHelpText(),
                 ShowInHelp = true,
             });
+
+            _commandManager.RemoveHandler("/watchparty");
+            _commandManager.AddHandler("/watchparty", new Dalamud.Game.Command.CommandInfo((cmd, args) => ToggleWatchPartyWindow())
+            {
+                HelpMessage = "Open the Watch Party community directory",
+                ShowInHelp = true,
+            });
         }
 
         private void InitializeLocalization()
@@ -779,6 +788,8 @@ namespace XivMediaPlayer
             _depthPreviewWindow.UICapture = _uiCapture;
             _depthPreviewWindow.Config = _config;
 
+            _watchPartyWindow = new WatchPartyWindow(this);
+
             // Initialize command manager for dependency updates
             var updateCommandManager = new CommandManager(commandManager, _pluginLog, depUpdateManager);
 
@@ -786,6 +797,7 @@ namespace XivMediaPlayer
             _windowSystem.AddWindow(_settingsWindow);
             _windowSystem.AddWindow(_screenSettingsWindow);
             _windowSystem.AddWindow(_depthPreviewWindow);
+            _windowSystem.AddWindow(_watchPartyWindow);
 
             // Register draw + config UI
             _pluginInterface.UiBuilder.Draw += OnDraw;
@@ -1158,6 +1170,52 @@ namespace XivMediaPlayer
                 _pluginLog.Error(ex, "Failed to check if player is alone");
                 return false; // assume not alone to be safe
             }
+        }
+
+        public unsafe (string DataCenter, string World, string HousingZone, int Ward, int Plot, int Room, string LocationKey) GetDetailedLocationInfo()
+        {
+            string locKey = GetLocationKey() ?? string.Empty;
+            string dataCenter = string.Empty;
+            string worldName = string.Empty;
+            string housingZone = "Unknown Zone";
+            int ward = 0;
+            int plot = 0;
+            int room = 0;
+
+            try
+            {
+                var player = GetLocalPlayer();
+                if (player is Dalamud.Game.ClientState.Objects.SubKinds.IPlayerCharacter pc && pc.CurrentWorld.IsValid)
+                {
+                    worldName = pc.CurrentWorld.Value.Name.ExtractText();
+                    var dc = pc.CurrentWorld.Value.DataCenter;
+                    if (dc.IsValid)
+                    {
+                        dataCenter = dc.Value.Name.ExtractText();
+                    }
+                }
+
+                var territoryId = _clientState.TerritoryType;
+                if (territoryId == 339 || territoryId == 344) housingZone = "Mist";
+                else if (territoryId == 340 || territoryId == 345) housingZone = "The Lavender Beds";
+                else if (territoryId == 341 || territoryId == 346) housingZone = "The Goblet";
+                else if (territoryId == 641 || territoryId == 650) housingZone = "Shirogane";
+                else if (territoryId == 979 || territoryId == 980) housingZone = "Empyreum";
+
+                var housingMgr = FFXIVClientStructs.FFXIV.Client.Game.HousingManager.Instance();
+                if (housingMgr != null)
+                {
+                    short w = housingMgr->GetCurrentWard();
+                    short p = housingMgr->GetCurrentPlot();
+                    short r = housingMgr->GetCurrentRoom();
+                    if (w >= 0) ward = w + 1; // 1-indexed for display
+                    if (p >= 0) plot = p + 1; // 1-indexed for display
+                    if (r >= 0) room = r;
+                }
+            }
+            catch { }
+
+            return (dataCenter, worldName, housingZone, ward, plot, room, locKey);
         }
 
         private bool _localPlayerNullLogged;
@@ -5879,6 +5937,11 @@ namespace XivMediaPlayer
         private void OnOpenConfig()
         {
             _settingsWindow.Toggle();
+        }
+
+        public void ToggleWatchPartyWindow()
+        {
+            _watchPartyWindow.Toggle();
         }
 
         public void ToggleConfigUi()

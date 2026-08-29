@@ -394,6 +394,64 @@ namespace XivMediaPlayer.Networking
             };
         }
 
+        public async Task<List<WatchPartyEvent>> GetEventsAsync(string? datacenter = null, string? world = null)
+        {
+            try
+            {
+                string url = $"{_baseUrl}/api/events";
+                var queryParams = new List<string>();
+                if (!string.IsNullOrWhiteSpace(datacenter)) queryParams.Add($"datacenter={Uri.EscapeDataString(datacenter)}");
+                if (!string.IsNullOrWhiteSpace(world)) queryParams.Add($"world={Uri.EscapeDataString(world)}");
+
+                if (queryParams.Count > 0) url += "?" + string.Join("&", queryParams);
+
+                var response = await _httpClient.GetAsync(url);
+                if (response.IsSuccessStatusCode)
+                {
+                    var events = await response.Content.ReadFromJsonAsync<List<WatchPartyEvent>>();
+                    return events ?? new List<WatchPartyEvent>();
+                }
+            }
+            catch (Exception ex)
+            {
+                _log.Error(ex, "Failed to fetch watch party events");
+            }
+            return new List<WatchPartyEvent>();
+        }
+
+        public async Task<WatchPartyEvent?> CreateEventAsync(WatchPartyEvent watchEvent)
+        {
+            try
+            {
+                var response = await _httpClient.PostAsJsonAsync($"{_baseUrl}/api/events", watchEvent);
+                if (response.IsSuccessStatusCode)
+                {
+                    return await response.Content.ReadFromJsonAsync<WatchPartyEvent>();
+                }
+                string err = await response.Content.ReadAsStringAsync();
+                _log.Warning($"Create event failed: {response.StatusCode} - {err}");
+            }
+            catch (Exception ex)
+            {
+                _log.Error(ex, "Failed to create watch party event");
+            }
+            return null;
+        }
+
+        public async Task<bool> DeleteEventAsync(string eventId)
+        {
+            try
+            {
+                var response = await _httpClient.DeleteAsync($"{_baseUrl}/api/events/{Uri.EscapeDataString(eventId)}");
+                return response.IsSuccessStatusCode;
+            }
+            catch (Exception ex)
+            {
+                _log.Error(ex, $"Failed to delete watch party event {eventId}");
+            }
+            return false;
+        }
+
         public void Dispose()
         {
             _httpClient.Dispose();

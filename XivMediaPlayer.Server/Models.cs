@@ -219,6 +219,25 @@ namespace XivMediaPlayer.Server.Models
         public bool BypassLock { get; set; } = false;
     }
 
+    public class WatchPartyEvent
+    {
+        public string Id { get; set; } = Guid.NewGuid().ToString("N");
+        public string Title { get; set; } = string.Empty;
+        public string Description { get; set; } = string.Empty;
+        public string BannerUrl { get; set; } = string.Empty;
+        public string LocationKey { get; set; } = string.Empty;
+        public string DataCenter { get; set; } = string.Empty;
+        public string World { get; set; } = string.Empty;
+        public string HousingZone { get; set; } = string.Empty;
+        public int Ward { get; set; }
+        public int Plot { get; set; }
+        public int Room { get; set; }
+        public DateTime StartTimeUtc { get; set; } = DateTime.UtcNow;
+        public DateTime EndTimeUtc { get; set; } = DateTime.UtcNow.AddHours(2);
+        public string DiscordOwnerId { get; set; } = string.Empty;
+        public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
+    }
+
     public class AppDbContext : Microsoft.EntityFrameworkCore.DbContext
     {
         public Microsoft.EntityFrameworkCore.DbSet<TvPlacement> TvPlacements { get; set; } = null!;
@@ -228,6 +247,7 @@ namespace XivMediaPlayer.Server.Models
         public Microsoft.EntityFrameworkCore.DbSet<BannerPlacement> BannerPlacements { get; set; } = null!;
         public Microsoft.EntityFrameworkCore.DbSet<DiscordUser> DiscordUsers { get; set; } = null!;
         public Microsoft.EntityFrameworkCore.DbSet<UserSession> UserSessions { get; set; } = null!;
+        public Microsoft.EntityFrameworkCore.DbSet<WatchPartyEvent> WatchPartyEvents { get; set; } = null!;
 
         public AppDbContext(Microsoft.EntityFrameworkCore.DbContextOptions<AppDbContext> options) : base(options) { }
 
@@ -270,6 +290,15 @@ namespace XivMediaPlayer.Server.Models
 
             modelBuilder.Entity<UserSession>()
                 .HasIndex(s => s.DiscordId);
+
+            modelBuilder.Entity<WatchPartyEvent>()
+                .HasKey(e => e.Id);
+
+            modelBuilder.Entity<WatchPartyEvent>()
+                .HasIndex(e => e.DataCenter);
+
+            modelBuilder.Entity<WatchPartyEvent>()
+                .HasIndex(e => e.World);
         }
     }
 }

@@ -43,6 +43,13 @@ namespace XivMediaPlayer.Windows {
           DrawSourcesTab();
           ImGui.EndTabItem();
         }
+        if (ImGui.BeginTabItem(Localize("Watch Parties"))) {
+          ImGui.TextUnformatted("Open the Watch Party community directory to browse or host events:");
+          if (ImGui.Button(Localize("Open Watch Party Directory"))) {
+            _plugin.ToggleWatchPartyWindow();
+          }
+          ImGui.EndTabItem();
+        }
         if (ImGui.BeginTabItem(Localize("Advanced"))) {
           DrawAdvancedTab();
           ImGui.EndTabItem();

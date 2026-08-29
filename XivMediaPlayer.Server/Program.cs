@@ -176,6 +176,26 @@ using (var scope = app.Services.CreateScope())
         );
     ");
 
+    db.Database.ExecuteSqlRaw(@"
+        CREATE TABLE IF NOT EXISTS ""WatchPartyEvents"" (
+            ""Id"" TEXT NOT NULL CONSTRAINT ""PK_WatchPartyEvents"" PRIMARY KEY,
+            ""Title"" TEXT NOT NULL DEFAULT '',
+            ""Description"" TEXT NOT NULL DEFAULT '',
+            ""BannerUrl"" TEXT NOT NULL DEFAULT '',
+            ""LocationKey"" TEXT NOT NULL DEFAULT '',
+            ""DataCenter"" TEXT NOT NULL DEFAULT '',
+            ""World"" TEXT NOT NULL DEFAULT '',
+            ""HousingZone"" TEXT NOT NULL DEFAULT '',
+            ""Ward"" INTEGER NOT NULL DEFAULT 0,
+            ""Plot"" INTEGER NOT NULL DEFAULT 0,
+            ""Room"" INTEGER NOT NULL DEFAULT 0,
+            ""StartTimeUtc"" TEXT NOT NULL DEFAULT '0001-01-01 00:00:00',
+            ""EndTimeUtc"" TEXT NOT NULL DEFAULT '0001-01-01 00:00:00',
+            ""DiscordOwnerId"" TEXT NOT NULL DEFAULT '',
+            ""CreatedAtUtc"" TEXT NOT NULL DEFAULT '0001-01-01 00:00:00'
+        );
+    ");
+
     try
     {
         db.Database.Migrate();
