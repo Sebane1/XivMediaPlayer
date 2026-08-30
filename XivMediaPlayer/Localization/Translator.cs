@@ -42,6 +42,7 @@ namespace XivMediaPlayer.Localization
             "中文",
             "한국어",
             "Svenska",
+            "Español"
         };
 
         private static LanguageEnum _uiLanguage = LanguageEnum.English;

@@ -836,6 +836,7 @@ namespace XivMediaPlayer
             // Start proxy server for stream routing
             MediaPlayerCore.StreamProxy.Instance.Start();
             _pluginLog.Information($"[Media Proxy] Transport: {MediaPlayerCore.StreamProxy.TransportName}");
+            ApplyUiLanguageFromConfig();
         }
 
         #region Framework / Initialization
@@ -1201,11 +1202,16 @@ namespace XivMediaPlayer
                 }
 
                 var territoryId = _clientState.TerritoryType;
-                if (territoryId == 339 || territoryId == 344) housingZone = "Mist";
-                else if (territoryId == 340 || territoryId == 345) housingZone = "The Lavender Beds";
-                else if (territoryId == 341 || territoryId == 346) housingZone = "The Goblet";
-                else if (territoryId == 641 || territoryId == 650) housingZone = "Shirogane";
-                else if (territoryId == 979 || territoryId == 980) housingZone = "Empyreum";
+                // Mist: Outdoor 339, Subdivision 344, Indoor Cottages/Houses/Mansions 282, 283, 284, Apartments 608, FC Chambers 384
+                if (territoryId == 339 || territoryId == 344 || territoryId == 282 || territoryId == 283 || territoryId == 284 || territoryId == 608 || territoryId == 384) housingZone = "Mist";
+                // The Lavender Beds: Outdoor 340, Subdivision 345, Indoor Cottages/Houses/Mansions 285, 286, 287, Apartments 609, FC Chambers 385
+                else if (territoryId == 340 || territoryId == 345 || territoryId == 285 || territoryId == 286 || territoryId == 287 || territoryId == 609 || territoryId == 385) housingZone = "The Lavender Beds";
+                // The Goblet: Outdoor 341, Subdivision 346, Indoor Cottages/Houses/Mansions 288, 289, 290, Apartments 610, FC Chambers 386
+                else if (territoryId == 341 || territoryId == 346 || territoryId == 288 || territoryId == 289 || territoryId == 290 || territoryId == 610 || territoryId == 386) housingZone = "The Goblet";
+                // Shirogane: Outdoor 641, Subdivision 650, Indoor Cottages/Houses/Mansions 649, 651, 652, Apartments 717, FC Chambers 653
+                else if (territoryId == 641 || territoryId == 650 || territoryId == 649 || territoryId == 651 || territoryId == 652 || territoryId == 717 || territoryId == 653) housingZone = "Shirogane";
+                // Empyreum: Outdoor 979, Subdivision 980, Indoor Cottages/Houses/Mansions 981, 982, 983, Apartments 984, FC Chambers 985
+                else if (territoryId == 979 || territoryId == 980 || territoryId == 981 || territoryId == 982 || territoryId == 983 || territoryId == 984 || territoryId == 985) housingZone = "Empyreum";
 
                 var housingMgr = FFXIVClientStructs.FFXIV.Client.Game.HousingManager.Instance();
                 if (housingMgr != null)

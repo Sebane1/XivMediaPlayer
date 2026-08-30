@@ -6,711 +6,809 @@ using System.Numerics;
 using System.Threading.Tasks;
 using XivMediaPlayer.Localization;
 
-namespace XivMediaPlayer.Windows {
-  internal class SettingsWindow : Window {
-    private Plugin _plugin;
-    private Action _onVolumeFix;
-    private string _diagnosticUserNote = string.Empty;
-    private DateTime _lastDiagnosticEligibilityRefreshUtc = DateTime.MinValue;
-
-    public SettingsWindow(Plugin plugin, Action onVolumeFix = null) :
-      base("Media Player Settings", ImGuiWindowFlags.NoCollapse, false) {
-      _plugin = plugin;
-      _onVolumeFix = onVolumeFix;
-      Size = new Vector2(440, 520);
-      SizeCondition = ImGuiCond.FirstUseEver;
-    }
-
-    private string Localize(string text) => _plugin.Translate(text);
-
-    public override void Draw() {
-      WindowName = Localize("Media Player Settings");
-      _ = _plugin.TranslationRevision;
-
-      if (ImGui.BeginTabBar("MediaPlayerSettingsTabs")) {
-        if (ImGui.BeginTabItem(Localize("General"))) {
-          DrawGeneralTab();
-          ImGui.EndTabItem();
-        }
-        if (ImGui.BeginTabItem(Localize("Display"))) {
-          DrawDisplayTab();
-          ImGui.EndTabItem();
-        }
-        if (ImGui.BeginTabItem(Localize("Outdoor"))) {
-          DrawOutdoorTab();
-          ImGui.EndTabItem();
-        }
-        if (ImGui.BeginTabItem(Localize("Sources"))) {
-          DrawSourcesTab();
-          ImGui.EndTabItem();
-        }
-        if (ImGui.BeginTabItem(Localize("Discord"))) {
-          DrawDiscordTab();
-          ImGui.EndTabItem();
-        }
-        if (ImGui.BeginTabItem(Localize("Watch Parties"))) {
-          ImGui.TextUnformatted("Open the Watch Party community directory to browse or host events:");
-          if (ImGui.Button(Localize("Open Watch Party Directory"))) {
-            _plugin.ToggleWatchPartyWindow();
-          }
-          ImGui.EndTabItem();
-        }
-        if (ImGui.BeginTabItem(Localize("Advanced"))) {
-          DrawAdvancedTab();
-          ImGui.EndTabItem();
-        }
-        ImGui.EndTabBar();
-      }
-
-      ImGui.Spacing();
-      ImGui.Separator();
-      DrawAboutSection();
-      DrawSafeModePopup();
-    }
-
-    private void DrawTranslationStatus(int langIdx)
+namespace XivMediaPlayer.Windows
+{
+    internal class SettingsWindow : Window
     {
-      if (langIdx == (int)LanguageEnum.English)
-      {
-        ImGui.TextColored(new Vector4(0.6f, 0.6f, 0.6f, 1f), Localize("English selected — no online translation needed."));
-        return;
-      }
+        private Plugin _plugin;
+        private Action _onVolumeFix;
+        private string _diagnosticUserNote = string.Empty;
+        private DateTime _lastDiagnosticEligibilityRefreshUtc = DateTime.MinValue;
 
-      int cached = Translator.GetCachedCount((LanguageEnum)langIdx);
-      if (!string.IsNullOrWhiteSpace(Translator.LastErrorMessage))
-      {
-        ImGui.TextColored(new Vector4(1f, 0.35f, 0.35f, 1f),
-          _plugin.Config.DevMode
-            ? string.Format(Localize("Translation server unreachable. UI stays in English until {0} responds."), Translator.ServerUrlDisplay)
-            : Localize("Translation server unreachable. UI stays in English until the translation service responds."));
-        ImGui.TextWrapped(Translator.LastErrorMessage);
-      }
-      else if (Translator.ServerRespondedSuccessfully || cached > 0)
-      {
-        ImGui.TextColored(new Vector4(0.4f, 1f, 0.5f, 1f),
-          string.Format(Localize("{0} strings cached. New text appears as it is translated."), cached));
-        if (Translator.PendingRequestCount > 0)
+        public SettingsWindow(Plugin plugin, Action onVolumeFix = null) :
+          base("Media Player Settings", ImGuiWindowFlags.NoCollapse, false)
         {
-          ImGui.TextColored(new Vector4(1f, 0.85f, 0.3f, 1f),
-            string.Format(Localize("Fetching translations... ({0} in progress)"), Translator.PendingRequestCount));
+            _plugin = plugin;
+            _onVolumeFix = onVolumeFix;
+            Size = new Vector2(440, 520);
+            SizeCondition = ImGuiCond.FirstUseEver;
         }
-      }
-      else
-      {
-        ImGui.TextColored(new Vector4(1f, 0.85f, 0.3f, 1f), Localize("Contacting translation server..."));
-      }
-    }
 
-    private void DrawGeneralTab() {
-      ImGui.TextColored(new Vector4(0.7f, 0.9f, 1.0f, 1.0f), Localize("Language"));
-      ImGui.Separator();
+        private string Localize(string text) => _plugin.Translate(text);
 
-      int langIdx = Math.Clamp(_plugin.Config.UiLanguage, 0, Translator.LanguageStringsDisplay.Length - 1);
-      if (ImGui.Combo(Localize("Interface Language"), ref langIdx, Translator.LanguageStringsDisplay, Translator.LanguageStringsDisplay.Length)) {
-        _plugin.Config.UiLanguage = langIdx;
-        _plugin.Config.Save();
-        _plugin.ApplyUiLanguageFromConfig();
-      }
-      if (ImGui.IsItemHovered()) {
-        ImGui.SetTooltip(Localize("Choose the language for plugin menus and controls. Translations are fetched online and cached locally."));
-      }
-
-      DrawTranslationStatus(langIdx);
-
-      if (_plugin.Config.DevMode) {
-        ImGui.Spacing();
-        ImGui.TextColored(new Vector4(0.7f, 0.9f, 1.0f, 1.0f), Localize("Developer"));
-        ImGui.Separator();
-
-        string translationServerUrl = _plugin.Config.TranslationServerUrl ?? Configuration.DefaultTranslationServerUrl;
-        if (ImGui.InputText(Localize("Translation Server URL"), ref translationServerUrl, 256)) {
-          _plugin.Config.TranslationServerUrl = translationServerUrl;
-          _plugin.Config.Save();
-          _plugin.ApplyUiLanguageFromConfig();
-        }
-        if (ImGui.IsItemHovered()) {
-          ImGui.SetTooltip(Localize("Override the RoleplayingQuestCore-compatible translation proxy (e.g. local loopback or LAN IP)."));
-        }
-      }
-
-      ImGui.Spacing();
-      ImGui.TextColored(new Vector4(0.7f, 0.9f, 1.0f, 1.0f), Localize("Audio"));
-      ImGui.Separator();
-
-      float volume = _plugin.Config.LivestreamVolume;
-      if (ImGui.SliderFloat(Localize("Stream Volume"), ref volume, 0f, 3f)) {
-        _plugin.Config.LivestreamVolume = volume;
-        if (_plugin.MediaManager != null) {
-          _plugin.MediaManager.LiveStreamVolume = volume;
-        }
-        _plugin.Config.Save();
-      }
-
-      if (_onVolumeFix != null && ImGui.Button(Localize("Fix Game Volume"))) {
-        _onVolumeFix.Invoke();
-      }
-
-      bool spatialAudio = _plugin.Config.SpatialAudioEnabled;
-      if (ImGui.Checkbox(Localize("Enable 3D Spatial Audio"), ref spatialAudio)) {
-        _plugin.Config.SpatialAudioEnabled = spatialAudio;
-        _plugin.Config.Save();
-        _plugin.DoRefreshCurrentMedia();
-      }
-      if (ImGui.IsItemHovered()) {
-        ImGui.SetTooltip(Localize("Dynamically pans audio to simulate physical TV locations. If you experience A/V sync issues, disable this."));
-      }
-
-      bool desktopAudioVisuals = _plugin.Config.DesktopAudioVisualsEnabled;
-      if (ImGui.Checkbox(Localize("Desktop audio for visual effects"), ref desktopAudioVisuals)) {
-        _plugin.Config.DesktopAudioVisualsEnabled = desktopAudioVisuals;
-        _plugin.Config.Save();
-        _plugin.MediaManager?.SetDesktopAudioVisualsEnabled(desktopAudioVisuals);
-      }
-      if (ImGui.IsItemHovered()) {
-        ImGui.SetTooltip(Localize("Listen to your default Windows playback device so Audio Pulse/Spectrum effects react to whatever is playing on your PC, even when spatial audio is off."));
-      }
-
-      ImGui.Spacing();
-      ImGui.TextColored(new Vector4(0.7f, 0.9f, 1.0f, 1.0f), Localize("Playback"));
-      ImGui.Separator();
-
-      bool defaultOpen = _plugin.Config.DefaultVideoOpen == 0;
-      if (ImGui.Checkbox(Localize("Open video window by default when stream starts"), ref defaultOpen)) {
-        _plugin.Config.DefaultVideoOpen = defaultOpen ? 0 : 1;
-        _plugin.Config.Save();
-      }
-
-      bool autoResume = _plugin.Config.AutoResumeMedia;
-      if (ImGui.Checkbox(Localize("Auto-resume media when entering locations"), ref autoResume)) {
-        _plugin.Config.AutoResumeMedia = autoResume;
-        _plugin.Config.Save();
-      }
-
-      int seekIncrement = _plugin.Config.SeekIncrementSeconds;
-      if (ImGui.SliderInt(Localize("Seek Increment (seconds)"), ref seekIncrement, 1, 60)) {
-        _plugin.Config.SeekIncrementSeconds = seekIncrement;
-        _plugin.Config.Save();
-      }
-      if (ImGui.IsItemHovered()) {
-        ImGui.SetTooltip(Localize("How many seconds the << and >> buttons skip."));
-      }
-
-      ImGui.Spacing();
-      if (ImGui.Button(Localize("Clear Watch History"))) {
-        _plugin.Config.WatchHistory.Clear();
-        _plugin.Config.Save();
-        _plugin.PrintChat("[Media Player] Watch history cleared.");
-      }
-    }
-
-    private void DrawDisplayTab() {
-      ImGui.TextColored(new Vector4(0.7f, 0.9f, 1.0f, 1.0f), Localize("Rendering"));
-      ImGui.Separator();
-
-      bool tvGlow = _plugin.Config.TvGlowEnabled;
-      if (ImGui.Checkbox(Localize("Enable TV Glow (Ambient Lighting)"), ref tvGlow)) {
-        _plugin.Config.TvGlowEnabled = tvGlow;
-        _plugin.Config.Save();
-      }
-      if (ImGui.IsItemHovered()) {
-        ImGui.SetTooltip(Localize("Enables the realistic ambient light that shines on the walls around the TV."));
-      }
-
-      bool uiCulling = _plugin.Config.EnableUiCulling;
-      if (ImGui.Checkbox(Localize("Enable UI Culling"), ref uiCulling)) {
-        _plugin.Config.EnableUiCulling = uiCulling;
-        _plugin.Config.Save();
-      }
-      if (ImGui.IsItemHovered()) {
-        ImGui.SetTooltip(Localize("When enabled, the TV will render underneath the games user interface. Disable as a last resort to Reshade ruining the UI buffer."));
-      }
-
-      bool strictMasking = _plugin.Config.UIBlendThreshold > 0.5f;
-      if (ImGui.Checkbox(Localize("Strict UI Masking (AMD Fix / Invisible Drop Shadows)"), ref strictMasking)) {
-        _plugin.Config.UIBlendThreshold = strictMasking ? (171.0f / 255.0f) : 0.0f;
-        _plugin.Config.Save();
-      }
-      if (ImGui.IsItemHovered()) {
-        ImGui.SetTooltip(Localize("Enable this if you have an AMD card and notice that the TV does not render. UI dropshadows are lost."));
-      }
-
-      bool disableUiBlock = _plugin.Config.DisableUIBlockDetection;
-      if (ImGui.Checkbox(Localize("Disable UI Block Detection"), ref disableUiBlock)) {
-        _plugin.Config.DisableUIBlockDetection = disableUiBlock;
-        _plugin.Config.Save();
-      }
-      if (ImGui.IsItemHovered()) {
-        ImGui.SetTooltip(Localize("Allows clicking the TV even if the game UI overlaps it. Useful if your visual mods heavily interfere with UI mask detection."));
-      }
-
-      bool enableWanderersCampfireFix = _plugin.Config.EnableWanderersCampfireFix;
-      if (ImGui.Checkbox(Localize("Enable Wanderer's Campfire Fix (For Modded Campfires)"), ref enableWanderersCampfireFix)) {
-        _plugin.Config.EnableWanderersCampfireFix = enableWanderersCampfireFix;
-        _plugin.Config.Save();
-      }
-      if (ImGui.IsItemHovered()) {
-        ImGui.SetTooltip(Localize("Enable this if you use modded skybox mods that replace Wanderer's Campfire."));
-      }
-    }
-
-    private void DrawOutdoorTab() {
-      ImGui.TextColored(new Vector4(0.7f, 0.9f, 1.0f, 1.0f), Localize("Public Screens"));
-      ImGui.Separator();
-
-      bool enableOutdoor = _plugin.Config.EnableOutdoorPublicScreens;
-      if (ImGui.Checkbox(Localize("Enable Public Outdoor Screens"), ref enableOutdoor)) {
-        _plugin.Config.EnableOutdoorPublicScreens = enableOutdoor;
-        _plugin.Config.Save();
-        _plugin.HandleOutdoorSettingToggled();
-      }
-
-      bool safeMode = _plugin.Config.OnlySafeDomainsPublicScreens;
-      if (ImGui.Checkbox(Localize("Safe Mode (Only allow safe domains outside)"), ref safeMode)) {
-        if (!safeMode) {
-          ImGui.OpenPopup("DisableSafeModeWarning");
-        } else {
-          _plugin.Config.OnlySafeDomainsPublicScreens = true;
-          _plugin.Config.Save();
-        }
-      }
-      ImGui.TextColored(new Vector4(0.5f, 0.5f, 0.5f, 1f),
-        Localize("Blocks unverified URLs on outdoor screens to prevent abuse."));
-
-      ImGui.Spacing();
-      bool showGrid = _plugin.Config.ShowOutdoorGridDebug;
-      if (ImGui.Checkbox(Localize("Show Outdoor Grid Overlay (Debug)"), ref showGrid)) {
-        _plugin.Config.ShowOutdoorGridDebug = showGrid;
-        _plugin.Config.Save();
-      }
-    }
-
-    private void DrawSourcesTab() {
-      ImGui.TextColored(new Vector4(0.7f, 0.9f, 1.0f, 1.0f), Localize("yt-dlp"));
-      ImGui.Separator();
-
-      string[] qualityLabels = new string[] { "360p", "480p", "720p", "1080p", Localize("Best") };
-      int[] qualityValues = new int[] { 360, 480, 720, 1080, 0 };
-      int currentQualityIdx = Array.IndexOf(qualityValues, _plugin.Config.PreferredQuality);
-      if (currentQualityIdx < 0) currentQualityIdx = 2;
-      if (ImGui.Combo(Localize("Preferred Quality"), ref currentQualityIdx, qualityLabels, qualityLabels.Length)) {
-        _plugin.Config.PreferredQuality = qualityValues[currentQualityIdx];
-        _plugin.Config.Save();
-      }
-
-      bool sabrProxy = _plugin.Config.EnableSabrProxy;
-      if (ImGui.Checkbox(Localize("YouTube SABR mode (recommended for videos)"), ref sabrProxy)) {
-        _plugin.Config.EnableSabrProxy = sabrProxy;
-        if (_plugin.YtDlpManager != null) {
-          _plugin.YtDlpManager.EnableSabrProxy = sabrProxy;
-          if (sabrProxy) {
-            _ = Task.Run(async () => await _plugin.YtDlpManager.EnsureAvailableAsync());
-          }
-        }
-        _plugin.Config.Save();
-      }
-      ImGui.TextWrapped(
-        Localize("Videos: buffered local download for reliable playback and seeking. Live streams are detected automatically and play via HLS instead. Requires cookies for most YouTube content."));
-
-      DrawYouTubeHelperSection();
-
-      ImGui.Spacing();
-      ImGui.TextColored(new Vector4(0.5f, 0.5f, 0.5f, 1f),
-        Localize("yt-dlp is automatically downloaded and updated."));
-
-      if (_plugin.YtDlpManager != null && !_plugin.YtDlpManager.HasCookiesFile) {
-        ImGui.Spacing();
-        ImGui.TextColored(new Vector4(1f, 0.3f, 0.3f, 1f), Localize("Warning: No cookies.txt found!"));
-        ImGui.TextWrapped(Localize("YouTube now heavily blocks players without cookies. To fix this, install the VRCVideoCacher extension in your browser to sync cookie data locally."));
-
-        if (ImGui.Button(Localize("Chrome/Edge/Brave Extension"))) {
-          try {
-            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo {
-              FileName = "https://chromewebstore.google.com/detail/vrcvideocacher-cookies-ex/kfgelknbegappcajiflgfbjbdpbpokge",
-              UseShellExecute = true
-            });
-          } catch { }
-        }
-        ImGui.SameLine();
-        if (ImGui.Button(Localize("Firefox Extension"))) {
-          try {
-            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo {
-              FileName = "https://addons.mozilla.org/en-US/firefox/addon/vrcvideocachercookiesexporter/",
-              UseShellExecute = true
-            });
-          } catch { }
-        }
-      }
-    }
-
-    private void DrawYouTubeHelperSection()
-    {
-      if (!_plugin.Config.EnableSabrProxy || _plugin.YtDlpManager == null)
-      {
-        return;
-      }
-
-      ImGui.Spacing();
-      ImGui.TextColored(new Vector4(0.7f, 0.9f, 1.0f, 1.0f), Localize("YouTube helper"));
-      ImGui.Separator();
-
-      var yt = _plugin.YtDlpManager;
-      if (yt.IsPoTokenServerReady)
-      {
-        ImGui.TextColored(new Vector4(0.4f, 1f, 0.4f, 1f), Localize("Status: Ready"));
-      }
-      else
-      {
-        ImGui.TextColored(new Vector4(1f, 0.7f, 0.3f, 1f), Localize("Status: Setup needed"));
-        ImGui.TextWrapped(
-          Localize("If a Windows popup asked about internet access and you clicked Block or No, use the button below. No game restart required."));
-      }
-
-      if (yt.IsYouTubeSetupRunning)
-      {
-        ImGui.Spacing();
-        ImGui.TextWrapped(Localize("Setting up... This can take 1–2 minutes. If Windows asks to allow internet access, click Allow."));
-      }
-      else if (ImGui.Button(Localize("Fix YouTube setup")))
-      {
-        _plugin.RetryYouTubeSetup();
-      }
-    }
-
-    private void DrawAdvancedTab() {
-      ImGui.TextColored(new Vector4(0.7f, 0.9f, 1.0f, 1.0f), Localize("Debug"));
-      ImGui.Separator();
-
-      unsafe {
-        var housingMgr = FFXIVClientStructs.FFXIV.Client.Game.HousingManager.Instance();
-        if (housingMgr != null && !housingMgr->IsInside() && housingMgr->GetCurrentPlot() >= 0 && housingMgr->GetCurrentWard() >= 0) {
-          ImGui.TextColored(new Vector4(0.4f, 1f, 0.4f, 1f), string.Format(Localize("You are standing in Plot {0}"), housingMgr->GetCurrentPlot() + 1));
-        }
-      }
-
-      string locationKey = _plugin.LocationKey;
-      ImGui.TextColored(new Vector4(0.7f, 0.7f, 0.7f, 1f), Localize("Placement Key:"));
-      ImGui.SameLine();
-      ImGui.Text(locationKey ?? Localize("Unknown"));
-      if (locationKey != null) {
-        ImGui.SameLine();
-        if (ImGui.Button(Localize("Copy##copyloc"))) {
-          ImGui.SetClipboardText(locationKey);
-        }
-      }
-
-      if (_plugin.CurrentTvPlacement != null) {
-        ImGui.TextColored(new Vector4(0.4f, 1f, 0.4f, 1f), Localize("Synced TV Key:"));
-        ImGui.SameLine();
-        ImGui.Text(_plugin.CurrentTvPlacement.LocationKey);
-        ImGui.SameLine();
-        if (ImGui.Button(Localize("Copy##copysyncloc"))) {
-          ImGui.SetClipboardText(_plugin.CurrentTvPlacement.LocationKey);
-        }
-      }
-
-      bool verboseChat = _plugin.Config.VerboseChatLogging;
-      if (ImGui.Checkbox(Localize("Enable Verbose Chat Logging"), ref verboseChat)) {
-        _plugin.Config.VerboseChatLogging = verboseChat;
-        _plugin.Config.Save();
-      }
-      if (ImGui.IsItemHovered()) {
-        ImGui.SetTooltip(Localize("Shows playback progress in chat (now playing, loading, queue, etc.). Normally the TV screen shows this instead."));
-      }
-
-      bool devMode = _plugin.Config.DevMode;
-      if (ImGui.Checkbox(Localize("Developer Mode"), ref devMode)) {
-        _plugin.Config.DevMode = devMode;
-        _plugin.Config.Save();
-        _plugin.ApplyUiLanguageFromConfig();
-      }
-      if (ImGui.IsItemHovered()) {
-        ImGui.SetTooltip(Localize("Shows developer-only settings such as the translation server URL override."));
-      }
-
-      ImGui.Spacing();
-      ImGui.TextColored(new Vector4(0.7f, 0.9f, 1.0f, 1.0f), Localize("Server Sync"));
-      ImGui.Separator();
-
-      string serverUrl = _plugin.Config.ServerUrl;
-      if (ImGui.InputText(Localize("Server URL"), ref serverUrl, 256)) {
-        _plugin.Config.ServerUrl = serverUrl;
-        _plugin.Config.Save();
-      }
-      if (ImGui.IsItemHovered()) {
-        ImGui.SetTooltip(Localize("URL of the backend server used to sync TVs."));
-      }
-    }
-
-    private void DrawAboutSection() {
-      ImGui.TextColored(new Vector4(0.7f, 0.9f, 1.0f, 1.0f), Localize("Help & Support"));
-      ImGui.Separator();
-
-      if (ImGui.Button(Localize("Tutorial Video (How to Place TVs)"))) {
-        try {
-          System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo {
-            FileName = "https://youtu.be/RyvphbJxf5s",
-            UseShellExecute = true
-          });
-        } catch { }
-      }
-
-      ImGui.SameLine();
-
-      if (ImGui.Button(Localize("Join Support Discord"))) {
-        try {
-          System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo {
-            FileName = "https://discord.gg/rtGXwMn7pX",
-            UseShellExecute = true
-          });
-        } catch { }
-      }
-
-      ImGui.Spacing();
-
-      if (ImGui.Button(Localize("Support the Developer on Ko-fi"))) {
-        try {
-          System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo {
-            FileName = "https://ko-fi.com/sebastina",
-            UseShellExecute = true
-          });
-        } catch { }
-      }
-
-      DrawDiagnosticReportSection();
-    }
-
-    private void DrawDiagnosticReportSection()
-    {
-      if ((DateTime.UtcNow - _lastDiagnosticEligibilityRefreshUtc).TotalSeconds >= 60)
-      {
-        _lastDiagnosticEligibilityRefreshUtc = DateTime.UtcNow;
-        _plugin.RefreshDiagnosticReportEligibility();
-      }
-
-      ImGui.Spacing();
-      ImGui.TextColored(new Vector4(0.7f, 0.9f, 1.0f, 1.0f), Localize("Error reports"));
-      ImGui.Separator();
-      ImGui.TextWrapped(
-        Localize("If something isn't working, you can send recent plugin warnings and errors from your Dalamud log. Only XivMediaPlayer messages are included, not your whole log file."));
-
-      if (!string.IsNullOrWhiteSpace(_plugin.DiagnosticReportBlockReason))
-      {
-        ImGui.TextColored(new Vector4(1f, 0.45f, 0.35f, 1f), _plugin.DiagnosticReportBlockReason);
-      }
-
-      if (_plugin.HasPendingDiagnosticReports)
-      {
-        ImGui.TextColored(new Vector4(1f, 0.7f, 0.3f, 1f),
-          string.Format(Localize("Detected {0} recent issue(s)."), _plugin.DiagnosticPendingCount));
-      }
-      else
-      {
-        ImGui.TextColored(new Vector4(0.5f, 0.8f, 0.5f, 1f), Localize("No recent plugin errors detected."));
-      }
-
-      bool autoSend = _plugin.Config.AutoSendDiagnosticLogs;
-      if (!_plugin.CanSendDiagnosticReports)
-      {
-        ImGui.BeginDisabled();
-      }
-      if (ImGui.Checkbox(Localize("Automatically send error reports"), ref autoSend))
-      {
-        _plugin.Config.AutoSendDiagnosticLogs = autoSend;
-        _plugin.Config.Save();
-      }
-      if (ImGui.IsItemHovered())
-      {
-        ImGui.SetTooltip(Localize("When enabled, recent plugin errors are uploaded automatically (at most once every 10 minutes)."));
-      }
-      if (!_plugin.CanSendDiagnosticReports)
-      {
-        ImGui.EndDisabled();
-      }
-
-      ImGui.InputText(Localize("What went wrong? (optional)"), ref _diagnosticUserNote, 256);
-
-      bool canSend = _plugin.CanSendDiagnosticReports;
-      if (_plugin.IsSendingDiagnosticLogs)
-      {
-        ImGui.BeginDisabled();
-        ImGui.Button(Localize("Sending error report..."));
-        ImGui.EndDisabled();
-      }
-      else
-      {
-        if (!canSend)
+        public override void Draw()
         {
-          ImGui.BeginDisabled();
-        }
-        if (ImGui.Button(Localize("Send error report")))
-        {
-          string note = _diagnosticUserNote;
-          _plugin.SendDiagnosticReport(note);
-          _diagnosticUserNote = string.Empty;
-        }
-        if (!canSend)
-        {
-          ImGui.EndDisabled();
-        }
-      }
-    }
+            WindowName = Localize("Media Player Settings");
+            _ = _plugin.TranslationRevision;
 
-    private void DrawSafeModePopup() {
-      var viewportCenter = ImGui.GetMainViewport().GetCenter();
-      ImGui.SetNextWindowPos(viewportCenter, ImGuiCond.Appearing, new Vector2(0.5f, 0.5f));
-      if (ImGui.BeginPopupModal("DisableSafeModeWarning", ImGuiWindowFlags.AlwaysAutoResize | ImGuiWindowFlags.NoSavedSettings)) {
-        ImGui.Text(Localize("Disable Safe Mode Warning"));
-        ImGui.Spacing();
-        ImGui.Text(Localize("WARNING: Disabling Safe Mode will allow almost any domain to play on outdoor screens (unless otherwise blacklisted by your current server)."));
-        ImGui.Text(Localize("You may be exposed to content that you may not wish to see from unmoderated domains."));
-        ImGui.Spacing();
-        ImGui.TextColored(new Vector4(1f, 0.3f, 0.3f, 1f), Localize("By clicking 'I Agree', you accept full responsibility for your own screen,"));
-        ImGui.TextColored(new Vector4(1f, 0.3f, 0.3f, 1f), Localize("and you explicitly agree that you WILL NOT play illegal content."));
-        ImGui.Separator();
-        ImGui.Spacing();
-
-        if (ImGui.Button(Localize("I Agree, Disable Safe Mode"), new Vector2(250, 0))) {
-          _plugin.Config.OnlySafeDomainsPublicScreens = false;
-          _plugin.Config.Save();
-          ImGui.CloseCurrentPopup();
-        }
-        ImGui.SameLine();
-        if (ImGui.Button(Localize("Cancel"), new Vector2(120, 0))) {
-          ImGui.CloseCurrentPopup();
-        }
-      }
-    }
-
-    private string _discordAuthStatus = string.Empty;
-    private string _newBotKeyLabel = "Discord Bot";
-    private string _generatedBotKeyPopup = string.Empty;
-    private List<XivMediaPlayer.Networking.ServerClient.BotApiKeyDto> _userBotKeys = new();
-    private bool _isLoadingBotKeys = false;
-
-    private void DrawDiscordTab()
-    {
-      ImGui.TextColored(new Vector4(0.7f, 0.9f, 1.0f, 1.0f), Localize("Discord Integration & Bot Keys"));
-      ImGui.Separator();
-      ImGui.Spacing();
-
-      if (_plugin.DiscordAuthClient != null && _plugin.DiscordAuthClient.IsLoggedIn)
-      {
-        ImGui.TextColored(new Vector4(0.4f, 1.0f, 0.5f, 1.0f), string.Format(Localize("Authenticated as: {0}"), _plugin.Config.DiscordUsername));
-        ImGui.SameLine();
-        if (ImGui.Button(Localize("Unlink Discord Account")))
-        {
-          _ = Task.Run(async () =>
-          {
-            await _plugin.DiscordAuthClient.LogoutAsync();
-            _discordAuthStatus = "Logged out from Discord.";
-          });
-        }
-
-        ImGui.Spacing();
-        ImGui.Separator();
-        ImGui.Spacing();
-
-        ImGui.TextColored(new Vector4(0.7f, 0.9f, 1.0f, 1.0f), Localize("Bot API Keys"));
-        ImGui.TextWrapped(Localize("Generate API keys for your Discord bots to manage venue screens or post watch parties under your account identity."));
-        ImGui.Spacing();
-
-        ImGui.InputText("##NewBotKeyLabel", ref _newBotKeyLabel, 50);
-        ImGui.SameLine();
-        if (ImGui.Button(Localize("Generate Bot Key")))
-        {
-          string labelToUse = _newBotKeyLabel;
-          string? token = _plugin.Config.DiscordSessionToken;
-          _discordAuthStatus = "Generating bot key...";
-          Task.Run(async () =>
-          {
-            var (res, err) = await _plugin.ServerClient.GenerateBotApiKeyAsync(labelToUse, token);
-            if (res != null)
+            if (ImGui.BeginTabBar("MediaPlayerSettingsTabs"))
             {
-              _generatedBotKeyPopup = res.ApiKey;
-              _discordAuthStatus = "Bot API key generated!";
-              RefreshBotKeysList();
+                if (ImGui.BeginTabItem(Localize("General")))
+                {
+                    DrawGeneralTab();
+                    ImGui.EndTabItem();
+                }
+                if (ImGui.BeginTabItem(Localize("Display")))
+                {
+                    DrawDisplayTab();
+                    ImGui.EndTabItem();
+                }
+                if (ImGui.BeginTabItem(Localize("Outdoor")))
+                {
+                    DrawOutdoorTab();
+                    ImGui.EndTabItem();
+                }
+                if (ImGui.BeginTabItem(Localize("Sources")))
+                {
+                    DrawSourcesTab();
+                    ImGui.EndTabItem();
+                }
+                if (ImGui.BeginTabItem(Localize("Discord")))
+                {
+                    DrawDiscordTab();
+                    ImGui.EndTabItem();
+                }
+                if (ImGui.BeginTabItem(Localize("Watch Parties")))
+                {
+                    ImGui.TextUnformatted("Open the Watch Party community directory to browse or host events:");
+                    if (ImGui.Button(Localize("Open Watch Party Directory")))
+                    {
+                        _plugin.ToggleWatchPartyWindow();
+                    }
+                    ImGui.EndTabItem();
+                }
+                if (ImGui.BeginTabItem(Localize("Advanced")))
+                {
+                    DrawAdvancedTab();
+                    ImGui.EndTabItem();
+                }
+                ImGui.EndTabBar();
+            }
+
+            ImGui.Spacing();
+            ImGui.Separator();
+            DrawAboutSection();
+            DrawSafeModePopup();
+        }
+
+        private void DrawTranslationStatus(int langIdx)
+        {
+            if (langIdx == (int)LanguageEnum.English)
+            {
+                ImGui.TextColored(new Vector4(0.6f, 0.6f, 0.6f, 1f), Localize("English selected — no online translation needed."));
+                return;
+            }
+
+            int cached = Translator.GetCachedCount((LanguageEnum)langIdx);
+            if (!string.IsNullOrWhiteSpace(Translator.LastErrorMessage))
+            {
+                ImGui.TextColored(new Vector4(1f, 0.35f, 0.35f, 1f),
+                  _plugin.Config.DevMode
+                    ? string.Format(Localize("Translation server unreachable. UI stays in English until {0} responds."), Translator.ServerUrlDisplay)
+                    : Localize("Translation server unreachable. UI stays in English until the translation service responds."));
+                ImGui.TextWrapped(Translator.LastErrorMessage);
+            }
+            else if (Translator.ServerRespondedSuccessfully || cached > 0)
+            {
+                ImGui.TextColored(new Vector4(0.4f, 1f, 0.5f, 1f),
+                  string.Format(Localize("{0} strings cached. New text appears as it is translated."), cached));
+                if (Translator.PendingRequestCount > 0)
+                {
+                    ImGui.TextColored(new Vector4(1f, 0.85f, 0.3f, 1f),
+                      string.Format(Localize("Fetching translations... ({0} in progress)"), Translator.PendingRequestCount));
+                }
             }
             else
             {
-              _discordAuthStatus = $"Failed to generate bot key: {err}";
+                ImGui.TextColored(new Vector4(1f, 0.85f, 0.3f, 1f), Localize("Contacting translation server..."));
             }
-          });
         }
 
-        if (!string.IsNullOrEmpty(_generatedBotKeyPopup))
+        private void DrawGeneralTab()
         {
-          ImGui.Spacing();
-          ImGui.TextColored(new Vector4(0.9f, 0.8f, 0.3f, 1.0f), Localize("NEW BOT KEY GENERATED (Copy now; won't be shown again):"));
-          ImGui.InputText("##GenKeyVal", ref _generatedBotKeyPopup, 200, ImGuiInputTextFlags.ReadOnly);
-          ImGui.SameLine();
-          if (ImGui.Button(Localize("Copy Key")))
-          {
-            ImGui.SetClipboardText(_generatedBotKeyPopup);
-          }
-        }
+            ImGui.TextColored(new Vector4(0.7f, 0.9f, 1.0f, 1.0f), Localize("Language"));
+            ImGui.Separator();
 
-        ImGui.Spacing();
-        if (ImGui.Button(Localize("Refresh Key List")) && !_isLoadingBotKeys)
-        {
-          RefreshBotKeysList();
-        }
-
-        if (_userBotKeys.Count > 0)
-        {
-          ImGui.BeginChild("BotKeysListChild", new Vector2(0, 100), true);
-          foreach (var key in _userBotKeys)
-          {
-            ImGui.PushID(key.KeyHashPrefix);
-            ImGui.TextColored(new Vector4(0.95f, 0.82f, 0.35f, 1.0f), $"{key.Label} ({key.KeyHashPrefix}...)");
-            ImGui.SameLine();
-            ImGui.TextColored(new Vector4(0.6f, 0.6f, 0.6f, 1.0f), $"Created: {key.CreatedAtUtc.ToLocalTime():d}");
-            ImGui.SameLine();
-            if (ImGui.Button(Localize("Revoke")))
+            int langIdx = Math.Clamp(_plugin.Config.UiLanguage, 0, Translator.LanguageStringsDisplay.Length - 1);
+            if (ImGui.Combo(Localize("Interface Language"), ref langIdx, Translator.LanguageStringsDisplay, Translator.LanguageStringsDisplay.Length))
             {
-              string prefixToRevoke = key.KeyHashPrefix;
-              string? token = _plugin.Config.DiscordSessionToken;
-              Task.Run(async () =>
+                _plugin.Config.UiLanguage = langIdx;
+                _plugin.Config.Save();
+                _plugin.ApplyUiLanguageFromConfig();
+            }
+            if (ImGui.IsItemHovered())
+            {
+                ImGui.SetTooltip(Localize("Choose the language for plugin menus and controls. Translations are fetched online and cached locally."));
+            }
+
+            DrawTranslationStatus(langIdx);
+
+            if (_plugin.Config.DevMode)
+            {
+                ImGui.Spacing();
+                ImGui.TextColored(new Vector4(0.7f, 0.9f, 1.0f, 1.0f), Localize("Developer"));
+                ImGui.Separator();
+
+                string translationServerUrl = _plugin.Config.TranslationServerUrl ?? Configuration.DefaultTranslationServerUrl;
+                if (ImGui.InputText(Localize("Translation Server URL"), ref translationServerUrl, 256))
+                {
+                    _plugin.Config.TranslationServerUrl = translationServerUrl;
+                    _plugin.Config.Save();
+                    _plugin.ApplyUiLanguageFromConfig();
+                }
+                if (ImGui.IsItemHovered())
+                {
+                    ImGui.SetTooltip(Localize("Override the RoleplayingQuestCore-compatible translation proxy (e.g. local loopback or LAN IP)."));
+                }
+            }
+
+            ImGui.Spacing();
+            ImGui.TextColored(new Vector4(0.7f, 0.9f, 1.0f, 1.0f), Localize("Audio"));
+            ImGui.Separator();
+
+            float volume = _plugin.Config.LivestreamVolume;
+            if (ImGui.SliderFloat(Localize("Stream Volume"), ref volume, 0f, 3f))
+            {
+                _plugin.Config.LivestreamVolume = volume;
+                if (_plugin.MediaManager != null)
+                {
+                    _plugin.MediaManager.LiveStreamVolume = volume;
+                }
+                _plugin.Config.Save();
+            }
+
+            if (_onVolumeFix != null && ImGui.Button(Localize("Fix Game Volume")))
+            {
+                _onVolumeFix.Invoke();
+            }
+
+            bool spatialAudio = _plugin.Config.SpatialAudioEnabled;
+            if (ImGui.Checkbox(Localize("Enable 3D Spatial Audio"), ref spatialAudio))
+            {
+                _plugin.Config.SpatialAudioEnabled = spatialAudio;
+                _plugin.Config.Save();
+                _plugin.DoRefreshCurrentMedia();
+            }
+            if (ImGui.IsItemHovered())
+            {
+                ImGui.SetTooltip(Localize("Dynamically pans audio to simulate physical TV locations. If you experience A/V sync issues, disable this."));
+            }
+
+            bool desktopAudioVisuals = _plugin.Config.DesktopAudioVisualsEnabled;
+            if (ImGui.Checkbox(Localize("Desktop audio for visual effects"), ref desktopAudioVisuals))
+            {
+                _plugin.Config.DesktopAudioVisualsEnabled = desktopAudioVisuals;
+                _plugin.Config.Save();
+                _plugin.MediaManager?.SetDesktopAudioVisualsEnabled(desktopAudioVisuals);
+            }
+            if (ImGui.IsItemHovered())
+            {
+                ImGui.SetTooltip(Localize("Listen to your default Windows playback device so Audio Pulse/Spectrum effects react to whatever is playing on your PC, even when spatial audio is off."));
+            }
+
+            ImGui.Spacing();
+            ImGui.TextColored(new Vector4(0.7f, 0.9f, 1.0f, 1.0f), Localize("Playback"));
+            ImGui.Separator();
+
+            bool defaultOpen = _plugin.Config.DefaultVideoOpen == 0;
+            if (ImGui.Checkbox(Localize("Open video window by default when stream starts"), ref defaultOpen))
+            {
+                _plugin.Config.DefaultVideoOpen = defaultOpen ? 0 : 1;
+                _plugin.Config.Save();
+            }
+
+            bool autoResume = _plugin.Config.AutoResumeMedia;
+            if (ImGui.Checkbox(Localize("Auto-resume media when entering locations"), ref autoResume))
+            {
+                _plugin.Config.AutoResumeMedia = autoResume;
+                _plugin.Config.Save();
+            }
+
+            int seekIncrement = _plugin.Config.SeekIncrementSeconds;
+            if (ImGui.SliderInt(Localize("Seek Increment (seconds)"), ref seekIncrement, 1, 60))
+            {
+                _plugin.Config.SeekIncrementSeconds = seekIncrement;
+                _plugin.Config.Save();
+            }
+            if (ImGui.IsItemHovered())
+            {
+                ImGui.SetTooltip(Localize("How many seconds the << and >> buttons skip."));
+            }
+
+            ImGui.Spacing();
+            if (ImGui.Button(Localize("Clear Watch History")))
+            {
+                _plugin.Config.WatchHistory.Clear();
+                _plugin.Config.Save();
+                _plugin.PrintChat("[Media Player] Watch history cleared.");
+            }
+        }
+
+        private void DrawDisplayTab()
+        {
+            ImGui.TextColored(new Vector4(0.7f, 0.9f, 1.0f, 1.0f), Localize("Rendering"));
+            ImGui.Separator();
+
+            bool tvGlow = _plugin.Config.TvGlowEnabled;
+            if (ImGui.Checkbox(Localize("Enable TV Glow (Ambient Lighting)"), ref tvGlow))
+            {
+                _plugin.Config.TvGlowEnabled = tvGlow;
+                _plugin.Config.Save();
+            }
+            if (ImGui.IsItemHovered())
+            {
+                ImGui.SetTooltip(Localize("Enables the realistic ambient light that shines on the walls around the TV."));
+            }
+
+            bool uiCulling = _plugin.Config.EnableUiCulling;
+            if (ImGui.Checkbox(Localize("Enable UI Culling"), ref uiCulling))
+            {
+                _plugin.Config.EnableUiCulling = uiCulling;
+                _plugin.Config.Save();
+            }
+            if (ImGui.IsItemHovered())
+            {
+                ImGui.SetTooltip(Localize("When enabled, the TV will render underneath the games user interface. Disable as a last resort to Reshade ruining the UI buffer."));
+            }
+
+            bool strictMasking = _plugin.Config.UIBlendThreshold > 0.5f;
+            if (ImGui.Checkbox(Localize("Strict UI Masking (AMD Fix / Invisible Drop Shadows)"), ref strictMasking))
+            {
+                _plugin.Config.UIBlendThreshold = strictMasking ? (171.0f / 255.0f) : 0.0f;
+                _plugin.Config.Save();
+            }
+            if (ImGui.IsItemHovered())
+            {
+                ImGui.SetTooltip(Localize("Enable this if you have an AMD card and notice that the TV does not render. UI dropshadows are lost."));
+            }
+
+            bool disableUiBlock = _plugin.Config.DisableUIBlockDetection;
+            if (ImGui.Checkbox(Localize("Disable UI Block Detection"), ref disableUiBlock))
+            {
+                _plugin.Config.DisableUIBlockDetection = disableUiBlock;
+                _plugin.Config.Save();
+            }
+            if (ImGui.IsItemHovered())
+            {
+                ImGui.SetTooltip(Localize("Allows clicking the TV even if the game UI overlaps it. Useful if your visual mods heavily interfere with UI mask detection."));
+            }
+
+            bool enableWanderersCampfireFix = _plugin.Config.EnableWanderersCampfireFix;
+            if (ImGui.Checkbox(Localize("Enable Wanderer's Campfire Fix (For Modded Campfires)"), ref enableWanderersCampfireFix))
+            {
+                _plugin.Config.EnableWanderersCampfireFix = enableWanderersCampfireFix;
+                _plugin.Config.Save();
+            }
+            if (ImGui.IsItemHovered())
+            {
+                ImGui.SetTooltip(Localize("Enable this if you use modded skybox mods that replace Wanderer's Campfire."));
+            }
+        }
+
+        private void DrawOutdoorTab()
+        {
+            ImGui.TextColored(new Vector4(0.7f, 0.9f, 1.0f, 1.0f), Localize("Public Screens"));
+            ImGui.Separator();
+
+            bool enableOutdoor = _plugin.Config.EnableOutdoorPublicScreens;
+            if (ImGui.Checkbox(Localize("Enable Public Outdoor Screens"), ref enableOutdoor))
+            {
+                _plugin.Config.EnableOutdoorPublicScreens = enableOutdoor;
+                _plugin.Config.Save();
+                _plugin.HandleOutdoorSettingToggled();
+            }
+
+            bool safeMode = _plugin.Config.OnlySafeDomainsPublicScreens;
+            if (ImGui.Checkbox(Localize("Safe Mode (Only allow safe domains outside)"), ref safeMode))
+            {
+                if (!safeMode)
+                {
+                    ImGui.OpenPopup("DisableSafeModeWarning");
+                }
+                else
+                {
+                    _plugin.Config.OnlySafeDomainsPublicScreens = true;
+                    _plugin.Config.Save();
+                }
+            }
+            ImGui.TextColored(new Vector4(0.5f, 0.5f, 0.5f, 1f),
+              Localize("Blocks unverified URLs on outdoor screens to prevent abuse."));
+
+            ImGui.Spacing();
+            bool showGrid = _plugin.Config.ShowOutdoorGridDebug;
+            if (ImGui.Checkbox(Localize("Show Outdoor Grid Overlay (Debug)"), ref showGrid))
+            {
+                _plugin.Config.ShowOutdoorGridDebug = showGrid;
+                _plugin.Config.Save();
+            }
+        }
+
+        private void DrawSourcesTab()
+        {
+            ImGui.TextColored(new Vector4(0.7f, 0.9f, 1.0f, 1.0f), Localize("yt-dlp"));
+            ImGui.Separator();
+
+            string[] qualityLabels = new string[] { "360p", "480p", "720p", "1080p", Localize("Best") };
+            int[] qualityValues = new int[] { 360, 480, 720, 1080, 0 };
+            int currentQualityIdx = Array.IndexOf(qualityValues, _plugin.Config.PreferredQuality);
+            if (currentQualityIdx < 0) currentQualityIdx = 2;
+            if (ImGui.Combo(Localize("Preferred Quality"), ref currentQualityIdx, qualityLabels, qualityLabels.Length))
+            {
+                _plugin.Config.PreferredQuality = qualityValues[currentQualityIdx];
+                _plugin.Config.Save();
+            }
+
+            bool sabrProxy = _plugin.Config.EnableSabrProxy;
+            if (ImGui.Checkbox(Localize("YouTube SABR mode (recommended for videos)"), ref sabrProxy))
+            {
+                _plugin.Config.EnableSabrProxy = sabrProxy;
+                if (_plugin.YtDlpManager != null)
+                {
+                    _plugin.YtDlpManager.EnableSabrProxy = sabrProxy;
+                    if (sabrProxy)
+                    {
+                        _ = Task.Run(async () => await _plugin.YtDlpManager.EnsureAvailableAsync());
+                    }
+                }
+                _plugin.Config.Save();
+            }
+            ImGui.TextWrapped(
+              Localize("Videos: buffered local download for reliable playback and seeking. Live streams are detected automatically and play via HLS instead. Requires cookies for most YouTube content."));
+
+            DrawYouTubeHelperSection();
+
+            ImGui.Spacing();
+            ImGui.TextColored(new Vector4(0.5f, 0.5f, 0.5f, 1f),
+              Localize("yt-dlp is automatically downloaded and updated."));
+
+            if (_plugin.YtDlpManager != null && !_plugin.YtDlpManager.HasCookiesFile)
+            {
+                ImGui.Spacing();
+                ImGui.TextColored(new Vector4(1f, 0.3f, 0.3f, 1f), Localize("Warning: No cookies.txt found!"));
+                ImGui.TextWrapped(Localize("YouTube now heavily blocks players without cookies. To fix this, install the VRCVideoCacher extension in your browser to sync cookie data locally."));
+
+                if (ImGui.Button(Localize("Chrome/Edge/Brave Extension")))
+                {
+                    try
+                    {
+                        System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+                        {
+                            FileName = "https://chromewebstore.google.com/detail/vrcvideocacher-cookies-ex/kfgelknbegappcajiflgfbjbdpbpokge",
+                            UseShellExecute = true
+                        });
+                    }
+                    catch { }
+                }
+                ImGui.SameLine();
+                if (ImGui.Button(Localize("Firefox Extension")))
+                {
+                    try
+                    {
+                        System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+                        {
+                            FileName = "https://addons.mozilla.org/en-US/firefox/addon/vrcvideocachercookiesexporter/",
+                            UseShellExecute = true
+                        });
+                    }
+                    catch { }
+                }
+            }
+        }
+
+        private void DrawYouTubeHelperSection()
+        {
+            if (!_plugin.Config.EnableSabrProxy || _plugin.YtDlpManager == null)
+            {
+                return;
+            }
+
+            ImGui.Spacing();
+            ImGui.TextColored(new Vector4(0.7f, 0.9f, 1.0f, 1.0f), Localize("YouTube helper"));
+            ImGui.Separator();
+
+            var yt = _plugin.YtDlpManager;
+            if (yt.IsPoTokenServerReady)
+            {
+                ImGui.TextColored(new Vector4(0.4f, 1f, 0.4f, 1f), Localize("Status: Ready"));
+            }
+            else
+            {
+                ImGui.TextColored(new Vector4(1f, 0.7f, 0.3f, 1f), Localize("Status: Setup needed"));
+                ImGui.TextWrapped(
+                  Localize("If a Windows popup asked about internet access and you clicked Block or No, use the button below. No game restart required."));
+            }
+
+            if (yt.IsYouTubeSetupRunning)
+            {
+                ImGui.Spacing();
+                ImGui.TextWrapped(Localize("Setting up... This can take 1–2 minutes. If Windows asks to allow internet access, click Allow."));
+            }
+            else if (ImGui.Button(Localize("Fix YouTube setup")))
+            {
+                _plugin.RetryYouTubeSetup();
+            }
+        }
+
+        private void DrawAdvancedTab()
+        {
+            ImGui.TextColored(new Vector4(0.7f, 0.9f, 1.0f, 1.0f), Localize("Debug"));
+            ImGui.Separator();
+
+            unsafe
+            {
+                var housingMgr = FFXIVClientStructs.FFXIV.Client.Game.HousingManager.Instance();
+                if (housingMgr != null && !housingMgr->IsInside() && housingMgr->GetCurrentPlot() >= 0 && housingMgr->GetCurrentWard() >= 0)
+                {
+                    ImGui.TextColored(new Vector4(0.4f, 1f, 0.4f, 1f), string.Format(Localize("You are standing in Plot {0}"), housingMgr->GetCurrentPlot() + 1));
+                }
+            }
+
+            string locationKey = _plugin.LocationKey;
+            ImGui.TextColored(new Vector4(0.7f, 0.7f, 0.7f, 1f), Localize("Placement Key:"));
+            ImGui.SameLine();
+            ImGui.Text(locationKey ?? Localize("Unknown"));
+            if (locationKey != null)
+            {
+                ImGui.SameLine();
+                if (ImGui.Button(Localize("Copy##copyloc")))
+                {
+                    ImGui.SetClipboardText(locationKey);
+                }
+            }
+
+            if (_plugin.CurrentTvPlacement != null)
+            {
+                ImGui.TextColored(new Vector4(0.4f, 1f, 0.4f, 1f), Localize("Synced TV Key:"));
+                ImGui.SameLine();
+                ImGui.Text(_plugin.CurrentTvPlacement.LocationKey);
+                ImGui.SameLine();
+                if (ImGui.Button(Localize("Copy##copysyncloc")))
+                {
+                    ImGui.SetClipboardText(_plugin.CurrentTvPlacement.LocationKey);
+                }
+            }
+
+            bool verboseChat = _plugin.Config.VerboseChatLogging;
+            if (ImGui.Checkbox(Localize("Enable Verbose Chat Logging"), ref verboseChat))
+            {
+                _plugin.Config.VerboseChatLogging = verboseChat;
+                _plugin.Config.Save();
+            }
+            if (ImGui.IsItemHovered())
+            {
+                ImGui.SetTooltip(Localize("Shows playback progress in chat (now playing, loading, queue, etc.). Normally the TV screen shows this instead."));
+            }
+
+            bool devMode = _plugin.Config.DevMode;
+            if (ImGui.Checkbox(Localize("Developer Mode"), ref devMode))
+            {
+                _plugin.Config.DevMode = devMode;
+                _plugin.Config.Save();
+                _plugin.ApplyUiLanguageFromConfig();
+            }
+            if (ImGui.IsItemHovered())
+            {
+                ImGui.SetTooltip(Localize("Shows developer-only settings such as the translation server URL override."));
+            }
+
+            ImGui.Spacing();
+            ImGui.TextColored(new Vector4(0.7f, 0.9f, 1.0f, 1.0f), Localize("Server Sync"));
+            ImGui.Separator();
+
+            string serverUrl = _plugin.Config.ServerUrl;
+            if (ImGui.InputText(Localize("Server URL"), ref serverUrl, 256))
+            {
+                _plugin.Config.ServerUrl = serverUrl;
+                _plugin.Config.Save();
+            }
+            if (ImGui.IsItemHovered())
+            {
+                ImGui.SetTooltip(Localize("URL of the backend server used to sync TVs."));
+            }
+        }
+
+        private void DrawAboutSection()
+        {
+            ImGui.TextColored(new Vector4(0.7f, 0.9f, 1.0f, 1.0f), Localize("Help & Support"));
+            ImGui.Separator();
+
+            if (ImGui.Button(Localize("Tutorial Video (How to Place TVs)")))
+            {
+                try
+                {
+                    System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+                    {
+                        FileName = "https://youtu.be/RyvphbJxf5s",
+                        UseShellExecute = true
+                    });
+                }
+                catch { }
+            }
+
+            ImGui.SameLine();
+
+            if (ImGui.Button(Localize("Join Support Discord")))
+            {
+                try
+                {
+                    System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+                    {
+                        FileName = "https://discord.gg/rtGXwMn7pX",
+                        UseShellExecute = true
+                    });
+                }
+                catch { }
+            }
+
+            ImGui.Spacing();
+
+            if (ImGui.Button(Localize("Support the Developer on Ko-fi")))
+            {
+                try
+                {
+                    System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+                    {
+                        FileName = "https://ko-fi.com/sebastina",
+                        UseShellExecute = true
+                    });
+                }
+                catch { }
+            }
+
+            DrawDiagnosticReportSection();
+        }
+
+        private void DrawDiagnosticReportSection()
+        {
+            if ((DateTime.UtcNow - _lastDiagnosticEligibilityRefreshUtc).TotalSeconds >= 60)
+            {
+                _lastDiagnosticEligibilityRefreshUtc = DateTime.UtcNow;
+                _plugin.RefreshDiagnosticReportEligibility();
+            }
+
+            ImGui.Spacing();
+            ImGui.TextColored(new Vector4(0.7f, 0.9f, 1.0f, 1.0f), Localize("Error reports"));
+            ImGui.Separator();
+            ImGui.TextWrapped(
+              Localize("If something isn't working, you can send recent plugin warnings and errors from your Dalamud log. Only XivMediaPlayer messages are included, not your whole log file."));
+
+            if (!string.IsNullOrWhiteSpace(_plugin.DiagnosticReportBlockReason))
+            {
+                ImGui.TextColored(new Vector4(1f, 0.45f, 0.35f, 1f), _plugin.DiagnosticReportBlockReason);
+            }
+
+            if (_plugin.HasPendingDiagnosticReports)
+            {
+                ImGui.TextColored(new Vector4(1f, 0.7f, 0.3f, 1f),
+                  string.Format(Localize("Detected {0} recent issue(s)."), _plugin.DiagnosticPendingCount));
+            }
+            else
+            {
+                ImGui.TextColored(new Vector4(0.5f, 0.8f, 0.5f, 1f), Localize("No recent plugin errors detected."));
+            }
+
+            bool autoSend = _plugin.Config.AutoSendDiagnosticLogs;
+            if (!_plugin.CanSendDiagnosticReports)
+            {
+                ImGui.BeginDisabled();
+            }
+            if (ImGui.Checkbox(Localize("Automatically send error reports"), ref autoSend))
+            {
+                _plugin.Config.AutoSendDiagnosticLogs = autoSend;
+                _plugin.Config.Save();
+            }
+            if (ImGui.IsItemHovered())
+            {
+                ImGui.SetTooltip(Localize("When enabled, recent plugin errors are uploaded automatically (at most once every 10 minutes)."));
+            }
+            if (!_plugin.CanSendDiagnosticReports)
+            {
+                ImGui.EndDisabled();
+            }
+
+            ImGui.InputText(Localize("What went wrong? (optional)"), ref _diagnosticUserNote, 256);
+
+            bool canSend = _plugin.CanSendDiagnosticReports;
+            if (_plugin.IsSendingDiagnosticLogs)
+            {
+                ImGui.BeginDisabled();
+                ImGui.Button(Localize("Sending error report..."));
+                ImGui.EndDisabled();
+            }
+            else
+            {
+                if (!canSend)
+                {
+                    ImGui.BeginDisabled();
+                }
+                if (ImGui.Button(Localize("Send error report")))
+                {
+                    string note = _diagnosticUserNote;
+                    _plugin.SendDiagnosticReport(note);
+                    _diagnosticUserNote = string.Empty;
+                }
+                if (!canSend)
+                {
+                    ImGui.EndDisabled();
+                }
+            }
+        }
+
+        private void DrawSafeModePopup()
+        {
+            var viewportCenter = ImGui.GetMainViewport().GetCenter();
+            ImGui.SetNextWindowPos(viewportCenter, ImGuiCond.Appearing, new Vector2(0.5f, 0.5f));
+            if (ImGui.BeginPopupModal("DisableSafeModeWarning", ImGuiWindowFlags.AlwaysAutoResize | ImGuiWindowFlags.NoSavedSettings))
+            {
+                ImGui.Text(Localize("Disable Safe Mode Warning"));
+                ImGui.Spacing();
+                ImGui.Text(Localize("WARNING: Disabling Safe Mode will allow almost any domain to play on outdoor screens (unless otherwise blacklisted by your current server)."));
+                ImGui.Text(Localize("You may be exposed to content that you may not wish to see from unmoderated domains."));
+                ImGui.Spacing();
+                ImGui.TextColored(new Vector4(1f, 0.3f, 0.3f, 1f), Localize("By clicking 'I Agree', you accept full responsibility for your own screen,"));
+                ImGui.TextColored(new Vector4(1f, 0.3f, 0.3f, 1f), Localize("and you explicitly agree that you WILL NOT play illegal content."));
+                ImGui.Separator();
+                ImGui.Spacing();
+
+                if (ImGui.Button(Localize("I Agree, Disable Safe Mode"), new Vector2(250, 0)))
+                {
+                    _plugin.Config.OnlySafeDomainsPublicScreens = false;
+                    _plugin.Config.Save();
+                    ImGui.CloseCurrentPopup();
+                }
+                ImGui.SameLine();
+                if (ImGui.Button(Localize("Cancel"), new Vector2(120, 0)))
+                {
+                    ImGui.CloseCurrentPopup();
+                }
+            }
+        }
+
+        private string _discordAuthStatus = string.Empty;
+        private string _newBotKeyLabel = "Discord Bot";
+        private string _generatedBotKeyPopup = string.Empty;
+        private List<XivMediaPlayer.Networking.ServerClient.BotApiKeyDto> _userBotKeys = new();
+        private bool _isLoadingBotKeys = false;
+
+        private void DrawDiscordTab()
+        {
+            ImGui.TextColored(new Vector4(0.7f, 0.9f, 1.0f, 1.0f), Localize("Discord Integration & Bot Keys"));
+            ImGui.Separator();
+            ImGui.Spacing();
+
+            if (_plugin.DiscordAuthClient != null && _plugin.DiscordAuthClient.IsLoggedIn)
+            {
+                ImGui.TextColored(new Vector4(0.4f, 1.0f, 0.5f, 1.0f), string.Format(Localize("Authenticated as: {0}"), _plugin.Config.DiscordUsername));
+                ImGui.SameLine();
+                if (ImGui.Button(Localize("Unlink Discord Account")))
+                {
+                    _ = Task.Run(async () =>
+                    {
+                        await _plugin.DiscordAuthClient.LogoutAsync();
+                        _discordAuthStatus = "Logged out from Discord.";
+                    });
+                }
+
+                ImGui.Spacing();
+                ImGui.Separator();
+                ImGui.Spacing();
+
+                ImGui.TextColored(new Vector4(0.7f, 0.9f, 1.0f, 1.0f), Localize("Bot API Keys"));
+                ImGui.TextWrapped(Localize("Generate API keys for your Discord bots to manage venue screens or post watch parties under your account identity."));
+                ImGui.Spacing();
+
+                ImGui.InputText("##NewBotKeyLabel", ref _newBotKeyLabel, 50);
+                ImGui.SameLine();
+                if (ImGui.Button(Localize("Generate Bot Key")))
+                {
+                    string labelToUse = _newBotKeyLabel;
+                    string? token = _plugin.Config.DiscordSessionToken;
+                    _discordAuthStatus = "Generating bot key...";
+                    Task.Run(async () =>
+                    {
+                        var (res, err) = await _plugin.ServerClient.GenerateBotApiKeyAsync(labelToUse, token);
+                        if (res != null)
+                        {
+                            _generatedBotKeyPopup = res.ApiKey;
+                            _discordAuthStatus = "Bot API key generated!";
+                            RefreshBotKeysList();
+                        }
+                        else
+                        {
+                            _discordAuthStatus = $"Failed to generate bot key: {err}";
+                        }
+                    });
+                }
+
+                if (!string.IsNullOrEmpty(_generatedBotKeyPopup))
+                {
+                    ImGui.Spacing();
+                    ImGui.TextColored(new Vector4(0.9f, 0.8f, 0.3f, 1.0f), Localize("NEW BOT KEY GENERATED (Copy now; won't be shown again):"));
+                    ImGui.InputText("##GenKeyVal", ref _generatedBotKeyPopup, 200, ImGuiInputTextFlags.ReadOnly);
+                    ImGui.SameLine();
+                    if (ImGui.Button(Localize("Copy Key")))
+                    {
+                        ImGui.SetClipboardText(_generatedBotKeyPopup);
+                    }
+                }
+
+                ImGui.Spacing();
+                if (ImGui.Button(Localize("Refresh Key List")) && !_isLoadingBotKeys)
+                {
+                    RefreshBotKeysList();
+                }
+
+                if (_userBotKeys.Count > 0)
+                {
+                    ImGui.BeginChild("BotKeysListChild", new Vector2(0, 100), true);
+                    foreach (var key in _userBotKeys)
+                    {
+                        ImGui.PushID(key.KeyHashPrefix);
+                        ImGui.TextColored(new Vector4(0.95f, 0.82f, 0.35f, 1.0f), $"{key.Label} ({key.KeyHashPrefix}...)");
+                        ImGui.SameLine();
+                        ImGui.TextColored(new Vector4(0.6f, 0.6f, 0.6f, 1.0f), $"Created: {key.CreatedAtUtc.ToLocalTime():d}");
+                        ImGui.SameLine();
+                        if (ImGui.Button(Localize("Revoke")))
+                        {
+                            string prefixToRevoke = key.KeyHashPrefix;
+                            string? token = _plugin.Config.DiscordSessionToken;
+                            Task.Run(async () =>
+                            {
+                                bool ok = await _plugin.ServerClient.RevokeBotApiKeyAsync(prefixToRevoke, token);
+                                if (ok) RefreshBotKeysList();
+                            });
+                        }
+                        ImGui.PopID();
+                    }
+                    ImGui.EndChild();
+                }
+            }
+            else
+            {
+                ImGui.TextWrapped(Localize("Link your Discord account to claim screen ownership. Discord-authenticated screen claims stay protected under your account until 45 days of inactivity."));
+                if (ImGui.Button(Localize("Link Discord Account")))
+                {
+                    _ = Task.Run(async () =>
+                    {
+                        await _plugin.DiscordAuthClient.StartLoginFlowAsync(status =>
               {
-                bool ok = await _plugin.ServerClient.RevokeBotApiKeyAsync(prefixToRevoke, token);
-                if (ok) RefreshBotKeysList();
-              });
+                          _discordAuthStatus = status;
+                      });
+                    });
+                }
             }
-            ImGui.PopID();
-          }
-          ImGui.EndChild();
-        }
-      }
-      else
-      {
-        ImGui.TextWrapped(Localize("Link your Discord account to claim screen ownership. Discord-authenticated screen claims stay protected under your account until 45 days of inactivity."));
-        if (ImGui.Button(Localize("Link Discord Account")))
-        {
-          _ = Task.Run(async () =>
-          {
-            await _plugin.DiscordAuthClient.StartLoginFlowAsync(status =>
+
+            if (!string.IsNullOrEmpty(_discordAuthStatus))
             {
-              _discordAuthStatus = status;
-            });
-          });
+                ImGui.TextColored(new Vector4(1.0f, 0.85f, 0.3f, 1.0f), _discordAuthStatus);
+                ImGui.SameLine();
+                if (ImGui.Button(Localize("Copy##copyloc")))
+                {
+                    ImGui.SetClipboardText(_discordAuthStatus);
+                }
+            }
         }
-      }
 
-      if (!string.IsNullOrEmpty(_discordAuthStatus))
-      {
-        ImGui.TextColored(new Vector4(1.0f, 0.85f, 0.3f, 1.0f), _discordAuthStatus);
-      }
+        private void RefreshBotKeysList()
+        {
+            _isLoadingBotKeys = true;
+            string? token = _plugin.Config.DiscordSessionToken;
+            Task.Run(async () =>
+            {
+                var list = await _plugin.ServerClient.ListBotApiKeysAsync(token);
+                _userBotKeys = list ?? new();
+                _isLoadingBotKeys = false;
+            });
+        }
     }
-
-    private void RefreshBotKeysList()
-    {
-      _isLoadingBotKeys = true;
-      string? token = _plugin.Config.DiscordSessionToken;
-      Task.Run(async () =>
-      {
-        var list = await _plugin.ServerClient.ListBotApiKeysAsync(token);
-        _userBotKeys = list ?? new();
-        _isLoadingBotKeys = false;
-      });
-    }
-  }
 }

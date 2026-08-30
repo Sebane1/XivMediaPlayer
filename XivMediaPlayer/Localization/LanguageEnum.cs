@@ -9,5 +9,6 @@ namespace XivMediaPlayer.Localization
         Chinese = 4,
         Korean = 5,
         Swedish = 6,
+        Spanish = 7
     }
 }

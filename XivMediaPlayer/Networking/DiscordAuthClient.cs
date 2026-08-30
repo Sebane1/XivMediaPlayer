@@ -81,11 +81,18 @@ namespace XivMediaPlayer.Networking
 
                 // Open default browser to login URL
                 statusCallback("Opening browser for Discord login...");
-                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+                try
                 {
-                    FileName = loginData.url,
-                    UseShellExecute = true
-                });
+                    System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+                    {
+                        FileName = loginData.url,
+                        UseShellExecute = true
+                    });
+                }
+                catch
+                {
+                    statusCallback(loginData.url);
+                }
 
                 return true;
             }
