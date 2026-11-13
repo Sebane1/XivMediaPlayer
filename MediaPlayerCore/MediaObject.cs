@@ -242,6 +242,7 @@ namespace MediaPlayerCore {
       => message.Contains("DEMUX_GET_TIME", StringComparison.OrdinalIgnoreCase)
         || message.Contains("DEMUX_GET_LENGTH", StringComparison.OrdinalIgnoreCase)
         || message.Contains("DEMUX_GET_PTS", StringComparison.OrdinalIgnoreCase)
+        || message.Contains("ES_OUT_SET_(GROUP_)PCR", StringComparison.OrdinalIgnoreCase)
         // These are produced by VLC's FFmpeg bridge when a non-seekable HTTP
         // source has no reference clock. They are not decode failures.
         || message.Contains("Timestamp conversion failed", StringComparison.OrdinalIgnoreCase)
@@ -405,6 +406,7 @@ namespace MediaPlayerCore {
       return mediaPath.StartsWith("http", StringComparison.OrdinalIgnoreCase)
         || mediaPath.StartsWith("rtmp", StringComparison.OrdinalIgnoreCase)
         || mediaPath.StartsWith("rtsp", StringComparison.OrdinalIgnoreCase)
+        || mediaPath.StartsWith("srt:", StringComparison.OrdinalIgnoreCase)
         || mediaPath.EndsWith(".mp4", StringComparison.OrdinalIgnoreCase)
         || mediaPath.EndsWith(".avi", StringComparison.OrdinalIgnoreCase)
         || mediaPath.EndsWith(".mkv", StringComparison.OrdinalIgnoreCase);
@@ -413,7 +415,8 @@ namespace MediaPlayerCore {
     private static bool IsNetworkMediaPath(string mediaPath)
       => mediaPath.StartsWith("http", StringComparison.OrdinalIgnoreCase)
         || mediaPath.StartsWith("rtmp", StringComparison.OrdinalIgnoreCase)
-        || mediaPath.StartsWith("rtsp", StringComparison.OrdinalIgnoreCase);
+        || mediaPath.StartsWith("rtsp", StringComparison.OrdinalIgnoreCase)
+        || mediaPath.StartsWith("srt:", StringComparison.OrdinalIgnoreCase);
 
     private bool TryResolvePlaybackPath(ref string mediaPath)
     {

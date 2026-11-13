@@ -852,6 +852,14 @@ namespace MediaPlayerCore.YtDlp
                 || errorText.Contains("Sign in to confirm", StringComparison.OrdinalIgnoreCase);
         }
 
+        public static bool IsDrmProtectedError(string? errorText)
+        {
+            if (string.IsNullOrEmpty(errorText)) return false;
+            return errorText.Contains("DRM protected", StringComparison.OrdinalIgnoreCase)
+                || errorText.Contains("DRM-protected", StringComparison.OrdinalIgnoreCase)
+                || errorText.Contains("This video is DRM", StringComparison.OrdinalIgnoreCase);
+        }
+
         private async Task<string[]?> TryResolveSabrLocalPlayUrl(SabrSession session)
         {
             if (session.Failed && GetSabrOutputLength(session) == 0)
@@ -1242,6 +1250,7 @@ namespace MediaPlayerCore.YtDlp
             // Don't try yt-dlp on raw streams or local files
             if (url.StartsWith("rtmp://", StringComparison.OrdinalIgnoreCase)) return false;
             if (url.StartsWith("rtsp://", StringComparison.OrdinalIgnoreCase)) return false;
+            if (url.StartsWith("srt://", StringComparison.OrdinalIgnoreCase) || url.StartsWith("srt:", StringComparison.OrdinalIgnoreCase)) return false;
             if (File.Exists(url)) return false;
             // Must be an HTTP URL
             return url.StartsWith("http://", StringComparison.OrdinalIgnoreCase)

@@ -178,6 +178,7 @@ namespace XivMediaPlayer
         private System.Numerics.Vector3? _prevCameraRight = null;
         private System.Numerics.Vector3? _prevCameraUp = null;
         private bool _refreshQueued;
+        private DateTime _lastDrmWarningTime = DateTime.MinValue;
 
         public Networking.ServerClient ServerClient { get; private set; }
         public Networking.DiscordAuthClient DiscordAuthClient { get; private set; }
@@ -716,7 +717,16 @@ namespace XivMediaPlayer
             {
                 _pluginLog.Warning(ex, "[yt-dlp] " + ex.Message);
                 _ = Task.Run(() => _diagnosticLogMonitor.ScanForNewIssues());
-                if (MediaPlayerCore.YtDlp.YtDlpManager.IsYouTubeSessionError(ex.Message))
+                if (MediaPlayerCore.YtDlp.YtDlpManager.IsDrmProtectedError(ex.Message))
+                {
+                    if ((DateTime.UtcNow - _lastDrmWarningTime).TotalSeconds >= 5)
+                    {
+                        _lastDrmWarningTime = DateTime.UtcNow;
+                        EnqueueFrameworkAction(() => PrintErrorChat(
+                            "[Media Player] Media is DRM protected and cannot be played."));
+                    }
+                }
+                else if (MediaPlayerCore.YtDlp.YtDlpManager.IsYouTubeSessionError(ex.Message))
                 {
                     EnqueueFrameworkAction(() => PrintErrorChat(
                         "[Media Player] YouTube rejected the session. Export fresh cookies via VRCVideoCacher (private/incognito window), restart the plugin, and retry."));
@@ -4915,6 +4925,7 @@ namespace XivMediaPlayer
                 || errorMsg.Contains("DEMUX_GET_LENGTH", StringComparison.OrdinalIgnoreCase)
                 || errorMsg.Contains("Failed to create demuxer", StringComparison.OrdinalIgnoreCase)
                 || errorMsg.Contains("reading while paused (buggy demux?)", StringComparison.OrdinalIgnoreCase)
+                || errorMsg.Contains("ES_OUT_SET_(GROUP_)PCR", StringComparison.OrdinalIgnoreCase)
                 || errorMsg.Contains("dav1d", StringComparison.OrdinalIgnoreCase)
                 || errorMsg.Contains("Decoder feed error", StringComparison.OrdinalIgnoreCase)
                 || errorMsg.Contains("Failed to set on top", StringComparison.OrdinalIgnoreCase))
@@ -6022,7 +6033,11 @@ namespace XivMediaPlayer
             {
                 url = url.Substring(1, url.Length - 2);
             }
-            if (Uri.TryCreate(url, UriKind.Absolute, out var uri) && uri.IsFile)
+            if (url.StartsWith("srt:", StringComparison.OrdinalIgnoreCase))
+            {
+                url = "srt://" + url.Substring(4).TrimStart('/', '\\');
+            }
+            else if (Uri.TryCreate(url, UriKind.Absolute, out var uri) && uri.IsFile)
             {
                 url = uri.LocalPath;
             }
@@ -6319,6 +6334,17 @@ namespace XivMediaPlayer
             _pluginLog.Warning(resolveEx, "[yt-dlp] Failed to resolve stream URL.");
             string errorStr = resolveEx.ToString();
 
+            if (MediaPlayerCore.YtDlp.YtDlpManager.IsDrmProtectedError(errorStr))
+            {
+                YtDlpManager.MarkUrlAsFailed(url);
+                if ((DateTime.UtcNow - _lastDrmWarningTime).TotalSeconds >= 5)
+                {
+                    _lastDrmWarningTime = DateTime.UtcNow;
+                    EnqueueFrameworkAction(() => PrintErrorChat("[Media Player] Media is DRM protected and cannot be played."));
+                }
+                return true;
+            }
+
             if (errorStr.Contains("Sign in to confirm", StringComparison.OrdinalIgnoreCase))
             {
                 EnqueueFrameworkAction(() => PrintErrorChat("[Media Player] YouTube blocked the request (bot check). Please configure cookies via VRCVideoCacher or cookies.txt to play YouTube videos!"));
@@ -6347,6 +6373,17 @@ namespace XivMediaPlayer
         private bool HandleYtDlpMetadataFailure(Exception metadataEx, string url)
         {
             string errorStr = metadataEx.ToString();
+
+            if (MediaPlayerCore.YtDlp.YtDlpManager.IsDrmProtectedError(errorStr))
+            {
+                YtDlpManager.MarkUrlAsFailed(url);
+                if ((DateTime.UtcNow - _lastDrmWarningTime).TotalSeconds >= 5)
+                {
+                    _lastDrmWarningTime = DateTime.UtcNow;
+                    EnqueueFrameworkAction(() => PrintErrorChat("[Media Player] Media is DRM protected and cannot be played."));
+                }
+                return true;
+            }
 
             if (errorStr.Contains("Sign in to confirm", StringComparison.OrdinalIgnoreCase))
             {

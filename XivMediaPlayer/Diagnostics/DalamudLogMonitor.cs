@@ -246,7 +246,10 @@ namespace XivMediaPlayer.Diagnostics
             return entry.Contains("LocalPlayer is null", StringComparison.OrdinalIgnoreCase)
                 || entry.Contains("LocalPlayer not ready yet", StringComparison.OrdinalIgnoreCase)
                 || entry.Contains("Long UiBuilder(XivMediaPlayer)", StringComparison.OrdinalIgnoreCase)
-                || entry.Contains("[HITCH]", StringComparison.OrdinalIgnoreCase);
+                || entry.Contains("[HITCH]", StringComparison.OrdinalIgnoreCase)
+                || entry.Contains("ES_OUT_SET_(GROUP_)PCR", StringComparison.OrdinalIgnoreCase)
+                || entry.Contains("DRM protected", StringComparison.OrdinalIgnoreCase)
+                || entry.Contains("DRM-protected", StringComparison.OrdinalIgnoreCase);
         }
 
         private static string RedactSensitive(string entry)
