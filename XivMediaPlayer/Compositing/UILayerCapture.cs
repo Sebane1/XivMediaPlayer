@@ -18,8 +18,6 @@ namespace XivMediaPlayer.Compositing {
     private ID3D11Device _device;
     private ID3D11Texture2D _backBufferCopy;
     private ID3D11ShaderResourceView _backBufferSRV;
-    private ID3D11Texture2D _stagingTexture;
-    private ID3D11Texture2D _unk68StagingTexture;
     private ID3D11Texture2D _previewStagingTexture;
     private int _width, _height;
     private Vortice.DXGI.Format _format;
@@ -88,10 +86,9 @@ namespace XivMediaPlayer.Compositing {
           targetSrv = null;
           
           if (!isPreUI) {
-             _stagingTexture?.Dispose();
              _previewStagingTexture?.Dispose();
-             _stagingTexture = null;
              _previewStagingTexture = null;
+             DisposeProbeRing();
              _width = (int)desc.Width;
              _height = (int)desc.Height;
              _format = desc.Format;
@@ -112,30 +109,6 @@ namespace XivMediaPlayer.Compositing {
           targetSrv = _device.CreateShaderResourceView(targetCopy);
 
           if (!isPreUI) {
-              _stagingTexture = _device.CreateTexture2D(new Texture2DDescription {
-                Width = 1,
-                Height = 1,
-                MipLevels = 1,
-                ArraySize = 1,
-                Format = desc.Format,
-                SampleDescription = new SampleDescription(1, 0),
-                Usage = ResourceUsage.Staging,
-                BindFlags = BindFlags.None,
-                CPUAccessFlags = CpuAccessFlags.Read,
-              });
-
-              _unk68StagingTexture = _device.CreateTexture2D(new Texture2DDescription {
-                Width = 1,
-                Height = 1,
-                MipLevels = 1,
-                ArraySize = 1,
-                Format = Vortice.DXGI.Format.R16G16B16A16_Float, // Unk68 is often an FP16 format
-                SampleDescription = new SampleDescription(1, 0),
-                Usage = ResourceUsage.Staging,
-                BindFlags = BindFlags.None,
-                CPUAccessFlags = CpuAccessFlags.Read,
-              });
-
               _previewStagingTexture = _device.CreateTexture2D(new Texture2DDescription {
                 Width = desc.Width,
                 Height = desc.Height,
@@ -185,68 +158,146 @@ namespace XivMediaPlayer.Compositing {
       }
     }
 
+    // Async 1x1 readback ring for IsPixelOccluding. Mapping a staging texture right after the
+    // copy stalls the CPU until the GPU finishes the frame, so we queue the copy and read it
+    // back a frame or two later instead.
+    private const int ProbeRingSize = 3;
+    private sealed class ProbeSlot {
+      public ID3D11Texture2D BackBufferStaging;
+      public ID3D11Texture2D Unk68Staging;
+      public bool Pending;
+      public bool HasUnk68;
+      public float GameDepth;
+      public bool UseDifferenceFallback;
+    }
+    private readonly ProbeSlot[] _probeRing = new ProbeSlot[ProbeRingSize];
+    private int _probeWriteIndex;
+    private bool _lastProbeOccluding;
+
     /// <summary>
-    /// Reads the pixel from the captured backbuffer to determine if the game UI is occluding this point.
+    /// Determines whether the game UI is occluding this back-buffer pixel.
     /// Uses the same difference math as the shader to ignore modded skyboxes and handle translucent UI.
+    /// The answer is non-blocking and lags the cursor by 1-2 frames.
     /// </summary>
     public bool IsPixelOccluding(int x, int y, IntPtr unk68Ptr, DepthBufferCapture depthCapture, bool useDifferenceFallback) {
-      if (_disposed || !_initialized || !_frameCaptured || _backBufferCopy == null || _stagingTexture == null) return false;
+      if (_disposed || !_initialized || !_frameCaptured || _backBufferCopy == null) return false;
       if (x < 0 || y < 0 || x >= _width || y >= _height) return false;
 
       try {
-        _context.CopySubresourceRegion(_stagingTexture, 0, 0, 0, 0, _backBufferCopy, 0, new Vortice.Mathematics.Box(x, y, 0, x + 1, y + 1, 1));
-        var mapped = _context.Map(_stagingTexture, 0, Vortice.Direct3D11.MapMode.Read, Vortice.Direct3D11.MapFlags.None);
-        
-        float nativeAlpha = 0f;
-        float bR = 0f, bG = 0f, bB = 0f;
-        unsafe {
-            byte* ptr = (byte*)mapped.DataPointer;
-            bB = ptr[0] / 255f;
-            bG = ptr[1] / 255f;
-            bR = ptr[2] / 255f;
-            nativeAlpha = ptr[3] / 255f;
+        // 1. Resolve finished probes, oldest first, without waiting on the GPU.
+        for (int i = 0; i < ProbeRingSize; i++) {
+          var slot = _probeRing[(_probeWriteIndex + i) % ProbeRingSize];
+          if (slot == null || !slot.Pending) continue;
+          if (!TryResolveProbe(slot, out bool occluding)) break;
+          _lastProbeOccluding = occluding;
         }
-        _context.Unmap(_stagingTexture, 0);
 
-        float trueAlpha = nativeAlpha;
-        
-        if (unk68Ptr != IntPtr.Zero && depthCapture != null && depthCapture.LastDepthData != null) {
+        // 2. Queue a probe for this frame's cursor position.
+        var writeSlot = _probeRing[_probeWriteIndex] ??= new ProbeSlot();
+        if (!writeSlot.Pending) {
+          if (writeSlot.BackBufferStaging == null || writeSlot.BackBufferStaging.Description.Format != _format) {
+            writeSlot.BackBufferStaging?.Dispose();
+            writeSlot.BackBufferStaging = CreateStaging1x1(_format);
+          }
+          var box = new Vortice.Mathematics.Box(x, y, 0, x + 1, y + 1, 1);
+          _context.CopySubresourceRegion(writeSlot.BackBufferStaging, 0, 0, 0, 0, _backBufferCopy, 0, box);
+
+          writeSlot.HasUnk68 = false;
+          if (unk68Ptr != IntPtr.Zero && depthCapture != null) {
             System.Runtime.InteropServices.Marshal.AddRef(unk68Ptr);
             using var unk68Srv = new ID3D11ShaderResourceView(unk68Ptr);
             using var unk68Tex = unk68Srv.Resource.QueryInterface<ID3D11Texture2D>();
-            
-            // Recreate staging texture if format doesn't match
-            if (_unk68StagingTexture == null || _unk68StagingTexture.Description.Format != unk68Tex.Description.Format) {
-                _unk68StagingTexture?.Dispose();
-                _unk68StagingTexture = _device.CreateTexture2D(new Texture2DDescription {
-                    Width = 1, Height = 1, MipLevels = 1, ArraySize = 1,
-                    Format = unk68Tex.Description.Format, SampleDescription = new SampleDescription(1, 0),
-                    Usage = ResourceUsage.Staging, BindFlags = BindFlags.None, CPUAccessFlags = CpuAccessFlags.Read,
-                });
-            }
+            var unkDesc = unk68Tex.Description;
+            if (x < unkDesc.Width && y < unkDesc.Height) {
+              if (writeSlot.Unk68Staging == null || writeSlot.Unk68Staging.Description.Format != unkDesc.Format) {
+                writeSlot.Unk68Staging?.Dispose();
+                writeSlot.Unk68Staging = CreateStaging1x1(unkDesc.Format);
+              }
+              _context.CopySubresourceRegion(writeSlot.Unk68Staging, 0, 0, 0, 0, unk68Tex, 0, box);
 
-            _context.CopySubresourceRegion(_unk68StagingTexture, 0, 0, 0, 0, unk68Tex, 0, new Vortice.Mathematics.Box(x, y, 0, x + 1, y + 1, 1));
-            var mappedUnk68 = _context.Map(_unk68StagingTexture, 0, Vortice.Direct3D11.MapMode.Read, Vortice.Direct3D11.MapFlags.None);
-            
-            float uR = 0f, uG = 0f, uB = 0f, uA = 0f;
-            unsafe {
-                if (_unk68StagingTexture.Description.Format == Vortice.DXGI.Format.R16G16B16A16_Float) {
-                    ushort* ptr16 = (ushort*)mappedUnk68.DataPointer;
-                    uR = (float)BitConverter.Int16BitsToHalf((short)ptr16[0]);
-                    uG = (float)BitConverter.Int16BitsToHalf((short)ptr16[1]);
-                    uB = (float)BitConverter.Int16BitsToHalf((short)ptr16[2]);
-                    uA = (float)BitConverter.Int16BitsToHalf((short)ptr16[3]);
-                } else {
-                    byte* ptr = (byte*)mappedUnk68.DataPointer;
-                    uR = ptr[0] / 255f;
-                    uG = ptr[1] / 255f;
-                    uB = ptr[2] / 255f;
-                    uA = ptr[3] / 255f;
-                }
+              // Depth buffer may be at a different (render) resolution than the back buffer.
+              int dx = depthCapture.DepthWidth > 0 ? (int)((long)x * depthCapture.DepthWidth / _width) : x;
+              int dy = depthCapture.DepthHeight > 0 ? (int)((long)y * depthCapture.DepthHeight / _height) : y;
+              writeSlot.GameDepth = depthCapture.GetDepthAt(dx, dy);
+              writeSlot.HasUnk68 = true;
             }
-            _context.Unmap(_unk68StagingTexture, 0);
+          }
+          writeSlot.UseDifferenceFallback = useDifferenceFallback;
+          writeSlot.Pending = true;
+          _probeWriteIndex = (_probeWriteIndex + 1) % ProbeRingSize;
+        }
 
-            float gameDepth = depthCapture.LastDepthData[y * depthCapture.DepthWidth + x];
+        return _lastProbeOccluding;
+      } catch {
+        return false;
+      }
+    }
+
+    private void DisposeProbeRing() {
+      for (int i = 0; i < ProbeRingSize; i++) {
+        _probeRing[i]?.BackBufferStaging?.Dispose();
+        _probeRing[i]?.Unk68Staging?.Dispose();
+        _probeRing[i] = null;
+      }
+      _probeWriteIndex = 0;
+      _lastProbeOccluding = false;
+    }
+
+    private ID3D11Texture2D CreateStaging1x1(Vortice.DXGI.Format format) {
+      return _device.CreateTexture2D(new Texture2DDescription {
+        Width = 1, Height = 1, MipLevels = 1, ArraySize = 1,
+        Format = format, SampleDescription = new SampleDescription(1, 0),
+        Usage = ResourceUsage.Staging, BindFlags = BindFlags.None, CPUAccessFlags = CpuAccessFlags.Read,
+      });
+    }
+
+    private bool TryResolveProbe(ProbeSlot slot, out bool occluding) {
+      occluding = false;
+      var hr = _context.Map(slot.BackBufferStaging, 0, Vortice.Direct3D11.MapMode.Read, Vortice.Direct3D11.MapFlags.DoNotWait, out MappedSubresource mapped);
+      if (hr.Failure) return false;
+
+      float nativeAlpha, bR, bG, bB;
+      unsafe {
+        byte* ptr = (byte*)mapped.DataPointer;
+        bB = ptr[0] / 255f;
+        bG = ptr[1] / 255f;
+        bR = ptr[2] / 255f;
+        nativeAlpha = ptr[3] / 255f;
+      }
+      _context.Unmap(slot.BackBufferStaging, 0);
+
+      float uR = 0f, uG = 0f, uB = 0f, uA = 0f;
+      if (slot.HasUnk68 && slot.Unk68Staging != null) {
+        // Copied in the same frame as the back-buffer pixel, so it is ready too.
+        var hr2 = _context.Map(slot.Unk68Staging, 0, Vortice.Direct3D11.MapMode.Read, Vortice.Direct3D11.MapFlags.DoNotWait, out MappedSubresource mappedUnk68);
+        if (hr2.Failure) return false;
+        unsafe {
+          if (slot.Unk68Staging.Description.Format == Vortice.DXGI.Format.R16G16B16A16_Float) {
+            ushort* ptr16 = (ushort*)mappedUnk68.DataPointer;
+            uR = (float)BitConverter.Int16BitsToHalf((short)ptr16[0]);
+            uG = (float)BitConverter.Int16BitsToHalf((short)ptr16[1]);
+            uB = (float)BitConverter.Int16BitsToHalf((short)ptr16[2]);
+            uA = (float)BitConverter.Int16BitsToHalf((short)ptr16[3]);
+          } else {
+            byte* ptr = (byte*)mappedUnk68.DataPointer;
+            uR = ptr[0] / 255f;
+            uG = ptr[1] / 255f;
+            uB = ptr[2] / 255f;
+            uA = ptr[3] / 255f;
+          }
+        }
+        _context.Unmap(slot.Unk68Staging, 0);
+      }
+      slot.Pending = false;
+      occluding = ComputeOcclusion(nativeAlpha, bR, bG, bB, slot.HasUnk68, uR, uG, uB, uA, slot.GameDepth, slot.UseDifferenceFallback);
+      return true;
+    }
+
+    private static bool ComputeOcclusion(float nativeAlpha, float bR, float bG, float bB, bool hasUnk68,
+        float uR, float uG, float uB, float uA, float gameDepth, bool useDifferenceFallback) {
+        float trueAlpha = nativeAlpha;
+
+        if (hasUnk68) {
             bool isSkybox = (gameDepth < 0.00001f);
 
             // Estimated Alpha Math
@@ -268,11 +319,8 @@ namespace XivMediaPlayer.Compositing {
                 trueAlpha = Math.Clamp(Math.Max(estimatedAlpha, alphaDiff), 0f, 1f);
             }
         }
-        
+
         return trueAlpha > 0.1f;
-      } catch {
-        return false;
-      }
     }
 
     /// <summary>
@@ -422,7 +470,7 @@ namespace XivMediaPlayer.Compositing {
     public void Dispose() {
       if (_disposed) return;
       _disposed = true;
-            _stagingTexture?.Dispose();
+      DisposeProbeRing();
       _previewStagingTexture?.Dispose();
       _backBufferSRV?.Dispose();
       _backBufferCopy?.Dispose();

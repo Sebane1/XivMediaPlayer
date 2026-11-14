@@ -5072,12 +5072,34 @@ namespace XivMediaPlayer
         #endregion
 #region UI
 
+        private bool _campfirePresent;
+        private long _lastCampfireScanTick;
+        private int _lastCaptureFrame = -1;
+
+        /// <summary>
+        /// Captures the game's depth buffer and back buffer at most once per ImGui frame,
+        /// and only when something actually consumes them this frame.
+        /// </summary>
+        private void EnsureFrameCaptures()
+        {
+            int frame = ImGui.GetFrameCount();
+            if (_lastCaptureFrame == frame) return;
+            _lastCaptureFrame = frame;
+            _depthCapture?.BeginFrame();
+            _uiCapture?.CaptureFrame();
+        }
+
         private unsafe void OnDraw()
         {
             if (_worldRenderer != null) _worldRenderer.UseDepthOcclusion = _config.DepthOcclusionEnabled;
 
-            bool useDifferenceFallback = false;
-            if (_config.EnableWanderersCampfireFix && _objectTable != null) {
+            // The object-table scan allocates a string per object; once a second is plenty
+            // for detecting a placed furnishing.
+            if (!_config.EnableWanderersCampfireFix || _objectTable == null) {
+                _campfirePresent = false;
+            } else if (Environment.TickCount64 - _lastCampfireScanTick >= 1000) {
+                _lastCampfireScanTick = Environment.TickCount64;
+                _campfirePresent = false;
                 foreach (var obj in _objectTable) {
                     if (obj == null || obj.Name == null) continue;
                     var name = obj.Name.ToString();
@@ -5086,14 +5108,19 @@ namespace XivMediaPlayer
                                          name.Contains("Wanderers Lagerfeuer", StringComparison.OrdinalIgnoreCase) ||
                                          name.Contains("Feu de camp du vagabond", StringComparison.OrdinalIgnoreCase) ||
                                          name.Contains("放浪神の焚き火", StringComparison.OrdinalIgnoreCase))) {
-                        useDifferenceFallback = true;
+                        _campfirePresent = true;
                         break;
                     }
                 }
             }
+            bool useDifferenceFallback = _campfirePresent;
 
-            // Reset per-frame depth capture flag
-            _depthCapture?.BeginFrame();
+            // Depth/back-buffer captures are only needed when a world screen is drawn or the
+            // depth debug window is open. They used to run every frame unconditionally.
+            if (_depthCapture != null)
+                _depthCapture.ReadDepthEnabled = _config.DepthOcclusionEnabled;
+            if (_depthPreviewWindow?.IsOpen == true)
+                EnsureFrameCaptures();
 
             if (!_dependencyManager.IsReady)
             {
@@ -5122,11 +5149,6 @@ namespace XivMediaPlayer
                 return;
             }
 
-            if (_uiCapture != null)
-            {
-                _uiCapture.CaptureFrame();
-            }
-
             // Decode frames every tick, even if the video window is closed,
             // so the world-space renderer always has fresh textures.
             _videoWindow.UpdateFrame();
@@ -5142,9 +5164,7 @@ namespace XivMediaPlayer
             // World-space video rendering
             if (shouldRenderWorldVideo)
             {
-                // Only read depth to CPU when occlusion is on
-                if (_depthCapture != null)
-                    _depthCapture.ReadDepthEnabled = _worldRenderer.UseDepthOcclusion;
+                EnsureFrameCaptures();
 
                 _videoWindow.GetCurrentVideoTexture(out IntPtr videoSrv, out int videoWidth, out int videoHeight, out int videoTrueWidth, out int videoTrueHeight);
                 if (videoSrv != IntPtr.Zero || roomBannersToRender.Count > 0)
