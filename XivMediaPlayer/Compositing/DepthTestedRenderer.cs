@@ -390,7 +390,7 @@ float3 SampleSoftLightColor(float2 center, float spread) {
 float3 GetProminentLightColor() {
   float3 result = float3(0, 0, 0);
   if (StaticLightSource > 0.5) {
-    // Static banner art is sharp; blur the tint so cast light on characters stays soft.
+    // Static banner art is sharp, blur the tint so cast light on characters stays soft.
     result = SampleSoftLightColor(float2(0.5, 0.5), 0.11);
   } else {
     [unroll]
@@ -689,7 +689,7 @@ float4 PS(VS_OUT input) : SV_TARGET {
                   // Base color white
                   float3 testColor = float3(1.0, 1.0, 1.0);
                   
-                  // 1. Grid background
+                  // Grid background
                   float gridX = abs(frac((centerUv.x + 0.5) * 8.0 + 0.5) - 0.5) * 16.0;
                   float gridY = abs(frac((centerUv.y + 0.5) * 8.0 + 0.5) - 0.5) * 16.0;
                   float grid = min(gridX, gridY);
@@ -700,7 +700,7 @@ float4 PS(VS_OUT input) : SV_TARGET {
                   
                   float dist = length(centerUv);
                   
-                  // 1b. Diagonal lines (X pattern) inside the large circle
+                  // Diagonal lines (X pattern) inside the large circle
                   // In the reference, they stop at the bullseye (dist > 0.25)
                   if (dist < 0.45 && dist > 0.25) {
                       float diag1 = abs(centerUv.x - centerUv.y);
@@ -708,11 +708,11 @@ float4 PS(VS_OUT input) : SV_TARGET {
                       if (diag1 < 0.003 || diag2 < 0.003) testColor = float3(0.0, 0.0, 0.0);
                   }
                   
-                  // 2. Large Outer Circle
+                  // Large Outer Circle
                   if (abs(dist - 0.45) < 0.006) testColor = float3(0.0, 0.0, 0.0);
                   if (abs(dist - 0.43) < 0.002) testColor = float3(0.0, 0.0, 0.0);
                   
-                  // 3. Corner circles
+                  // Corner circles
                   // The corners in the original overlap the outer circle, so draw them AFTER the outer circle
                   float2 corners[4] = { float2(-0.35, -0.32), float2(0.35, -0.32), float2(-0.35, 0.32), float2(0.35, 0.32) };
                   for (int i = 0; i < 4; i++) {
@@ -1003,9 +1003,6 @@ float4 PS(VS_OUT input) : SV_TARGET {
       color.a *= (1.0 - occlusion);
   }
 
-  // Room lighting: walls, characters, and other occluders — never the visible TV/banner surface.
-  // Pre-283957f used a single else here (light occluders + off-screen pixels). The occluder split
-  // removed cast light from characters blocking the screen; restore that while keeping the surface excluded.
   bool applyRoomLight = (SurfaceOnly < 0.5 || LightingOnly > 0.5)
       && (LightingOnly > 0.5 || !isInside || occlusion >= 0.999);
 
@@ -1034,14 +1031,12 @@ float4 PS(VS_OUT input) : SV_TARGET {
       float edgeInset = StaticLightSource > 0.5 ? tvSize3D * 0.2 : tvSize3D * 0.5;
       dist3D = max(0.0, dist3D - edgeInset);
       
-      // Backlight directionality fade: shine behind the screen, not on objects in front.
+      // Backlight directionality fade, shine behind the screen, not on objects in front.
       float3 dirToPixel = dist3D > 0.001 ? normalize(toPixel) : float3(0, 0, 0);
       float dotNorm = dot(dirToPixel, tvNormal);
       float directionFade = smoothstep(0.5, -0.2, dotNorm);
 
       if (StaticLightSource > 0.5) {
-          // Banners: radial falloff only. directionFade is a half-space cut (sharp plane on
-          // characters); TVs keep it because moving video masks the edge.
           float maxGlowRadius3D = max(8.0, tvSize3D * 3.0);
           float distanceFade = 1.0 - smoothstep(maxGlowRadius3D * 0.02, maxGlowRadius3D * 1.5, dist3D);
           depthMask *= distanceFade;
@@ -1088,9 +1083,7 @@ float4 PS(VS_OUT input) : SV_TARGET {
       }
   }
 
-  // The UI compositing block was moved to the bottom of the shader to draw OVER the media controls.
-  
-  // Media Controls UI overlay
+
   if (isInside && occlusion < 0.999 && HoverUV.x >= 0.0 && HoverUV.y >= 0.0 && IsLockedTV >= 0.0) {
     // History Icon Top Left (0.02 - 0.08, 0.04 - 0.12)
     if (uv.x > 0.02 && uv.x < 0.08 && uv.y > 0.04 && uv.y < 0.12) {

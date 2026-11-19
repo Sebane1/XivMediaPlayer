@@ -4492,7 +4492,7 @@ namespace XivMediaPlayer
                 if (!string.IsNullOrEmpty(lastUrl) && lastUrl.Contains("127.0.0.1")) return;
                 
                 // Only return early if we are doing a background sync and have nothing to push.
-                // If it's a foreground sync (e.g. user pressed stop, or video finished), WE MUST push the empty state!
+                // If it's a foreground sync (e.g. user pressed stop, or video finished), we push the empty state.
                 if (isBackgroundSync && string.IsNullOrEmpty(lastUrl) && string.IsNullOrEmpty(soundPath) && !_isResolvingMedia) return;
 
                 var sync = new Networking.Models.RoomMediaStateSync
@@ -5191,8 +5191,6 @@ namespace XivMediaPlayer
                               FFXIVClientStructs.FFXIV.Common.Math.Matrix4x4,
                               System.Numerics.Matrix4x4>(ref rawView);
 
-                            // FFXIV matrices often leave the 4th column uninitialized or zeroed.
-                            // We MUST set M44 = 1.0 to make it an affine transformation matrix so Invert() works!
                             view.M14 = 0f;
                             view.M24 = 0f;
                             view.M34 = 0f;
@@ -5299,8 +5297,8 @@ namespace XivMediaPlayer
                         }
                     }
 
-                    // We must calculate mouse state unconditionally every frame so that holding the mouse
-                    // and dragging it OVER the window doesn't falsely trigger a "Click" event!
+                    // We calculate mouse state unconditionally every frame so that holding the mouse
+                    // and dragging it over the window doesn't falsely trigger a "Click" event!
                     bool hasFocus = GetForegroundWindow() == _mainWindowHandle;
                     bool isLeftMousePressed = hasFocus && (GetAsyncKeyState(0x01) & 0x8000) != 0; // VK_LBUTTON
                     bool isRightMousePressed = hasFocus && (GetAsyncKeyState(0x02) & 0x8000) != 0; // VK_RBUTTON
@@ -5388,7 +5386,7 @@ namespace XivMediaPlayer
                                 }
                             }
                             
-                            // Seek Bar Drag (0.32 - 0.60, matches drawn bar at y 0.90-0.92)
+                            // Seek Bar Drag (0.32, 0.60, matches drawn bar at y 0.90-0.92)
                             if (uv.Y > 0.90f && uv.Y < 0.92f && uv.X >= 0.32f && uv.X <= 0.60f)
                             {
                                 if (activeStream != null && CanControlCurrentTvPlayback() && !BlocksYouTubeUserSeek())

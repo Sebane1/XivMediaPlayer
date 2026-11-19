@@ -113,7 +113,7 @@ namespace MediaPlayerCore
                     if (state.AvailableBytes <= position)
                     {
                         // Download finished or failed before this range. The
-                        // response ends naturally; the caller has already sent
+                        // response ends naturally, the caller has already sent
                         // the correct bounded response when a total was known.
                         break;
                     }
@@ -345,8 +345,8 @@ namespace MediaPlayerCore
 
             // TemporaryMediaCache exists for servers that do not support byte ranges
             // (e.g. some Jellyfin/emby stream endpoints). It downloads sequentially
-            // and re-exposes the file as seekable locally. That breaks range-capable
-            // self-hosted MKV. VLC needs end-of-file index reads on open, which the
+            // and re-exposes the file as seekable locally. That breaks range capable
+            // self hosted MKV. VLC needs end of file index reads on open, which the
             // sequential cache cannot serve until the entire file is buffered.
             // Skip the cache when upstream already supports random access.
             if (SupportsUpstreamByteRanges(mediaUrl, headers))
@@ -671,7 +671,6 @@ namespace MediaPlayerCore
                     if (response.StatusCode == HttpStatusCode.OK
                         && (requestedOffset > 0 || requestedEnd.HasValue))
                     {
-                        // SERVER IGNORED RANGE REQUEST. WE MUST MANUALLY DISCARD BYTES.
                         long bytesToDiscard = requestedOffset;
                         byte[] discardBuffer = new byte[81920]; // 80KB buffer
                         while (bytesToDiscard > 0)

@@ -184,7 +184,7 @@ namespace XivMediaPlayer.Compositing {
       if (x < 0 || y < 0 || x >= _width || y >= _height) return false;
 
       try {
-        // 1. Resolve finished probes, oldest first, without waiting on the GPU.
+        // Resolve finished probes, oldest first, without waiting on the GPU.
         for (int i = 0; i < ProbeRingSize; i++) {
           var slot = _probeRing[(_probeWriteIndex + i) % ProbeRingSize];
           if (slot == null || !slot.Pending) continue;
@@ -192,7 +192,7 @@ namespace XivMediaPlayer.Compositing {
           _lastProbeOccluding = occluding;
         }
 
-        // 2. Queue a probe for this frame's cursor position.
+        // Queue a probe for this frame's cursor position.
         var writeSlot = _probeRing[_probeWriteIndex] ??= new ProbeSlot();
         if (!writeSlot.Pending) {
           if (writeSlot.BackBufferStaging == null || writeSlot.BackBufferStaging.Description.Format != _format) {
