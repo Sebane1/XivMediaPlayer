@@ -343,18 +343,23 @@ namespace XivMediaPlayer.Compositing {
       // Multi screen splits that into RoomLightingOnly + CompositeOnly; lighting must stay enabled there.
       bool enableShaderRoomLighting = _enableGlow && (renderPass == WorldTvRenderPass.Full || lightingOnly);
       var (tl, tr, br, bl) = placement.Corners;
-      
-      var rtm = FFXIVClientStructs.FFXIV.Client.Graphics.Render.RenderTargetManager.Instance();
-      if (rtm != null) {
-          GetOrCreateSRV(rtm->GBuffers[2].Value, ref _lastGBuffer2Tex, ref _gbuffer2Srv);
-          GetOrCreateSRV(rtm->GBuffers[3].Value, ref _lastGBuffer3Tex, ref _gbuffer3Srv);
-          
-          var unk68 = *(FFXIVClientStructs.FFXIV.Client.Graphics.Kernel.Texture**)((byte*)rtm + 0x68);
-          GetCopiedSRV(unk68, ref _lastUnk68Tex, ref _unk68CopyTex, ref _unk68Srv);
-      }
-      
-      if (_vignetteExtractor != null && uiCapture?.BackBufferSRV != null && _unk68Srv != null && depthCapture?.CapturedSRV != null) {
-          _vignetteExtractor.Update(uiCapture.BackBufferSRV, _unk68Srv, depthCapture.CapturedSRV);
+
+      // These inputs are identical for every screen and pass in a frame; build them once.
+      int frame = ImGui.GetFrameCount();
+      if (_lastSharedInputFrame != frame) {
+        _lastSharedInputFrame = frame;
+        var rtm = FFXIVClientStructs.FFXIV.Client.Graphics.Render.RenderTargetManager.Instance();
+        if (rtm != null) {
+            GetOrCreateSRV(rtm->GBuffers[2].Value, ref _lastGBuffer2Tex, ref _gbuffer2Srv);
+            GetOrCreateSRV(rtm->GBuffers[3].Value, ref _lastGBuffer3Tex, ref _gbuffer3Srv);
+
+            var unk68 = *(FFXIVClientStructs.FFXIV.Client.Graphics.Kernel.Texture**)((byte*)rtm + 0x68);
+            GetCopiedSRV(unk68, ref _lastUnk68Tex, ref _unk68CopyTex, ref _unk68Srv);
+        }
+
+        if (_vignetteExtractor != null && uiCapture?.BackBufferSRV != null && _unk68Srv != null && depthCapture?.CapturedSRV != null) {
+            _vignetteExtractor.Update(uiCapture.BackBufferSRV, _unk68Srv, depthCapture.CapturedSRV);
+        }
       }
 
       // WorldToScreen is the source of truth for screen positions
@@ -449,7 +454,8 @@ namespace XivMediaPlayer.Compositing {
         var localBR = sBR - viewport.Pos;
         var localBL = sBL - viewport.Pos;
 
-        depthCapture.GetMinMaxDepth(out float minDepth, out float maxDepth);
+        // DynamicMin/MaxDepth are not read by the shader; skip the CPU scan.
+        const float minDepth = 0.001f, maxDepth = 1.0f;
 
         var transparentUiSrvPtr = SceneColorProbe.GetToneAdjustSourceSrvPtr();
 
@@ -528,6 +534,8 @@ namespace XivMediaPlayer.Compositing {
         RenderScreenSpace(placement, textureSrv, videoAspectRatio, viewProjMatrix, viewportPos, viewportSize, uvBottom, uvRight);
       }
     }
+
+    private int _lastSharedInputFrame = -1;
 
     private static Vector2 Bilerp(Vector2 tl, Vector2 tr, Vector2 bl, Vector2 br, float u, float v) {
       var top = Vector2.Lerp(tl, tr, u);

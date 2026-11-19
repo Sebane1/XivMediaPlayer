@@ -19,6 +19,11 @@ namespace XivMediaPlayer.Compositing {
     // Shaders
     private ID3D11VertexShader _vertexShader;
     private ID3D11PixelShader _pixelShader;
+    private ID3D11PixelShader _lightPixelShader;
+    private ID3D11Texture2D _lightTexture;
+    private ID3D11RenderTargetView _lightRTV;
+    private ID3D11ShaderResourceView _lightSRV;
+    private ID3D11RasterizerState _rasterizerState;
     private ID3D11BlendState _blendState;
     private ID3D11SamplerState _videoSampler;
     private ID3D11SamplerState _depthSampler;
@@ -214,6 +219,8 @@ Texture2D GBuffer2 : register(t5);
 Texture2D GBuffer3 : register(t6);
 Texture2D VignetteExtrapolatedTexture : register(t7);
 Texture2D IdleBrandingTexture : register(t8);
+// 1x1 result of PSLight (GetProminentLightColor), computed once per draw instead of per pixel.
+Texture2D LightColorTexture : register(t9);
 SamplerState VideoSampler : register(s0);
 SamplerState DepthSampler : register(s1);
 
@@ -397,6 +404,11 @@ float3 GetProminentLightColor() {
     result /= 144.0;
   }
   return result;
+}
+
+// Pre-pass: evaluates the (frame-constant) prominent light colour into a 1x1 target.
+float4 PSLight(VS_OUT input) : SV_TARGET {
+  return float4(GetProminentLightColor(), 1.0);
 }
 
 float GetAudioBand(int index) {
@@ -1043,7 +1055,7 @@ float4 PS(VS_OUT input) : SV_TARGET {
       }
       
       if (depthMask > 0.001) {
-          float3 prominentColor = GetProminentLightColor();
+          float3 prominentColor = LightColorTexture.Load(int3(0, 0, 0)).rgb;
           
           // Scale glow alpha by the computed video luminance.
           float luminance = dot(prominentColor, float3(0.299, 0.587, 0.114));
@@ -1294,7 +1306,9 @@ float4 PS(VS_OUT input) : SV_TARGET {
   // Check if this pixel is inside any UI bounding box
   bool insideUI = false;
   int rectType = 0; // 0 = Standard, 1 = MJI, 2 = ActionDetail
-  for (int i = 0; i < UIRectCount; i++) {
+  // Only pixels on the visible screen surface use the UI result, so skip the rect loop elsewhere.
+  bool needsUiTest = isInside && occlusion < 0.999;
+  for (int i = 0; needsUiTest && i < UIRectCount; i++) {
       float4 r = UIRects[i];
       if (pixelPos.x >= r.x && pixelPos.x <= r.x + r.z &&
           pixelPos.y >= r.y && pixelPos.y <= r.y + r.w) {
@@ -1511,6 +1525,35 @@ float4 PS(VS_OUT input) : SV_TARGET {
         }
         _pixelShader = _device.CreatePixelShader(psBytecode.Span);
 
+        if (!ShaderCompileHelper.TryCompile(ShaderCode, "PSLight", "DepthTestedRenderer.hlsl", "ps_5_0", out ReadOnlyMemory<byte> lightBytecode, out string lightError)) {
+          _initError = lightError;
+          return false;
+        }
+        _lightPixelShader = _device.CreatePixelShader(lightBytecode.Span);
+
+        _lightTexture = _device.CreateTexture2D(new Texture2DDescription {
+          Width = 1,
+          Height = 1,
+          MipLevels = 1,
+          ArraySize = 1,
+          Format = Format.R16G16B16A16_Float,
+          SampleDescription = new SampleDescription(1, 0),
+          Usage = ResourceUsage.Default,
+          BindFlags = BindFlags.RenderTarget | BindFlags.ShaderResource,
+          CPUAccessFlags = CpuAccessFlags.None,
+        });
+        _lightRTV = _device.CreateRenderTargetView(_lightTexture);
+        _lightSRV = _device.CreateShaderResourceView(_lightTexture);
+
+        // Explicit rasterizer state (no scissor) so the 1x1 light pre-pass isn't clipped by
+        // whatever scissor rect ImGui or the game left bound.
+        _rasterizerState = _device.CreateRasterizerState(new RasterizerDescription {
+          FillMode = FillMode.Solid,
+          CullMode = CullMode.None,
+          DepthClipEnable = true,
+          ScissorEnable = false,
+        });
+
         // Constant buffers (D3D11 requires constant buffer size be a multiple of 16 bytes)
         int constantBufferSize = (Marshal.SizeOf<PSConstants>() + 15) & ~15;
         int visualFxBufferSize = (Marshal.SizeOf<VisualFxConstants>() + 15) & ~15;
@@ -1620,6 +1663,7 @@ float4 PS(VS_OUT input) : SV_TARGET {
       var savedRTVs = new ID3D11RenderTargetView[1];
       ID3D11DepthStencilView savedDSV;
       _context.OMGetRenderTargets(1, savedRTVs, out savedDSV);
+      var savedRS = _context.RSGetState();
       ID3D11ShaderResourceView[]? ownedSrvs = null;
 
       try {
@@ -1757,14 +1801,29 @@ float4 PS(VS_OUT input) : SV_TARGET {
         _context.PSSetSampler(1, _depthSampler);
 
         _context.OMSetBlendState(_blendState);
-        _context.RSSetViewport(0, 0, screenWidth, screenHeight);
+        _context.RSSetState(_rasterizerState);
+
+        // Pass 1: prominent light colour (144 video samples) once, into a 1x1 target,
+        // instead of re-sampling it for every pixel on screen.
+        _context.PSSetShader(_lightPixelShader);
+        _context.RSSetViewport(0, 0, 1, 1);
+        _context.OMSetRenderTargets(_lightRTV);
+        _context.Draw(3, 0);
+
+        // Pass 2: full-screen composite.
         _context.OMSetRenderTargets(_renderTargetView);
+        _context.PSSetShaderResource(9, _lightSRV);
+        _context.PSSetShader(_pixelShader);
+        _context.RSSetViewport(0, 0, screenWidth, screenHeight);
 
         _context.Draw(3, 0);
 
         return true;
       } finally {
         _context.OMSetRenderTargets(savedRTVs, savedDSV);
+        _context.RSSetState(savedRS);
+        savedRS?.Dispose();
+        _context.PSSetShaderResource(9, (ID3D11ShaderResourceView)null);
         _context.PSSetShaderResource(0, (ID3D11ShaderResourceView)null);
         _context.PSSetShaderResource(1, (ID3D11ShaderResourceView)null);
         _context.PSSetShaderResource(2, (ID3D11ShaderResourceView)null);
@@ -1808,6 +1867,11 @@ float4 PS(VS_OUT input) : SV_TARGET {
       _visualFxConstantBuffer?.Dispose();
       _uiRectBuffer?.Dispose();
       _pixelShader?.Dispose();
+      _lightPixelShader?.Dispose();
+      _lightSRV?.Dispose();
+      _lightRTV?.Dispose();
+      _lightTexture?.Dispose();
+      _rasterizerState?.Dispose();
       _vertexShader?.Dispose();
       _device?.Dispose();
       _context?.Dispose();

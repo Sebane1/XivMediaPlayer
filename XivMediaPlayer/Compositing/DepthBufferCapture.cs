@@ -16,7 +16,6 @@ namespace XivMediaPlayer.Compositing {
     private ID3D11DeviceContext _context;
     private ID3D11Device _device;
     private ID3D11Texture2D _depthCopy;       // Our persistent copy of the depth buffer
-    private ID3D11Texture2D _stagingTexture;   // CPU-readable copy for preview
     private ID3D11DepthStencilView _depthCopyDSV; // DSV created from our copy for rendering
     private ID3D11ShaderResourceView _depthCopySRV; // SRV for shader-based depth sampling
     private int _texWidth, _texHeight;
@@ -32,9 +31,46 @@ namespace XivMediaPlayer.Compositing {
     private byte[] _lastRgbaData;
     private int _captureWidth, _captureHeight;
 
-    // Per-frame depth array for occlusion queries
+    // Per-frame depth array for occlusion queries. This is a DOWNSAMPLED copy
+    // (1/DownsampleFactor per axis) read back asynchronously a couple of frames late.
+    // The CPU only needs a few dozen point samples (glow visibility, UI hover probe);
+    // the per-pixel occlusion itself happens on the GPU against the full-res depth SRV.
     private float[] _depthData;
+    private int _smallWidth, _smallHeight;
     private bool _readDepthEnabled;
+
+    private const int DownsampleFactor = 4;
+    private const int ReadbackRingSize = 3;
+    private ID3D11Texture2D _smallDepth;
+    private ID3D11RenderTargetView _smallDepthRTV;
+    private readonly ID3D11Texture2D[] _readbackRing = new ID3D11Texture2D[ReadbackRingSize];
+    private readonly bool[] _readbackPending = new bool[ReadbackRingSize];
+    private int _readbackWriteIndex;
+    private ID3D11VertexShader _downsampleVS;
+    private ID3D11PixelShader _downsamplePS;
+    private ID3D11RasterizerState _downsampleRS;
+    private bool _downsampleUnavailable;
+
+    // Full-resolution staging texture, only created when the debug preview window asks for it.
+    private ID3D11Texture2D _previewStagingTexture;
+
+    private const string DownsampleShaderCode = @"
+Texture2D<float> DepthTex : register(t0);
+struct VS_OUT { float4 pos : SV_POSITION; };
+VS_OUT VS(uint id : SV_VertexID) {
+  VS_OUT o;
+  float2 uv = float2((id << 1) & 2, id & 2);
+  o.pos = float4(uv * float2(2, -2) + float2(-1, 1), 0, 1);
+  return o;
+}
+float PS(VS_OUT input) : SV_TARGET {
+  uint w, h;
+  DepthTex.GetDimensions(w, h);
+  // Must match DownsampleFactor (4).
+  int2 src = min(int2(input.pos.xy) * 4, int2(w - 1, h - 1));
+  return DepthTex.Load(int3(src, 0));
+}
+";
 
     /// <summary>
     /// Enable/disable per-frame CPU depth readback. Only enable when occlusion is active.
@@ -105,10 +141,11 @@ namespace XivMediaPlayer.Compositing {
         _depthCopy?.Dispose();
         _depthCopyDSV?.Dispose();
         _depthCopySRV?.Dispose();
-        _stagingTexture?.Dispose();
+        _previewStagingTexture?.Dispose();
         _depthCopyDSV = null;
         _depthCopySRV = null;
-        _stagingTexture = null;
+        _previewStagingTexture = null;
+        ReleaseReadbackResources();
 
         _texWidth = (int)texDesc.Width;
         _texHeight = (int)texDesc.Height;
@@ -153,19 +190,6 @@ namespace XivMediaPlayer.Compositing {
           ViewDimension = _sampleCount > 1 ? Vortice.Direct3D.ShaderResourceViewDimension.Texture2DMultisampled : Vortice.Direct3D.ShaderResourceViewDimension.Texture2D,
           Texture2D = new Texture2DShaderResourceView { MipLevels = 1, MostDetailedMip = 0 },
         });
-
-        // Staging texture for CPU readback (preview)
-        _stagingTexture = _device.CreateTexture2D(new Texture2DDescription {
-          Width = texDesc.Width,
-          Height = texDesc.Height,
-          MipLevels = 1,
-          ArraySize = 1,
-          Format = texDesc.Format,
-          SampleDescription = new SampleDescription(_sampleCount, _sampleQuality),
-          Usage = ResourceUsage.Staging,
-          BindFlags = BindFlags.None,
-          CPUAccessFlags = CpuAccessFlags.Read,
-        });
       }
 
       // Copy game's depth buffer to our copy
@@ -205,56 +229,166 @@ namespace XivMediaPlayer.Compositing {
     }
 
     /// <summary>
-    /// Reads depth buffer from staging texture into a cached float array.
-    /// Uses unsafe pointer access for performance (2M pixels per frame).
+    /// Asynchronous, downsampled depth readback.
+    ///
+    /// The old implementation copied the full-resolution depth buffer into a staging texture and
+    /// mapped it immediately, which forced the CPU to wait for the GPU to finish the whole frame
+    /// (a pipeline stall that roughly halved FPS), then converted every pixel on the CPU.
+    ///
+    /// Now: a tiny shader point-samples depth into a 1/4-res R32_Float target, that is copied into
+    /// a ring of staging textures, and we only map a slot once the GPU has finished with it
+    /// (MapFlags.DoNotWait). The CPU array therefore lags 1-2 frames, which is fine for the
+    /// glow-visibility and hover probes that use it.
     /// </summary>
     private void ReadDepthToArray() {
-      if (_depthCopy == null || _stagingTexture == null || _context == null) return;
-      if (!_readDepthEnabled) return;
+      if (_depthCopySRV == null || _context == null) return;
+      if (!_readDepthEnabled || _downsampleUnavailable) return;
+      if (_sampleCount > 1) return; // Shader uses Texture2D; MSAA depth is not supported here.
 
       try {
-        _context.CopyResource(_stagingTexture, _depthCopy);
-        var mapped = _context.Map(_stagingTexture, 0, MapMode.Read);
-        try {
-          if (_depthData == null || _depthData.Length != _texWidth * _texHeight) {
-            _depthData = new float[_texWidth * _texHeight];
-          }
+        if (!EnsureReadbackResources()) return;
 
-          bool isD24 = _texFormat == Format.R24G8_Typeless || _texFormat == Format.D24_UNorm_S8_UInt;
-          const float inv24 = 1.0f / 0x00FFFFFF;
-
-          for (int y = 0; y < _texHeight; y++) {
-            byte* rowPtr = (byte*)mapped.DataPointer + y * (int)mapped.RowPitch;
-            uint* row32 = (uint*)rowPtr;
-            int offset = y * _texWidth;
-
-            if (isD24) {
-              for (int x = 0; x < _texWidth; x++) {
-                _depthData[offset + x] = (row32[x] & 0x00FFFFFF) * inv24;
-              }
-            } else {
-              // D32_Float / R32_Float
-              float* rowF = (float*)rowPtr;
-              for (int x = 0; x < _texWidth; x++) {
-                _depthData[offset + x] = rowF[x];
-              }
-            }
-          }
-        } finally {
-          _context.Unmap(_stagingTexture, 0);
+        // 1. Collect any finished readbacks (oldest first) without blocking.
+        // The slot at the write index was written longest ago, so walk forward from it.
+        for (int i = 0; i < ReadbackRingSize; i++) {
+          int slot = (_readbackWriteIndex + i) % ReadbackRingSize;
+          if (!_readbackPending[slot]) continue;
+          if (!TryReadSlot(slot)) break; // still in flight; newer slots won't be ready either
         }
+
+        // 2. Queue this frame's downsample + copy into the next free slot.
+        int writeSlot = _readbackWriteIndex;
+        if (_readbackPending[writeSlot]) return; // GPU is far behind; skip queuing this frame
+
+        var savedRTVs = new ID3D11RenderTargetView[1];
+        _context.OMGetRenderTargets(1, savedRTVs, out ID3D11DepthStencilView savedDSV);
+        var savedRS = _context.RSGetState();
+        try {
+          _context.IASetInputLayout(null);
+          _context.IASetPrimitiveTopology(Vortice.Direct3D.PrimitiveTopology.TriangleList);
+          _context.VSSetShader(_downsampleVS);
+          _context.PSSetShader(_downsamplePS);
+          _context.PSSetShaderResource(0, _depthCopySRV);
+          _context.OMSetBlendState(null);
+          _context.RSSetState(_downsampleRS);
+          _context.RSSetViewport(0, 0, _smallWidth, _smallHeight);
+          _context.OMSetRenderTargets(_smallDepthRTV);
+          _context.Draw(3, 0);
+        } finally {
+          _context.PSSetShaderResource(0, (ID3D11ShaderResourceView)null);
+          _context.OMSetRenderTargets(savedRTVs, savedDSV);
+          _context.RSSetState(savedRS);
+          savedRS?.Dispose();
+          savedRTVs[0]?.Dispose();
+          savedDSV?.Dispose();
+        }
+
+        _context.CopyResource(_readbackRing[writeSlot], _smallDepth);
+        _readbackPending[writeSlot] = true;
+        _readbackWriteIndex = (writeSlot + 1) % ReadbackRingSize;
       } catch (Exception e) {
         _debugInfo = $"ReadDepth Error: {e.Message}";
       }
     }
 
+    private bool TryReadSlot(int slot) {
+      var result = _context.Map(_readbackRing[slot], 0, MapMode.Read, Vortice.Direct3D11.MapFlags.DoNotWait, out MappedSubresource mapped);
+      if (result.Failure) return false; // DXGI_ERROR_WAS_STILL_DRAWING
+
+      try {
+        int count = _smallWidth * _smallHeight;
+        if (_depthData == null || _depthData.Length != count) {
+          _depthData = new float[count];
+        }
+        fixed (float* dst = _depthData) {
+          for (int y = 0; y < _smallHeight; y++) {
+            float* row = (float*)((byte*)mapped.DataPointer + y * (int)mapped.RowPitch);
+            Buffer.MemoryCopy(row, dst + y * _smallWidth, (long)_smallWidth * sizeof(float), (long)_smallWidth * sizeof(float));
+          }
+        }
+      } finally {
+        _context.Unmap(_readbackRing[slot], 0);
+      }
+      _readbackPending[slot] = false;
+      return true;
+    }
+
+    private bool EnsureReadbackResources() {
+      int w = Math.Max(1, (_texWidth + DownsampleFactor - 1) / DownsampleFactor);
+      int h = Math.Max(1, (_texHeight + DownsampleFactor - 1) / DownsampleFactor);
+
+      if (_downsampleVS == null) {
+        if (!ShaderCompileHelper.TryCompile(DownsampleShaderCode, "VS", "DepthDownsample.hlsl", "vs_5_0", out ReadOnlyMemory<byte> vs, out _) ||
+            !ShaderCompileHelper.TryCompile(DownsampleShaderCode, "PS", "DepthDownsample.hlsl", "ps_5_0", out ReadOnlyMemory<byte> ps, out _)) {
+          _downsampleUnavailable = true;
+          _debugInfo = "Depth downsample shader failed to compile; CPU depth readback disabled.";
+          return false;
+        }
+        _downsampleVS = _device.CreateVertexShader(vs.Span);
+        _downsamplePS = _device.CreatePixelShader(ps.Span);
+        _downsampleRS = _device.CreateRasterizerState(new RasterizerDescription {
+          FillMode = FillMode.Solid,
+          CullMode = CullMode.None,
+          DepthClipEnable = true,
+          ScissorEnable = false,
+        });
+      }
+
+      if (_smallDepth != null && _smallWidth == w && _smallHeight == h) return true;
+
+      ReleaseReadbackResources();
+      _smallWidth = w;
+      _smallHeight = h;
+
+      _smallDepth = _device.CreateTexture2D(new Texture2DDescription {
+        Width = w, Height = h, MipLevels = 1, ArraySize = 1,
+        Format = Format.R32_Float,
+        SampleDescription = new SampleDescription(1, 0),
+        Usage = ResourceUsage.Default,
+        BindFlags = BindFlags.RenderTarget,
+        CPUAccessFlags = CpuAccessFlags.None,
+      });
+      _smallDepthRTV = _device.CreateRenderTargetView(_smallDepth);
+
+      for (int i = 0; i < ReadbackRingSize; i++) {
+        _readbackRing[i] = _device.CreateTexture2D(new Texture2DDescription {
+          Width = w, Height = h, MipLevels = 1, ArraySize = 1,
+          Format = Format.R32_Float,
+          SampleDescription = new SampleDescription(1, 0),
+          Usage = ResourceUsage.Staging,
+          BindFlags = BindFlags.None,
+          CPUAccessFlags = CpuAccessFlags.Read,
+        });
+        _readbackPending[i] = false;
+      }
+      _readbackWriteIndex = 0;
+      _depthData = null;
+      return true;
+    }
+
+    private void ReleaseReadbackResources() {
+      _smallDepthRTV?.Dispose();
+      _smallDepth?.Dispose();
+      _smallDepthRTV = null;
+      _smallDepth = null;
+      for (int i = 0; i < ReadbackRingSize; i++) {
+        _readbackRing[i]?.Dispose();
+        _readbackRing[i] = null;
+        _readbackPending[i] = false;
+      }
+      _depthData = null;
+    }
+
     /// <summary>
-    /// Get the depth value at a screen coordinate. Returns 0 if out of bounds.
+    /// Get the depth value at a full-resolution depth-buffer coordinate. Returns 0 if out of
+    /// bounds or if no readback has completed yet. Backed by the 1/4-res async readback.
     /// </summary>
     public float GetDepthAt(int screenX, int screenY) {
       if (_depthData == null || screenX < 0 || screenY < 0 || screenX >= _texWidth || screenY >= _texHeight)
         return 0;
-      return _depthData[screenY * _texWidth + screenX];
+      int sx = Math.Min(_smallWidth - 1, screenX / DownsampleFactor);
+      int sy = Math.Min(_smallHeight - 1, screenY / DownsampleFactor);
+      return _depthData[sy * _smallWidth + sx];
     }
 
     /// <summary>
@@ -270,8 +404,8 @@ namespace XivMediaPlayer.Compositing {
         float min = 1.0f;
         float max = 0.001f;
         
-        // Scan a grid of points instead of every pixel to save CPU
-        int step = 16;
+        // Data is already 1/4 res per axis; scan a sparse subset to save CPU
+        int step = 4;
         for (int i = 0; i < _depthData.Length; i += step) {
             float d = _depthData[i];
             if (d > 0.0001f) {
@@ -300,11 +434,20 @@ namespace XivMediaPlayer.Compositing {
     /// Generate the preview image from the captured depth copy.
     /// </summary>
     public void GeneratePreview() {
-      if (_disposed || _depthCopy == null || _stagingTexture == null) return;
+      if (_disposed || _depthCopy == null) return;
 
       try {
-        _context.CopyResource(_stagingTexture, _depthCopy);
-        var mapped = _context.Map(_stagingTexture, 0, MapMode.Read);
+        // Debug preview only: a synchronous full-res readback is acceptable here.
+        if (_previewStagingTexture == null) {
+          var d = _depthCopy.Description;
+          d.Usage = ResourceUsage.Staging;
+          d.BindFlags = BindFlags.None;
+          d.CPUAccessFlags = CpuAccessFlags.Read;
+          d.MiscFlags = ResourceOptionFlags.None;
+          _previewStagingTexture = _device.CreateTexture2D(d);
+        }
+        _context.CopyResource(_previewStagingTexture, _depthCopy);
+        var mapped = _context.Map(_previewStagingTexture, 0, MapMode.Read);
         try {
           int captureW = Math.Min(480, _texWidth);
           int captureH = Math.Min(270, _texHeight);
@@ -422,7 +565,7 @@ namespace XivMediaPlayer.Compositing {
           _debugInfo = $"Depth: {_texWidth}x{_texHeight}, Format={_texFormat}, " +
                        $"depth=[{minDepth:F6}, {maxDepth:F6}], nonZero={nonZeroCount}/{captureW * captureH}";
         } finally {
-          _context.Unmap(_stagingTexture, 0);
+          _context.Unmap(_previewStagingTexture, 0);
         }
       } catch (Exception ex) {
         _debugInfo = $"Preview error: {ex.Message}";
@@ -471,7 +614,11 @@ namespace XivMediaPlayer.Compositing {
       _depthCopyDSV?.Dispose();
       _depthCopySRV?.Dispose();
       _depthCopy?.Dispose();
-      _stagingTexture?.Dispose();
+      _previewStagingTexture?.Dispose();
+      ReleaseReadbackResources();
+      _downsampleRS?.Dispose();
+      _downsamplePS?.Dispose();
+      _downsampleVS?.Dispose();
 
       _device?.Dispose();
       _context?.Dispose();
