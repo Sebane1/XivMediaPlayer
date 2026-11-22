@@ -6098,7 +6098,7 @@ namespace XivMediaPlayer
                 }
                 catch { }
             }
-            // Clean YouTube tracking noise (si, feature, pp, etc.)
+            // Clean YouTube tracking noise
             if (url.Contains("youtube.com") || url.Contains("youtu.be"))
             {
                 try
@@ -6106,8 +6106,13 @@ namespace XivMediaPlayer
                     var ytUri = new Uri(url);
                     if (ytUri.Host.Contains("youtu.be"))
                     {
-                        // youtu.be/ID?si=noise -> just keep the path
-                        url = ytUri.GetLeftPart(UriPartial.Path);
+                        string videoId = ytUri.AbsolutePath.TrimStart('/');
+                        int slashIndex = videoId.IndexOf('/');
+                        if (slashIndex > 0) videoId = videoId.Substring(0, slashIndex);
+                        if (!string.IsNullOrEmpty(videoId))
+                        {
+                            url = $"https://www.youtube.com/watch?v={videoId}";
+                        }
                     }
                     else if (ytUri.Host.Contains("youtube.com") && ytUri.AbsolutePath.Contains("/watch"))
                     {

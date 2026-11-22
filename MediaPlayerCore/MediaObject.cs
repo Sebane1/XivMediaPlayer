@@ -389,9 +389,13 @@ namespace MediaPlayerCore {
     public bool Invalidated { get; internal set; }
     public bool SpatialAllowed { get => _spatialAllowed; set => _spatialAllowed = value; }
     public MediaManager Parent { get => _parent; set => _parent = value; }
+    public bool IsDisposed => _disposed || _isDisposing;
 
     public void Stop() {
       PlaybackStopped?.Invoke(this, "OK");
+      if (_waveOut != null) {
+        try { _waveOut.Stop(); } catch { }
+      }
       if (_vlcPlayer != null) {
         try {
           _vlcPlayer?.Stop();
@@ -402,14 +406,7 @@ namespace MediaPlayerCore {
 
     private static bool NeedsVideoCallbacks(string mediaPath, bool audioOnly)
     {
-      if (audioOnly) return false;
-      return mediaPath.StartsWith("http", StringComparison.OrdinalIgnoreCase)
-        || mediaPath.StartsWith("rtmp", StringComparison.OrdinalIgnoreCase)
-        || mediaPath.StartsWith("rtsp", StringComparison.OrdinalIgnoreCase)
-        || mediaPath.StartsWith("srt:", StringComparison.OrdinalIgnoreCase)
-        || mediaPath.EndsWith(".mp4", StringComparison.OrdinalIgnoreCase)
-        || mediaPath.EndsWith(".avi", StringComparison.OrdinalIgnoreCase)
-        || mediaPath.EndsWith(".mkv", StringComparison.OrdinalIgnoreCase);
+      return !audioOnly;
     }
 
     private static bool IsNetworkMediaPath(string mediaPath)
@@ -551,18 +548,9 @@ namespace MediaPlayerCore {
               }
 
               ApplyHttpHeadersToMedia(media, httpHeaders, userAgent);
-
-              Debug.WriteLine("[MediaObject] Parsing media...");
-              if (!_isLiveStream) {
-                await media.Parse(IsNetworkMediaPath(mediaPath)
-                  ? MediaParseOptions.ParseNetwork : MediaParseOptions.ParseLocal);
-                Debug.WriteLine($"[MediaObject] Media parsed. Duration: {media.Duration}ms");
-              } else {
-                Debug.WriteLine("[MediaObject] Skipping pre-parse for live stream.");
-              }
               
               lock (_disposeLock) {
-                if (_disposed) {
+                if (_disposed || _isDisposing) {
                    media.Dispose();
                    return;
                 }
@@ -712,14 +700,11 @@ namespace MediaPlayerCore {
             string userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
             ApplyHttpHeadersToMedia(media, httpHeaders, userAgent);
 
-            if (!_isLiveStream) {
-              await media.Parse(IsNetworkMediaPath(soundPath)
-                ? MediaParseOptions.ParseNetwork : MediaParseOptions.ParseLocal);
-            }
+            // Pre-parsing omitted to avoid blocking or premature audio leakage
             
             MediaPlayer playerToStop = null;
             lock (_disposeLock) {
-                if (_disposed) {
+                if (_disposed || _isDisposing) {
                     media.Dispose();
                     return;
                 }
@@ -735,7 +720,7 @@ namespace MediaPlayerCore {
             }
 
             lock (_disposeLock) {
-                if (_disposed) {
+                if (_disposed || _isDisposing) {
                     media.Dispose();
                     return;
                 }
@@ -933,6 +918,10 @@ namespace MediaPlayerCore {
           
           playerToStop = _vlcPlayer;
           libVlcToDispose = libVLC;
+      }
+
+      if (_waveOut != null) {
+          try { _waveOut.Stop(); } catch { }
       }
 
       if (playerToStop != null) {

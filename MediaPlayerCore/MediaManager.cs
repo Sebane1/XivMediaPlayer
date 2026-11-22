@@ -206,8 +206,13 @@ namespace MediaPlayerCore {
           streams = _playbackStreams.Values.ToArray();
           _playbackStreams.Clear();
           streams = streams.Concat(_deadStreams).ToArray();
+          _deadStreams.Clear();
       }
-      // VLC's Stop() is synchronous and blocks. Run on background thread.
+      // Stop immediately on calling thread to cut off audio/video right away
+      foreach (var stream in streams) {
+        try { stream?.Stop(); } catch { }
+      }
+      // VLC's Stop() and Dispose() are synchronous and block. Run disposal on background thread.
       Task.Run(() => {
         StopFFmpegStream();
         foreach (var stream in streams) {
@@ -250,11 +255,12 @@ namespace MediaPlayerCore {
                   }
               }
 
-              if (_playbackStreams.TryGetValue(playerObject.Name, out stream)
-                  && ShouldRecreateStream(stream, audioPath)) {
-                  _playbackStreams.TryRemove(playerObject.Name, out _);
-                  streamsToDispose.Add(stream);
-                  stream = null;
+              if (_playbackStreams.TryGetValue(playerObject.Name, out stream)) {
+                  if (stream.IsDisposed || ShouldRecreateStream(stream, audioPath)) {
+                      _playbackStreams.TryRemove(playerObject.Name, out _);
+                      streamsToDispose.Add(stream);
+                      stream = null;
+                  }
               }
 
               if (stream == null) {
@@ -265,9 +271,21 @@ namespace MediaPlayerCore {
           }
 
           if (streamsToDispose.Count > 0) {
+              // Immediately stop streams so they stop emitting audio/video before the new stream plays
+              foreach (var oldStream in streamsToDispose) {
+                  try { oldStream.Stop(); } catch { }
+              }
+              lock (_playbackStreams) {
+                  _deadStreams.AddRange(streamsToDispose);
+              }
               Task.Run(() => {
                   foreach (var oldStream in streamsToDispose) {
                       try { oldStream.Dispose(); } catch { }
+                      finally {
+                          lock (_playbackStreams) {
+                              _deadStreams.Remove(oldStream);
+                          }
+                      }
                   }
               });
           }
