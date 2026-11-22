@@ -12,7 +12,7 @@ using XivMediaPlayer;
 namespace MediaPlayerCore.YtDlp
 {
     /// <summary>
-    /// Metadata returned by yt-dlp --dump-json for a given URL.
+    /// Metadata returned by yt-dlp dump-json for a given URL.
     /// </summary>
     public class YtDlpMetadata
     {
@@ -507,11 +507,18 @@ namespace MediaPlayerCore.YtDlp
                         int read = reader.ReadBlock(bodyChars, 0, contentLength);
                         string body = new string(bodyChars, 0, read);
 
-                        // Try to parse out the cookies and save them
                         if (!string.IsNullOrEmpty(body) && body.Contains(".youtube.com"))
                         {
-                            SaveCookiesFromText(body, "VRCVideoCacher browser extension");
-                            OnStatusUpdate?.Invoke(this, "Successfully processed cookies from extension!");
+                            string filtered = FilterCookies(body);
+                            if (IsYouTubeLoginCookiesValid(filtered))
+                            {
+                                SaveCookiesFromText(filtered, "VRCVideoCacher browser extension");
+                                OnStatusUpdate?.Invoke(this, "Successfully processed authenticated cookies from extension!");
+                            }
+                            else
+                            {
+                                OnStatusUpdate?.Invoke(this, "Received extension cookies without LOGIN_INFO (not logged in). Ignoring to prevent YouTube 403s.");
+                            }
                         }
                     }
 
@@ -1009,6 +1016,13 @@ namespace MediaPlayerCore.YtDlp
                                 SabrSession session = StartSabrSession(url, isLive);
                                 if (session.Failed)
                                 {
+                                    if (sabrAttempt == 0 && (HasCookies || !string.IsNullOrEmpty(CookieBrowser)) && IsCookieAuthFailure(session.Error))
+                                    {
+                                        OnStatusUpdate?.Invoke(this, "YouTube cookies rejected (403/expired). Discarding invalid cookies and retrying with PO Token...");
+                                        InvalidateCookies();
+                                        continue;
+                                    }
+
                                     if (sabrAttempt == 0 && IsPoTokenProviderFailure(session.Error))
                                     {
                                         OnStatusUpdate?.Invoke(this, "PO Token server unreachable; restarting YouTube helper...");
@@ -1025,6 +1039,13 @@ namespace MediaPlayerCore.YtDlp
                                 if (resolvedPaths != null)
                                 {
                                     return resolvedPaths;
+                                }
+
+                                if (sabrAttempt == 0 && (HasCookies || !string.IsNullOrEmpty(CookieBrowser)) && IsCookieAuthFailure(session.Error))
+                                {
+                                    OnStatusUpdate?.Invoke(this, "YouTube cookies rejected (403/expired). Discarding invalid cookies and retrying with PO Token...");
+                                    InvalidateCookies();
+                                    continue;
                                 }
 
                                 if (sabrAttempt == 0 && IsPoTokenProviderFailure(session.Error))
@@ -1752,6 +1773,67 @@ namespace MediaPlayerCore.YtDlp
         }
 
         /// <summary>
+        /// Filters out cookies that cause YouTube auth issues (matching VRCVideoCacher rules,
+        /// e.g. stripping cookies whose names start with "ST-").
+        /// </summary>
+        public static string FilterCookies(string cookies)
+        {
+            if (string.IsNullOrEmpty(cookies)) return string.Empty;
+            var lines = cookies.Split('\n');
+            var filtered = lines.Where(line =>
+            {
+                var parts = line.Split('\t');
+                // Netscape format: domain flag path secure expiration name value
+                // Skip lines where the cookie name (index 5) starts with "ST-"
+                return parts.Length < 6 || !parts[5].StartsWith("ST-", StringComparison.Ordinal);
+            });
+            return string.Join('\n', filtered);
+        }
+
+        /// <summary>
+        /// Verifies whether YouTube cookies contain a valid signed-in account session (LOGIN_INFO).
+        /// </summary>
+        public static bool IsYouTubeLoginCookiesValid(string? cookies)
+        {
+            if (string.IsNullOrEmpty(cookies)) return false;
+            return cookies.Contains("youtube.com", StringComparison.OrdinalIgnoreCase)
+                && cookies.Contains("LOGIN_INFO", StringComparison.Ordinal);
+        }
+
+        /// <summary>
+        /// Invalidates the active cookie file (e.g. when YouTube returns 403 or cookies expired),
+        /// removing it so yt-dlp falls back cleanly to the PO Token provider.
+        /// </summary>
+        public void InvalidateCookies()
+        {
+            try
+            {
+                if (!string.IsNullOrEmpty(_cookiesPath) && File.Exists(_cookiesPath))
+                {
+                    File.Delete(_cookiesPath);
+                }
+            }
+            catch { }
+
+            _cookiesPath = null;
+            CookieBrowser = null;
+        }
+
+        /// <summary>
+        /// Checks whether yt-dlp error output indicates expired or rejected YouTube cookies.
+        /// </summary>
+        public static bool IsCookieAuthFailure(string? text)
+        {
+            if (string.IsNullOrWhiteSpace(text)) return false;
+
+            return text.Contains("cookies are no longer valid", StringComparison.OrdinalIgnoreCase)
+                || text.Contains("rotated in the browser", StringComparison.OrdinalIgnoreCase)
+                || text.Contains("HTTP Error 403: Forbidden", StringComparison.OrdinalIgnoreCase)
+                || text.Contains("unable to download video data: HTTP Error 403", StringComparison.OrdinalIgnoreCase)
+                || text.Contains("Failed to decrypt with DPAPI", StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// <summary>
         /// Saves cookie text to the plugin directory and updates the cookie path.
         /// Returns true if saved successfully.
         /// </summary>
@@ -1759,7 +1841,8 @@ namespace MediaPlayerCore.YtDlp
         {
             try
             {
-                File.WriteAllText(CookiesSavePath, cookieText);
+                string filtered = FilterCookies(cookieText);
+                File.WriteAllText(CookiesSavePath, filtered);
                 _cookiesPath = CookiesSavePath;
                 OnStatusUpdate?.Invoke(this, $"YouTube cookies saved from {source}.");
                 return true;
@@ -1820,6 +1903,11 @@ namespace MediaPlayerCore.YtDlp
             }
             catch (Exception e)
             {
+                if ((HasCookies || !string.IsNullOrEmpty(CookieBrowser)) && IsCookieAuthFailure(e.Message))
+                {
+                    OnStatusUpdate?.Invoke(this, "YouTube cookies rejected during direct stream resolution. Discarding invalid cookies...");
+                    InvalidateCookies();
+                }
                 OnError?.Invoke(this, e);
                 return null;
             }
